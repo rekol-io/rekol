@@ -77,3 +77,19 @@ def test_parse_file_rejects_missing_frontmatter(tmp_path: Path) -> None:
     path.write_text("just a body, no frontmatter")
     with pytest.raises(ValidationError):
         parse_file(path)
+
+
+def test_parse_file_rejects_non_list_scalar_for_list_field(tmp_path: Path) -> None:
+    path = tmp_path / "bad.md"
+    path.write_text(
+        "---\n"
+        "name: x\n"
+        "description: y\n"
+        "type: topic\n"
+        "tags: not-a-list\n"
+        "---\n\nbody\n"
+    )
+    with pytest.raises(ValidationError) as ei:
+        parse_file(path)
+    assert "tags" in str(ei.value)
+    assert "must be a list" in str(ei.value)
