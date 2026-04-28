@@ -134,9 +134,12 @@ def _coerce_list(meta: dict, key: str, path: Path) -> List[str]:
         A list of strings (may be empty).
 
     Raises:
-        ValidationError: If the value exists but is not a list.
+        ValidationError: If the value exists but is not a list (including
+            non-list scalars such as strings, integers, or booleans).
     """
-    value = meta.get(key) or []
+    value = meta.get(key)
+    if value is None:
+        return []
     if not isinstance(value, list):
         raise ValidationError(f"{path}: field '{key}' must be a list")
     return [str(item) for item in value]
