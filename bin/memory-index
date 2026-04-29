@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Shim for memory-index — delegates to the venv Python entrypoint.
+# Exits with code 2 if the venv has not been created by the installer.
+
+MEMORY_TOOLS_HOME="${MEMORY_TOOLS_HOME:-$HOME/.local/share/memory-tools}"
+VENV_PY="$MEMORY_TOOLS_HOME/.venv/bin/python"
+
+if [[ ! -x "$VENV_PY" ]]; then
+  printf 'memory-tools venv not found at %s/.venv; run installer.\n' \
+    "$MEMORY_TOOLS_HOME" >&2
+  exit 2
+fi
+
+exec "$VENV_PY" -m memory_tools.cli_index "$@"
