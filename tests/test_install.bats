@@ -29,8 +29,7 @@ teardown() {
         --dry-run \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     [ "$status" -eq 0 ]
 
@@ -47,8 +46,7 @@ teardown() {
     run "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     [ "$status" -eq 0 ]
 
@@ -80,8 +78,7 @@ teardown() {
     "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     HASH1="$(shasum "${MEMORY_HOME}/always/identity.md" | awk '{print $1}')"
 
@@ -89,8 +86,7 @@ teardown() {
     run "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     [ "$status" -eq 0 ]
 
@@ -120,8 +116,7 @@ teardown() {
     "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     run env MEMORY_TOOLS_HOME="${TOOLS_HOME}" \
         "${BIN_DIR}/memory-search" identity --top 2
@@ -138,9 +133,19 @@ teardown() {
         "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
-        --no-hook \
-        --no-skill
+        --test-mode
 
     [ "$status" -eq 2 ]
     [[ "$output" == *"MEMORY_HOME"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 7 — --test-mode does not modify ~/.zshrc
+# ---------------------------------------------------------------------------
+@test "test-mode does not modify ~/.zshrc" {
+    ZSHRC_BEFORE="$(md5 -q "$HOME/.zshrc" 2>/dev/null || echo '')"
+    run "${COMPONENT_DIR}/install.sh" --test-mode --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    [ "$status" -eq 0 ]
+    ZSHRC_AFTER="$(md5 -q "$HOME/.zshrc" 2>/dev/null || echo '')"
+    [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }

@@ -6,8 +6,10 @@
 #
 # Optional flags:
 #   --dry-run       print actions without executing them
-#   --no-hook       skip SessionStart hook installation
+#   --no-hook       skip SessionStart hook installation (settings.json only)
 #   --no-skill      skip Claude skill installation
+#   --no-shellrc    skip ~/.zshrc edits (PATH + MEMORY_HOME export)
+#   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
 #   --tools-home P  override default ~/.local/share/memory-tools
 #   --bin-dir P     override default ~/bin
 #
@@ -31,6 +33,7 @@ readonly ZSHRC="$HOME/.zshrc"
 DRY_RUN=0
 DO_HOOK=1
 DO_SKILL=1
+DO_SHELLRC=1
 TOOLS_HOME="$TOOLS_HOME_DEFAULT"
 BIN_DIR="$BIN_DIR_DEFAULT"
 
@@ -61,11 +64,13 @@ log_journal() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)   DRY_RUN=1;         shift ;;
-    --no-hook)   DO_HOOK=0;         shift ;;
-    --no-skill)  DO_SKILL=0;        shift ;;
-    --tools-home) TOOLS_HOME="$2";  shift 2 ;;
-    --bin-dir)   BIN_DIR="$2";      shift 2 ;;
+    --dry-run)    DRY_RUN=1;                            shift ;;
+    --no-hook)    DO_HOOK=0;                            shift ;;
+    --no-skill)   DO_SKILL=0;                           shift ;;
+    --no-shellrc) DO_SHELLRC=0;                         shift ;;
+    --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; shift ;;
+    --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
+    --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
     *)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
@@ -139,21 +144,28 @@ done
 # Step 3 — PATH in ~/.zshrc
 # =============================================================================
 
-# Only appends when BIN_DIR is not already referenced — avoids duplicate entries
-if ! grep -qs "${BIN_DIR}" "${ZSHRC}" 2>/dev/null; then
-  say "adding ${BIN_DIR} to PATH in ${ZSHRC}"
-  run "printf '\n# memory-tools\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${ZSHRC}'"
-  log_journal "APPENDED-PATH ${ZSHRC}"
+# Skipped when --no-shellrc or --test-mode is in effect — avoids polluting the
+# real ~/.zshrc during acceptance tests and CI runs.
+if [[ "$DO_SHELLRC" == "1" ]]; then
+  # Only appends when BIN_DIR is not already referenced — avoids duplicate entries
+  if ! grep -qs "${BIN_DIR}" "${ZSHRC}" 2>/dev/null; then
+    say "adding ${BIN_DIR} to PATH in ${ZSHRC}"
+    run "printf '\n# memory-tools\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${ZSHRC}'"
+    log_journal "APPENDED-PATH ${ZSHRC}"
+  fi
 fi
 
 # =============================================================================
 # Step 4 — MEMORY_HOME export in ~/.zshrc
 # =============================================================================
 
-if ! grep -qs "^export MEMORY_HOME=" "${ZSHRC}" 2>/dev/null; then
-  say "adding MEMORY_HOME export to ${ZSHRC}"
-  run "printf 'export MEMORY_HOME=\"%s\"\n' '${MEMORY_HOME}' >> '${ZSHRC}'"
-  log_journal "APPENDED-MEMORY_HOME ${ZSHRC}"
+# Skipped when --no-shellrc or --test-mode is in effect.
+if [[ "$DO_SHELLRC" == "1" ]]; then
+  if ! grep -qs "^export MEMORY_HOME=" "${ZSHRC}" 2>/dev/null; then
+    say "adding MEMORY_HOME export to ${ZSHRC}"
+    run "printf 'export MEMORY_HOME=\"%s\"\n' '${MEMORY_HOME}' >> '${ZSHRC}'"
+    log_journal "APPENDED-MEMORY_HOME ${ZSHRC}"
+  fi
 fi
 
 # =============================================================================
