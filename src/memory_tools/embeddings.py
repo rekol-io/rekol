@@ -11,12 +11,20 @@ import numpy as np
 class BaseEmbedder(ABC):
     """Abstract base class for all embedding backends.
 
-    Subclasses must implement :meth:`embed`. The default :meth:`embed_batch`
-    implementation stacks individual :meth:`embed` calls; production backends
-    should override it for batching efficiency.
+    Subclasses must implement :meth:`dim` and :meth:`embed`. The default
+    :meth:`embed_batch` implementation stacks individual :meth:`embed` calls;
+    production backends should override it for batching efficiency.
     """
 
-    dim: int
+    @property
+    @abstractmethod
+    def dim(self) -> int:
+        """Output vector dimension.
+
+        Returns:
+            The number of dimensions in each embedded vector.
+        """
+        ...
 
     @abstractmethod
     def embed(self, text: str) -> np.ndarray:
@@ -38,7 +46,10 @@ class BaseEmbedder(ABC):
 
         Returns:
             A float32 ndarray of shape ``(len(texts), self.dim)``.
+            Returns an empty matrix of shape ``(0, self.dim)`` for empty input.
         """
+        if not texts:
+            return np.empty((0, self.dim), dtype=np.float32)
         vecs = [self.embed(t) for t in texts]
         return np.vstack(vecs).astype(np.float32)
 
@@ -62,7 +73,16 @@ class HashingEmbedder(BaseEmbedder):
             dim: Output vector dimension. Defaults to 384, matching the
                 ``BAAI/bge-small-en-v1.5`` embedding dimension.
         """
-        self.dim = dim
+        self._dim = dim
+
+    @property
+    def dim(self) -> int:
+        """Output vector dimension.
+
+        Returns:
+            The number of dimensions in each embedded vector.
+        """
+        return self._dim
 
     def embed(self, text: str) -> np.ndarray:
         """Embed *text* via feature hashing.
@@ -110,7 +130,16 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
         self._model = SentenceTransformer(model_name)
-        self.dim = int(self._model.get_sentence_embedding_dimension())
+        self._dim = int(self._model.get_sentence_embedding_dimension())
+
+    @property
+    def dim(self) -> int:
+        """Output vector dimension.
+
+        Returns:
+            The number of dimensions in each embedded vector.
+        """
+        return self._dim
 
     def embed(self, text: str) -> np.ndarray:
         """Embed a single string using the loaded transformer model.
@@ -136,6 +165,8 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         Returns:
             Float32 ndarray of shape ``(len(texts), self.dim)``.
         """
+        if not texts:
+            return np.empty((0, self.dim), dtype=np.float32)
         mat = self._model.encode(texts, normalize_embeddings=True, batch_size=32)
         return np.asarray(mat, dtype=np.float32)
 

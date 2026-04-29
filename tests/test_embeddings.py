@@ -51,3 +51,23 @@ def test_get_embedder_returns_hashing_for_test_model() -> None:
 def test_get_embedder_raises_on_unknown_name() -> None:
     with pytest.raises(ValueError):
         get_embedder("not-a-real-model")
+
+
+def test_embed_batch_empty_returns_empty_matrix() -> None:
+    e = HashingEmbedder(dim=384)
+    mat = e.embed_batch([])
+    assert mat.shape == (0, 384)
+    assert mat.dtype == np.float32
+
+
+def test_base_embedder_cannot_be_instantiated() -> None:
+    """Subclasses that don't implement both `dim` and `embed` must fail to instantiate."""
+
+    class IncompleteEmbedder(BaseEmbedder):
+        @property
+        def dim(self) -> int:
+            return 8
+        # Missing embed() — should fail
+
+    with pytest.raises(TypeError):
+        IncompleteEmbedder()  # type: ignore[abstract]
