@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 
 from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
@@ -55,7 +56,7 @@ def main(
     description: str,
     tags: str,
     aliases: str,
-    body_file: str,
+    body_file: str | None,
     body: str,
 ) -> None:
     """Write a new memory file and trigger an incremental reindex.
@@ -82,16 +83,22 @@ def main(
     today = dt.date.today().isoformat()
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
+    # Use yaml.dump so that values containing YAML-special characters (e.g.
+    # "Prometheus: canonical source") are automatically quoted, keeping the
+    # emitted frontmatter valid for parse_file() at reindex time.
+    fm_data = {
+        "name": name,
+        "description": description,
+        "type": layer,
+        "tags": tag_list,
+        "aliases": alias_list,
+        "created": today,
+        "updated": today,
+    }
     frontmatter = (
         "---\n"
-        f"name: {name}\n"
-        f"description: {description}\n"
-        f"type: {layer}\n"
-        f"tags: {tag_list}\n"
-        f"aliases: {alias_list}\n"
-        f"created: {today}\n"
-        f"updated: {today}\n"
-        "---\n\n"
+        + yaml.dump(fm_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        + "---\n\n"
     )
     dest.write_text(frontmatter + body_text)
     click.echo(f"wrote {dest}")
