@@ -11,7 +11,8 @@ def store(tmp_path: Path) -> IndexStore:
     db_path = tmp_path / "index.db"
     s = IndexStore(db_path=db_path, dim=8, use_sqlite_vec=False)
     s.init_schema()
-    return s
+    yield s
+    s.close()
 
 
 def test_init_schema_creates_tables(store: IndexStore) -> None:
@@ -100,3 +101,14 @@ def test_delete_file_removes_chunks(store: IndexStore, tmp_path: Path) -> None:
     store.delete_file(str(p))
     assert store.get_file(str(p)) is None
     assert store.all_chunks_for_file(str(p)) == []
+
+
+def test_index_store_is_context_manager(tmp_path: Path) -> None:
+    db_path = tmp_path / "index.db"
+    with IndexStore(db_path=db_path, dim=8, use_sqlite_vec=False) as s:
+        s.init_schema()
+        assert "files" in s.list_tables()
+    # After exit, the underlying connection should be closed.
+    # A second operation on s.conn should raise ProgrammingError.
+    with pytest.raises(Exception):
+        s.conn.execute("SELECT 1")

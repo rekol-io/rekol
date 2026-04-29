@@ -47,11 +47,15 @@ class IndexStore:
         self.dim = dim
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON;")
-        self._vec_loaded = False
-        if use_sqlite_vec:
-            self._try_load_vec()
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON;")
+            self._vec_loaded = False
+            if use_sqlite_vec:
+                self._try_load_vec()
+        except Exception:
+            self.conn.close()
+            raise
 
     def _try_load_vec(self) -> None:
         try:
@@ -182,5 +186,12 @@ class IndexStore:
             )
         return out
 
+    def __enter__(self) -> "IndexStore":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def close(self) -> None:
+        """Close the underlying SQLite connection. Always call when done."""
         self.conn.close()
