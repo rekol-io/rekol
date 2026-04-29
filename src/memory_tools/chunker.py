@@ -153,7 +153,20 @@ def _split_oversized(chunk: Chunk, max_bytes: int) -> List[Chunk]:
     if len(chunk.text.encode("utf-8")) <= max_bytes:
         return [chunk]
 
-    paragraphs = re.split(r"\n\s*\n", chunk.text)
+    # If the section text begins with a heading line, peel it off before
+    # splitting on paragraphs.  Keeping it attached to the first content
+    # paragraph prevents the heading from flushing as a useless standalone chunk.
+    raw_paragraphs = re.split(r"\n\s*\n", chunk.text)
+    first_line = raw_paragraphs[0].splitlines()[0] if raw_paragraphs else ""
+    if HEADING_RE.match(first_line) and len(raw_paragraphs) > 1:
+        # Glue the heading line onto the first content paragraph so the buffer
+        # never flushes the heading in isolation.
+        heading_line = raw_paragraphs[0]
+        remaining = raw_paragraphs[1:]
+        remaining[0] = heading_line + "\n\n" + remaining[0]
+        paragraphs = remaining
+    else:
+        paragraphs = raw_paragraphs
     output: List[Chunk] = []
     buffer: List[str] = []
     buffer_bytes: int = 0

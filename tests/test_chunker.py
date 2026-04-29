@@ -44,3 +44,19 @@ def test_chunk_body_splits_oversized_section_by_paragraph() -> None:
 def test_chunk_body_empty_returns_empty_list() -> None:
     assert chunk_body("", max_bytes=500) == []
     assert chunk_body("   \n\n  \n", max_bytes=500) == []
+
+
+def test_chunk_body_heading_never_isolated_when_single_paragraph_is_oversized() -> None:
+    """A heading line must not flush as its own chunk; it glues to the first paragraph."""
+    big_para = "x " * 400   # ~800 bytes
+    body = f"# Section\n\n{big_para}\n"
+    chunks = chunk_body(body, max_bytes=500)
+    # The heading must appear with content, not as a standalone chunk
+    assert all(
+        not (c.text.strip().startswith("# ") and len(c.text.splitlines()) == 1)
+        for c in chunks
+    ), "No chunk may be a heading-only line"
+    # First chunk carries the heading text AND has content after it
+    assert chunks[0].heading == "Section"
+    assert chunks[0].text.startswith("# Section")
+    assert len(chunks[0].text) > len("# Section") + 10
