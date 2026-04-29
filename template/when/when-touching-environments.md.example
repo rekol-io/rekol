@@ -1,0 +1,18 @@
+---
+name: Before scoping an ops task
+description: Apply operations to all environments unless explicitly told otherwise
+type: when
+tags: [environments, ops, scope]
+aliases: [which environment, all envs, scope, environments]
+see_also: [always/environments.md]
+created: 2026-04-27
+updated: 2026-04-27
+---
+
+# Before scoping an ops task
+
+Replace this body with your environment conventions. Example shape:
+
+- List all environments you operate across.
+- State the default: "apply to all" vs "ask which" — pick one.
+- Document any PRD/account mappings per environment.

@@ -1,0 +1,18 @@
+---
+name: Prometheus — canonical source
+description: Where the Prometheus URL, config, and Helm values come from
+type: topic
+tags: [prometheus, monitoring, helm, iac, urls]
+aliases: [prom, prometheus url, metrics endpoint, helm values]
+see_also: [topics/reaper.md]
+created: 2026-04-27
+updated: 2026-04-27
+---
+
+# Prometheus — canonical source
+
+The truth for Prometheus URL/config lives in the IaC repo. Do not derive from
+Grafana, SSH into a box, or ask the user. Record the exact repo path below.
+
+- Canonical source: `<repo>/<path>/values.yaml` (edit this line to point to your actual repo)
+- Derived views: Grafana dashboards, CloudWatch, deployed pod env vars — do not treat these as source of truth.
