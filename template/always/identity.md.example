@@ -1,0 +1,14 @@
+---
+name: Identity
+description: Who I am, role, platform
+type: always
+tags: [identity, profile]
+aliases: [me, who am i]
+created: 2026-04-27
+updated: 2026-04-27
+---
+
+# Identity
+
+Replace this with your own identity: name, role, team, primary technologies.
+Keep this file under 1 KB — the `always/` directory has a hard 8 KB budget.
