@@ -65,3 +65,18 @@ All queries performed with `--top 3`, paths trimmed to relative form (`mem/…`)
   sha check (the hash only covers `always/*.md`, `when/*.md`, `topics/*.md`), so the config override
   survives the rerun unaffected.
 - All 8 criteria: PASS.
+
+## Bugs / Improvement Opportunities Found
+
+1. **`--no-hook` does not suppress PATH injection** (`install.sh` Step 3): When `--bin-dir` is
+   a temp path, the installer appends `export PATH="…/tmp.XXX/bin:$PATH"` to `~/.zshrc` even
+   with `--no-hook`. This is because PATH injection is not gated on `DO_HOOK`. Suggested fix:
+   add `--no-path` flag, or gate Step 3 on `DO_HOOK`, or only inject when `BIN_DIR` is under
+   a permanent location. Entries were cleaned up manually after the test run.
+   Affected lines: install.sh ~139-146 (Step 3).
+
+2. **`jq` fails to parse `--json` output in `$()` subshell when headings contain Unicode**:
+   The em dash in `"Prometheus — canonical source"` is rendered as `—` in JSON, which
+   triggers a `jq` control-character parse error when the JSON is captured via `result=$(...)`.
+   Workaround: pipe to a temp file and parse with python3. Direct pipe (`... | jq`) works fine.
+   The `--json` output itself is valid; this is a shell/jq interaction edge case.
