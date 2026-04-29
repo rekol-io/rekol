@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable
 
 from .chunker import chunk_body
 from .embeddings import BaseEmbedder
@@ -121,6 +121,12 @@ class Indexer:
                 self.store.delete_file(str(path))
                 stats.files_skipped += 1
                 continue
+            except Exception:
+                # Unexpected failure (embedder or store) — roll back and re-raise
+                # so the caller sees the error rather than silently leaving a
+                # ghost files row with no chunks.
+                self.store.delete_file(str(path))
+                raise
             stats.files_indexed += 1
             stats.chunks_written += n
         self._write_index_md()
@@ -151,6 +157,12 @@ class Indexer:
                 self.store.delete_file(str(path))
                 stats.files_skipped += 1
                 continue
+            except Exception:
+                # Unexpected failure (embedder or store) — roll back and re-raise
+                # so the caller sees the error rather than silently leaving a
+                # ghost files row with no chunks.
+                self.store.delete_file(str(path))
+                raise
             stats.files_indexed += 1
             stats.chunks_written += n
         for old_path in list(existing.keys()):

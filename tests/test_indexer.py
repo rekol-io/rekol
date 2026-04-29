@@ -85,7 +85,7 @@ def test_rebuild_writes_INDEX_md(memory_root: Path) -> None:
     assert "# Memory Index" in index_md
 
 
-def test_skips_files_with_bad_frontmatter(memory_root: Path, tmp_path: Path) -> None:
+def test_skips_files_with_bad_frontmatter(memory_root: Path) -> None:
     bad = memory_root / "topics" / "broken.md"
     bad.write_text("no frontmatter at all\n")
     idx = _make_indexer(memory_root)
@@ -93,3 +93,34 @@ def test_skips_files_with_bad_frontmatter(memory_root: Path, tmp_path: Path) -> 
     # 3 good files still indexed; broken skipped
     assert stats.files_indexed == 3
     assert stats.files_skipped == 1
+
+
+def test_rebuild_rolls_back_file_on_embed_failure(memory_root: Path) -> None:
+    """If the embedder raises after the files row is upserted, that file must be removed."""
+
+    class FlakyEmbedder(HashingEmbedder):
+        def __init__(self, fail_on_name: str) -> None:
+            super().__init__(dim=384)
+            self._fail_on_name = fail_on_name
+            self._calls = 0
+
+        def embed_batch(self, texts):
+            # Raise when embedding the Prometheus file's chunks
+            import numpy as np
+            if any(self._fail_on_name in t for t in texts):
+                raise RuntimeError("simulated embedder failure")
+            return super().embed_batch(texts)
+
+    store = IndexStore(db_path=memory_root / ".index" / "index.db",
+                       dim=384, use_sqlite_vec=False)
+    store.init_schema()
+    emb = FlakyEmbedder(fail_on_name="Prometheus")
+    idx = Indexer(memory_root=memory_root, store=store, embedder=emb)
+
+    with pytest.raises(RuntimeError):
+        idx.rebuild()
+
+    # The Prometheus file must NOT be in the files table (rolled back)
+    prom_path = str(memory_root / "topics" / "prometheus.md")
+    assert store.get_file(prom_path) is None
+    store.close()
