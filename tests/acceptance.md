@@ -80,3 +80,46 @@ All queries performed with `--top 3`, paths trimmed to relative form (`mem/…`)
    triggers a `jq` control-character parse error when the JSON is captured via `result=$(...)`.
    Workaround: pipe to a temp file and parse with python3. Direct pipe (`... | jq`) works fine.
    The `--json` output itself is valid; this is a shell/jq interaction edge case.
+
+---
+
+## memory-migrate acceptance — 2026-04-29
+
+Validated the new `memory-migrate` CLI end-to-end. Two runs:
+
+### Synthetic run (disposable HOME + MEMORY_HOME, real legacy files)
+
+Seeded a fake `~/.claude/projects/-fake-test-project/memory/` with the 10 files
+from the cassandra-team-workspace `old-memory-archive/` (real legacy content:
+4 `feedback_*`, 5 `project_*`, 1 `reference_*`).
+
+| # | Criterion | Result |
+|---|-----------|--------|
+| 1 | `memory-migrate auto --dry-run` reports expected count | ✅ "would migrate 10 (heuristic=10, llm=0)" |
+| 2 | `--commit` routes feedback → `when/`, project/reference → `topics/` | ✅ 4 files in when/, 6 in topics/, 0 in always/knowledge |
+| 3 | Frontmatter rewritten: `type:` matches target layer | ✅ sampled when/ + topics/ — both show correct rewritten type |
+| 4 | Body preserved verbatim | ✅ full original content intact |
+| 5 | Originals archived into `old-memory-archive/` | ✅ 10 files archived |
+| 6 | Source `MEMORY.md` replaced with retirement pointer | ✅ first line matches "# RETIRED — migrated to memory-tools $MEMORY_HOME (2026-04-29)" |
+| 7 | Second run is idempotent no-op | ✅ "nothing to migrate: no legacy memory directories found." |
+| 8 | `memory-migrate repo <path>` with no-frontmatter file routes to `knowledge/` under `--no-llm` | ✅ file landed in knowledge/ |
+
+### Real-machine run
+
+Machine's only legacy memory dir (cassandra-team-workspace) was already retired
+by the earlier hand-migration, so both `--dry-run` and `--commit` correctly
+reported "nothing to migrate: no legacy memory directories found." Future
+machines with un-retired legacy memory will be migrated automatically by the
+mac_setup phase 3 install hook.
+
+### Notes / observations
+
+- `--no-llm` was used throughout; the heuristic path handled all 10 files by
+  reading their `type:` frontmatter. The LLM fallback is exercised by unit
+  tests (mocked) and only fires for files without recognizable frontmatter.
+- Filename casing: files with a leading-dash project_slug (auto-memory dirs
+  like `-Users-leon-katz-...`) produce output filenames that start with `-`
+  (e.g. `topics/-Users-leon-katz-...-heartbeat.md`). Functional but visually
+  ugly — not fixed in v1 since the plan specified `parent.name` verbatim.
+- No regressions in the pre-existing 40-test suite. Full memory-tools test
+  count after T0–T7: 86 passed.
