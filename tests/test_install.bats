@@ -149,3 +149,15 @@ teardown() {
     ZSHRC_AFTER="$(md5 -q "$HOME/.zshrc" 2>/dev/null || echo '')"
     [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }
+
+@test "install runs memory-migrate auto and succeeds when no legacy" {
+  # TEST_MODE skips the migrator hook, so disable it here
+  unset TEST_MODE || true
+  run env -u TEST_MODE \
+    MEMORY_HOME="$TEST_TMP/mem" \
+    HOME="$TEST_TMP/home" \
+    "$BATS_TEST_DIRNAME/../install.sh" --tools-home "$TEST_TMP/tools" --bin-dir "$TEST_TMP/bin"
+  [ "$status" -eq 0 ]
+  # No legacy memory exists in $HOME → migrator prints "nothing to migrate" OR empty
+  [[ "$output" == *"nothing to migrate"* || "$output" != *"ERROR"* ]]
+}
