@@ -34,6 +34,7 @@ DRY_RUN=0
 DO_HOOK=1
 DO_SKILL=1
 DO_SHELLRC=1
+TEST_MODE=0
 TOOLS_HOME="$TOOLS_HOME_DEFAULT"
 BIN_DIR="$BIN_DIR_DEFAULT"
 
@@ -68,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     --no-hook)    DO_HOOK=0;                            shift ;;
     --no-skill)   DO_SKILL=0;                           shift ;;
     --no-shellrc) DO_SHELLRC=0;                         shift ;;
-    --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; shift ;;
+    --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
     --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
     --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
     *)
@@ -290,6 +291,26 @@ if [[ -f "${MEMORY_HOME}/.index/index.db" ]]; then
 else
   say "no index found — running memory-index rebuild"
   run "MEMORY_TOOLS_HOME='${TOOLS_HOME}' '${BIN_DIR}/memory-index' rebuild"
+fi
+
+# =============================================================================
+# Step 10 — Migrate legacy memory (no-op when none found)
+# =============================================================================
+# Runs memory-migrate auto after seeding to bring any legacy ~/.claude/projects/*/memory/
+# content into $MEMORY_HOME.  Idempotent — dirs with a retirement pointer are skipped.
+# Uses --no-llm because Bedrock creds may not be available at install time; users
+# who want LLM classification can rerun `memory-migrate auto --commit` manually.
+
+say "checking for legacy memory to migrate"
+if [[ "${TEST_MODE}" == "1" ]]; then
+  say "test-mode: skipping memory-migrate"
+else
+  # Use the just-installed memory-migrate CLI; idempotent, silent on no-op.
+  if "${TOOLS_HOME}/.venv/bin/memory-migrate" auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
+    log_journal "MIGRATED legacy memory (auto)"
+  else
+    say "memory-migrate auto failed (non-fatal)"
+  fi
 fi
 
 # =============================================================================
