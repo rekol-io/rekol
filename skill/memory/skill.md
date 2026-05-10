@@ -1,50 +1,25 @@
 ---
 name: memory
-description: Use this skill whenever you might benefit from the persistent memory system — to consult stored context, write new memories, or look up canonical sources. Triggers: user says "remember this"/"save this"; user corrects or re-explains something; user asks about a topic that might have a canonical source; before any activity that has a `when/when-<activity>.md` rule.
+description: Persistent memory at $MEMORY_HOME. Trigger on "remember"/"save"/"forget", on a user correction, on a noun matching topics/<noun>.md or activity matching when/when-<activity>.md, or when a question might have a canonical source.
 ---
 
-# memory skill
+# memory
 
-You have access to a persistent memory system rooted at `$MEMORY_HOME`.
+Memory root: `$MEMORY_HOME`. Layers: `always/`, `when/`, `topics/`, `knowledge/`. Index: `MEMORY.md` (always-on), `.index/INDEX.md` (auto-generated).
 
-## Four retrieval paths — use all of them
+## Retrieve
 
-1. **`MEMORY.md`** — already in context. Scan for trigger-phrased pointers that match the user's intent.
-2. **Tags and aliases** — `grep -rE "^(tags|aliases):" "$MEMORY_HOME"` to find files by keyword.
-3. **Inter-file links and `see_also`** — follow them when reading any memory file.
-4. **`memory-search "query" --top 5 --json`** — semantic fallback when paths 1–3 miss.
+1. `MEMORY.md` already in context — scan for trigger pointers.
+2. Match user nouns → `topics/<noun>.md`. Match activities → `when/when-<activity>.md`.
+3. `grep -rE "^(tags|aliases):" "$MEMORY_HOME"` for keyword lookup.
+4. Fallback: `memory-search "phrase" --top 5 --json`.
 
-Always try paths 1–3 before falling back to path 4.
+## Capture
 
-## Retrieval protocol
+Only on explicit "remember this" / correction / new canonical source. Never silent.
 
-- If the user's request matches a `when/when-<activity>.md` trigger, read that file first.
-- If a noun in the request matches `topics/<noun>.md`, read it.
-- Otherwise, run `memory-search`.
-- If nothing relevant, answer from general knowledge and offer to save the new context.
+1. Propose layer + filename + frontmatter (`name`, `description`, `type`, `tags`, `aliases`, `see_also`).
+2. `memory-capture --layer <L> --file <name>.md --name "..." --description "..." [--tags a,b] [--aliases x,y]`
+3. Update `MEMORY.md` only if the memory deserves always-on status.
 
-## Capture protocol (writing to memory)
-
-Triggered by:
-- Explicit "remember this" / "save this to memory."
-- Detected correction ("you forgot," "I told you before").
-- Learning a new canonical source.
-
-Steps:
-1. Propose the layer (`always` / `when` / `topic` / `knowledge`) and target file.
-2. Propose frontmatter: `name`, `description`, `type`, `tags`, `aliases`, `see_also`.
-3. Write the file via `memory-capture --layer ... --file ...` OR by writing the file directly and then running `memory-index update`.
-4. Update `MEMORY.md` **only if** the memory deserves always-on status.
-5. Confirm with a one-line summary.
-
-No silent saves.
-
-## Budget
-
-`always/*.md` has an 8 KB hard cap. If adding to `always/` would exceed it, route the memory to `topics/` or `when/` instead.
-
-## CLIs
-
-- `memory-index rebuild | update`
-- `memory-search "query" [--top N] [--json]`
-- `memory-capture --layer <L> --file <name.md> --name "..." --description "..." [--tags a,b,c] [--aliases x,y]`
+`always/` has an 8 KB hard cap — overflow goes to `topics/` or `when/`.

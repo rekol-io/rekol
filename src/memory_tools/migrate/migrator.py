@@ -133,9 +133,14 @@ def migrate_dir(
             write_retirement_pointer(source_dir, memory_home=memory_home)
         return report
 
-    index_md = memory_home / "INDEX.md"
-    index_context = index_md.read_text(encoding="utf-8", errors="replace") \
-        if index_md.exists() else ""
+    # INDEX.md lives under .index/ on current installs; fall back to the
+    # legacy root location for compatibility with already-deployed setups.
+    index_candidates = [memory_home / ".index" / "INDEX.md", memory_home / "INDEX.md"]
+    index_context = ""
+    for candidate in index_candidates:
+        if candidate.exists():
+            index_context = candidate.read_text(encoding="utf-8", errors="replace")
+            break
 
     # Snapshot of body hashes already present in memory_home — drives dedup
     # below.  Updated as we migrate so duplicates within this batch also skip.
@@ -185,7 +190,21 @@ def migrate_dir(
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"write/archive failed for {lf.source_path}: {exc}")
 
-    if not dry_run and (report.migrated > 0 or report.skipped_duplicate > 0):
+    # Write the migration marker if anything was processed — even a fully-failed
+    # batch.  Without this, a source dir whose every file fails classification
+    # (e.g., corrupted YAML on every file) would be retried on every install,
+    # accumulating identical errors forever.  Trade-off: the operator must read
+    # the install journal / report.errors to discover the failure rather than
+    # noticing repeated retry attempts.  Acceptable, because errors counts ARE
+    # surfaced in the install output.  The dir is NOT marked when zero files
+    # were even attempted (handled by the earlier early-return when files == [])
+    # or when dry-running.
+    progressed = (
+        report.migrated > 0
+        or report.skipped_duplicate > 0
+        or len(report.errors) > 0
+    )
+    if not dry_run and progressed:
         write_retirement_pointer(source_dir, memory_home=memory_home)
 
     return report

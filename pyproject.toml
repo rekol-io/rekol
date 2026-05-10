@@ -23,6 +23,8 @@ test = ["pytest>=8", "pytest-cov>=5"]
 memory-index = "memory_tools.cli_index:main"
 memory-search = "memory_tools.cli_search:main"
 memory-capture = "memory_tools.cli_capture:main"
+memory-invalidate = "memory_tools.cli_invalidate:main"
+memory-propose = "memory_tools.cli_propose:main"
 memory-migrate = "memory_tools.cli_migrate:main"
 
 [tool.setuptools.packages.find]

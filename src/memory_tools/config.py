@@ -13,7 +13,7 @@ DEFAULTS: dict = dict(
     always_on_budget_bytes=8192,
     secret_check_on_capture=True,
     git_track=False,
-    chunk_max_bytes=4000,
+    chunk_max_bytes=1500,
 )
 
 
