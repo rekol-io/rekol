@@ -79,10 +79,25 @@ def test_update_removes_deleted_files_from_index(memory_root: Path) -> None:
 def test_rebuild_writes_INDEX_md(memory_root: Path) -> None:
     idx = _make_indexer(memory_root)
     idx.rebuild()
-    index_md = (memory_root / "INDEX.md").read_text()
+    # INDEX.md lives under .index/ to keep the memory_root surface clean —
+    # only MEMORY.md (always-on) belongs at the root.
+    index_md = (memory_root / ".index" / "INDEX.md").read_text()
     assert "prometheus" in index_md.lower()
     assert "repos" in index_md.lower()
     assert "# Memory Index" in index_md
+    # Legacy root-level INDEX.md must not exist after a rebuild
+    assert not (memory_root / "INDEX.md").exists()
+
+
+def test_rebuild_removes_legacy_root_INDEX_md(memory_root: Path) -> None:
+    """A pre-existing root-level INDEX.md from older installs must be cleaned
+    up so Claude does not speculatively read 6KB of pointers as memory."""
+    legacy = memory_root / "INDEX.md"
+    legacy.write_text("# Legacy stale content\n")
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+    assert not legacy.exists()
+    assert (memory_root / ".index" / "INDEX.md").is_file()
 
 
 def test_skips_files_with_bad_frontmatter(memory_root: Path) -> None:

@@ -45,6 +45,12 @@ class MemoryFile:
         see_also: Relative paths to related memory files.
         created: ISO-8601 creation date string, if present.
         updated: ISO-8601 last-updated date string, if present.
+        valid_from: ISO-8601 date this memory's facts started being true.
+            Defaults to ``created`` when absent.  Bi-temporal model: lets you
+            represent "what did I believe in March?" instead of overwriting.
+        invalidated_at: ISO-8601 date this memory's facts stopped being true.
+            ``None`` means the memory is still valid.  Search and retrieval
+            paths should de-prioritize invalidated memories.
     """
 
     path: Path
@@ -57,6 +63,13 @@ class MemoryFile:
     see_also: List[str] = field(default_factory=list)
     created: Optional[str] = None
     updated: Optional[str] = None
+    valid_from: Optional[str] = None
+    invalidated_at: Optional[str] = None
+
+    @property
+    def is_invalidated(self) -> bool:
+        """True if this memory has been explicitly invalidated."""
+        return self.invalidated_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +124,10 @@ def parse_file(path: Path) -> MemoryFile:
         see_also=_coerce_list(meta, "see_also", path),
         created=str(meta["created"]) if meta.get("created") else None,
         updated=str(meta["updated"]) if meta.get("updated") else None,
+        valid_from=str(meta["valid_from"]) if meta.get("valid_from") else None,
+        invalidated_at=(
+            str(meta["invalidated_at"]) if meta.get("invalidated_at") else None
+        ),
     )
 
 

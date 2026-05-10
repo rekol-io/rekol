@@ -120,6 +120,48 @@ def test_migrate_dir_missing_source_is_empty_report(tmp_path: Path) -> None:
     assert report.skipped_missing == 1
 
 
+def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> None:
+    """Stuck-state regression: when every file in source_dir fails classification,
+    the migration marker must still be written so subsequent runs skip cleanly
+    instead of looping forever on the same broken corpus.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "broken-proj" / "memory"
+    src.mkdir(parents=True)
+    # No frontmatter at all → heuristic_classify returns None.  With allow_llm=False,
+    # classify_file falls back to "knowledge" — that's not a failure mode that
+    # populates report.errors.  To simulate genuine classification failure we need
+    # to monkey-patch classify_file.  Easier: write a file that classify_file's
+    # frontmatter loader cannot parse at all.
+    (src / "x.md").write_text("---\n: : :\n: not valid yaml\n---\nbody\n")
+    (src / "y.md").write_text("---\n@@@@\n---\nbody\n")
+
+    from memory_tools.migrate import classify
+    original = classify.classify_file
+
+    def failing_classify(*args, **kwargs):
+        raise RuntimeError("simulated classification failure")
+
+    classify.classify_file = failing_classify
+    # The migrator imports classify_file by name at module load — patch it there too.
+    from memory_tools.migrate import migrator
+    migrator.classify_file = failing_classify
+    try:
+        report = migrate_dir(source_dir=src, memory_home=memory_home,
+                            dry_run=False, allow_llm=False)
+    finally:
+        classify.classify_file = original
+        migrator.classify_file = original
+
+    assert report.migrated == 0
+    assert len(report.errors) == 2
+    # Marker must still be written so re-runs skip
+    assert (src / MIGRATION_MARKER_NAME).is_file()
+
+
 def test_migrate_dir_dedupes_byte_identical_bodies(tmp_path: Path) -> None:
     """Two source dirs holding the same legacy file under different project
     slugs must migrate the body once and skip the second copy.

@@ -12,6 +12,7 @@ from pathlib import Path
 import click
 import yaml
 
+from memory_tools.chunker import chunk_body
 from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
 from memory_tools.indexer import Indexer
@@ -32,6 +33,12 @@ _LAYER_DIR_MAP: dict[str, str] = {
 }
 
 
+# Default cosine-similarity threshold above which a candidate body is treated
+# as a near-duplicate of an existing memory chunk.  0.85 is empirically a good
+# balance for BGE-small embeddings — meaningful overlap, not just topical.
+CONFLICT_THRESHOLD = 0.85
+
+
 @click.command()
 @click.option("--layer", type=click.Choice(LAYERS), required=True,
               help="Memory layer: always | when | topic | knowledge.")
@@ -49,6 +56,19 @@ _LAYER_DIR_MAP: dict[str, str] = {
               help="Path to a file containing the markdown body.")
 @click.option("--body", default="",
               help="Inline markdown body (used when --body-file is not provided).")
+@click.option("--force", is_flag=True, default=False,
+              help="Skip the near-duplicate check and write anyway.")
+@click.option("--conflict-threshold", type=float, default=CONFLICT_THRESHOLD,
+              show_default=True,
+              help="Cosine-similarity threshold above which a candidate body is "
+                   "treated as a near-duplicate.")
+@click.option("--valid-from", default=None,
+              help="ISO-8601 date this memory's facts started being true. "
+                   "Defaults to today.")
+@click.option("--project", "project_slug", default=None,
+              help="Scope this memory to a project. Writes to "
+                   "projects/<slug>/<layer>/<file> instead of <layer>/<file>. "
+                   "Use a kebab-case slug like 'math-evolution-agent'.")
 def main(
     layer: str,
     filename: str,
@@ -58,14 +78,32 @@ def main(
     aliases: str,
     body_file: str | None,
     body: str,
+    force: bool,
+    conflict_threshold: float,
+    valid_from: str | None,
+    project_slug: str | None,
 ) -> None:
     """Write a new memory file and trigger an incremental reindex.
 
     Refuses to overwrite an existing file — rename or delete it first if
     you need to replace it.
+
+    Also runs a semantic conflict check: if the candidate body is highly
+    similar (cosine ≥ ``--conflict-threshold``) to an already-indexed chunk,
+    the write is rejected with the conflicting file's path so the operator
+    can decide whether to update the existing memory instead of creating a
+    new one.  Use ``--force`` to bypass.
     """
     cfg = load_config()
-    dest_dir = cfg.memory_home / _LAYER_DIR_MAP[layer]
+    if project_slug:
+        # Validate slug — kebab-case, no path separators, no leading dot.
+        if not project_slug.replace("-", "").replace("_", "").isalnum():
+            raise click.ClickException(
+                f"--project slug must be alphanumeric/dash/underscore, got {project_slug!r}"
+            )
+        dest_dir = cfg.memory_home / "projects" / project_slug / _LAYER_DIR_MAP[layer]
+    else:
+        dest_dir = cfg.memory_home / _LAYER_DIR_MAP[layer]
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / filename
     if dest.exists():
@@ -94,18 +132,55 @@ def main(
         "aliases": alias_list,
         "created": today,
         "updated": today,
+        "valid_from": valid_from or today,
     }
     frontmatter = (
         "---\n"
         + yaml.dump(fm_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
         + "---\n\n"
     )
-    dest.write_text(frontmatter + body_text)
-    click.echo(f"wrote {dest}")
 
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
+
+    # Conflict check: chunk the candidate body the same way the indexer does,
+    # then check each chunk against existing stored chunks.  Embedding the
+    # full body and comparing against per-chunk stored embeddings would
+    # underestimate similarity for any file larger than chunk_max_bytes — the
+    # full-body vector and a chunk-slice vector represent different spans of
+    # text, so cosine drops below the threshold even for true duplicates.
+    # Skipped on --force, and silently no-ops when the index is empty.
+    if not force:
+        candidate_chunks = chunk_body(body_text, max_bytes=cfg.chunk_max_bytes)
+        if candidate_chunks:
+            texts_to_check = [f"{name}\n{c.text}" for c in candidate_chunks]
+        else:
+            # Empty body falls back to the indexer's empty-body convention:
+            # one chunk consisting of "{name}: {description}".
+            texts_to_check = [f"{name}: {description}"]
+
+        # Stop at the first chunk that hits the threshold so the error message
+        # points at the most-relevant overlap rather than the highest-scoring
+        # in aggregate.
+        for cand_text in texts_to_check:
+            candidate_vec = embedder.embed(cand_text)
+            hits = store.search(candidate_vec, top_k=1)
+            if hits and hits[0]["score"] >= conflict_threshold:
+                top = hits[0]
+                raise click.ClickException(
+                    f"near-duplicate memory exists "
+                    f"(cosine={top['score']:.3f}, threshold={conflict_threshold:.2f})\n"
+                    f"  existing: {top['file_path']}\n"
+                    f"  heading:  {top['heading'] or '(no heading)'}\n"
+                    f"  excerpt:  {top['text'][:200]!r}\n"
+                    f"\nRecommend: update the existing file instead of creating "
+                    f"a parallel memory.  Pass --force to write anyway."
+                )
+
+    dest.write_text(frontmatter + body_text)
+    click.echo(f"wrote {dest}")
+
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,

@@ -1,0 +1,16 @@
+{
+  "_comment": "Optional opt-in hook. Merge into ~/.claude/settings.json hooks.SessionEnd if you want a reminder to capture memories at session end. Does NOT auto-extract — heuristic-only and explicitly user-driven.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$MEMORY_HOME\" ]; then echo '[memory] session ended — if you learned something durable, run `memory-capture` (see the memory skill)'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

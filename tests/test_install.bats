@@ -63,8 +63,8 @@ teardown() {
     # Index built
     [ -f "${MEMORY_HOME}/.index/index.db" ]
 
-    # INDEX.md regenerated
-    [ -f "${MEMORY_HOME}/INDEX.md" ]
+    # INDEX.md regenerated under .index/ (not at root)
+    [ -f "${MEMORY_HOME}/.index/INDEX.md" ]
 
     # .dropboxignore created
     [ -f "${MEMORY_HOME}/.dropboxignore" ]

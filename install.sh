@@ -125,7 +125,7 @@ run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
 
 run "mkdir -p '${BIN_DIR}'"
 
-for cmd in memory-index memory-search memory-capture; do
+for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose; do
   local_src="${COMPONENT_DIR}/bin/${cmd}"
   local_dst="${BIN_DIR}/${cmd}"
 
@@ -317,6 +317,63 @@ if [[ ! -f "${MEMORY_HOME}/.dropboxignore" ]]; then
   say "writing ${MEMORY_HOME}/.dropboxignore to keep .index/ out of Dropbox"
   run "printf '.index/\n.writing.lock\n' > '${MEMORY_HOME}/.dropboxignore'"
   log_journal "CREATED ${MEMORY_HOME}/.dropboxignore"
+fi
+
+# =============================================================================
+# Step 8.5 — Local git repo for audit trail (opt-in via memory.config.yaml)
+# =============================================================================
+# When memory.config.yaml has `git_track: true`, init a local git repo in
+# $MEMORY_HOME so memory captures and edits get a real commit history.  This
+# is the only meaningful recovery path from Dropbox conflict copies (which
+# silently overwrite without auditable diffs).  No remote is configured — the
+# git repo is local-only by design.
+
+CONFIG_YAML="${MEMORY_HOME}/memory.config.yaml"
+# Strip the key, leading whitespace, any trailing inline comment, and any
+# trailing whitespace.  Without the comment-stripping pass, a config like
+# `git_track: true  # for audit` would parse to "true # for audit" and the
+# `== "true"` test below would silently fail, leaving git_track effectively
+# disabled with no diagnostic.
+GIT_TRACK="$(
+  if [[ -f "${CONFIG_YAML}" ]]; then
+    grep -E '^git_track:' "${CONFIG_YAML}" \
+      | sed -E 's/^git_track:[[:space:]]*//' \
+      | sed -E 's/[[:space:]]*#.*$//' \
+      | sed -E 's/[[:space:]]*$//' \
+      | head -1
+  fi
+)"
+if [[ "${GIT_TRACK}" == "true" ]]; then
+  if [[ ! -d "${MEMORY_HOME}/.git" ]]; then
+    say "initializing local git repo at ${MEMORY_HOME}"
+    run "git -C '${MEMORY_HOME}' init -q -b main"
+    log_journal "GIT-INIT ${MEMORY_HOME}"
+  fi
+  if [[ ! -f "${MEMORY_HOME}/.gitignore" ]]; then
+    say "writing ${MEMORY_HOME}/.gitignore"
+    run "printf '.index/\n.writing.lock\n.install-logs/\n' > '${MEMORY_HOME}/.gitignore'"
+    log_journal "CREATED ${MEMORY_HOME}/.gitignore"
+  fi
+  # Initial commit if the repo has no commits yet.  Set local user.email/name
+  # so the commit succeeds without requiring a global git config.  Use direct
+  # `git` calls (not `run "..."`) so a non-zero exit propagates: `run()` uses
+  # `eval` and silently swallows failures, which would otherwise make the
+  # install journal misreport a failed commit as successful.
+  if ! git -C "${MEMORY_HOME}" rev-parse --verify HEAD >/dev/null 2>&1; then
+    say "creating initial git commit in ${MEMORY_HOME}"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      say "DRY-RUN: git -C '${MEMORY_HOME}' add -A && git ... commit -m 'memory: initial commit'"
+    elif git -C "${MEMORY_HOME}" add -A \
+        && git -C "${MEMORY_HOME}" \
+            -c user.email='memory-tools@localhost' \
+            -c user.name='memory-tools installer' \
+            commit -q -m 'memory: initial commit'; then
+      log_journal "GIT-INITIAL-COMMIT ${MEMORY_HOME}"
+    else
+      say "WARNING: git initial commit failed — check 'git status' in ${MEMORY_HOME}"
+      log_journal "WARN-GIT-INITIAL-COMMIT-FAILED ${MEMORY_HOME}"
+    fi
+  fi
 fi
 
 # =============================================================================
