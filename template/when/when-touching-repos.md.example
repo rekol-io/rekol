@@ -1,18 +1,21 @@
 ---
 name: Before touching a repo
-description: Always check the local symlinked folder before reaching for GitHub/GitLab
+description: Local conventions to follow before reading, cloning, or editing a repo
 type: when
 tags: [repos, git, symlink, local]
 aliases: [repo lookup, check a repo, look at a repo, clone a repo]
-see_also: [topics/repos.md]
+see_also: []
 created: 2026-04-27
 updated: 2026-04-27
 ---
 
-# Before touching a repo
-
-Replace this body with your local repo conventions. For example:
-
-- All repos are symlinked under a single known folder; look there first before cloning from GitHub or GitLab.
-- If the repo isn't present locally, ask the user which canonical clone to use.
-- Never assume a repo only exists remotely.
+<!--
+  This file is a stub.  Add your local repo conventions below this comment.
+  Examples (DELETE these and write your own):
+    - Where repos live on disk (e.g., ~/dev/<repo>)
+    - Whether to check a local clone before cloning fresh from GitHub
+    - Symlink layout, if any
+    - Editing rules (e.g., never edit on remote hosts via SSH)
+  An empty stub is preferable to placeholder text — Claude will treat any body
+  text here as guidance and act on it.
+-->

@@ -26,7 +26,6 @@ readonly COMPONENT_DIR
 TOOLS_HOME_DEFAULT="$HOME/.local/share/memory-tools"
 BIN_DIR_DEFAULT="$HOME/bin"
 readonly SETTINGS_JSON="$HOME/.claude/settings.json"
-readonly SETTINGS_LOCAL_JSON="$HOME/.claude/settings.local.json"
 readonly SKILL_DIR="$HOME/.claude/skills/memory"
 readonly ZSHRC="$HOME/.zshrc"
 
@@ -268,43 +267,42 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
-# Step 7.5 — MEMORY_HOME into ~/.claude/settings.local.json
+# Step 7.5 — MEMORY_HOME into ~/.claude/settings.json env block
 # =============================================================================
 # Claude Code sessions do NOT source ~/.zshrc, so the shell-level MEMORY_HOME
-# export from Step 4 isn't visible at session start.  We merge the value into
-# settings.local.json instead of settings.json because tech-pass rewrites the
-# latter; settings.local.json is for user customizations and survives rewrites.
-# Idempotent: if the key is already set to the current value, no-op.
+# export from Step 4 isn't visible to the SessionStart hook subshell or to the
+# Bash tool.  Empirically verified: only settings.json's `env` block propagates
+# to subprocess shells — settings.local.json's `env` block does NOT.  Without
+# this step the SessionStart hook prints "$MEMORY_HOME not configured" and the
+# entire memory system is dark.  Idempotent: if the key is already set to the
+# current value, no-op.
 
 if [[ "$DO_HOOK" == "1" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
-    say "jq not found; skipping Claude settings.local.json update — add env.MEMORY_HOME manually"
+    say "jq not found; skipping Claude settings.json env update — add env.MEMORY_HOME manually"
   else
-    run "mkdir -p '$(dirname "${SETTINGS_LOCAL_JSON}")'"
-    if [[ ! -f "${SETTINGS_LOCAL_JSON}" ]]; then
-      run "printf '{}' > '${SETTINGS_LOCAL_JSON}'"
-      log_journal "CREATED ${SETTINGS_LOCAL_JSON}"
-    fi
-
     HAS_MEMORY_HOME="$(
       jq --arg want "${MEMORY_HOME}" \
         '(.env.MEMORY_HOME // "") == $want' \
-        "${SETTINGS_LOCAL_JSON}" 2>/dev/null || printf 'false'
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
     if [[ "$HAS_MEMORY_HOME" == "true" ]]; then
-      say "MEMORY_HOME already in ${SETTINGS_LOCAL_JSON} — no-op"
+      say "MEMORY_HOME already in ${SETTINGS_JSON} env — no-op"
     else
-      local_settings_local_backup="${SETTINGS_LOCAL_JSON}.bak-${TS}"
-      run "cp '${SETTINGS_LOCAL_JSON}' '${local_settings_local_backup}'"
-      log_journal "BACKED-UP ${SETTINGS_LOCAL_JSON} -> ${local_settings_local_backup}"
+      # Independent backup before this step's mutation.  Step 7's earlier
+      # backup of ${SETTINGS_JSON} reflects the file BEFORE the hook merge,
+      # so it does not capture the post-hook state we are about to modify.
+      local_settings_env_backup="${SETTINGS_JSON}.bak-env-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_env_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_env_backup}"
 
-      local_tmp="${SETTINGS_LOCAL_JSON}.tmp.$$"
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
       run "jq --arg val '${MEMORY_HOME}' \
         '.env = ((.env // {}) + {MEMORY_HOME: \$val})' \
-        '${SETTINGS_LOCAL_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_LOCAL_JSON}'"
-      log_journal "SET env.MEMORY_HOME in ${SETTINGS_LOCAL_JSON}"
-      say "added MEMORY_HOME to ${SETTINGS_LOCAL_JSON}"
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "SET env.MEMORY_HOME in ${SETTINGS_JSON}"
+      say "added MEMORY_HOME to ${SETTINGS_JSON} env"
     fi
   fi
 fi

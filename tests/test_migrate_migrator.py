@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from memory_tools.migrate.archive import MIGRATION_MARKER_NAME
 from memory_tools.migrate.migrator import (
     MigrationReport,
     migrate_dir,
@@ -42,9 +43,10 @@ def test_migrate_dir_commits_heuristic_files(tmp_path: Path) -> None:
     assert report.by_llm == 0
     assert (memory_home / "topics" / "proj-alpha.md").is_file()
     assert (memory_home / "when" / "when-proj-foo.md").is_file()
-    # Retirement pointer
-    memory_md = (src_parent / "memory" / "MEMORY.md").read_text()
-    assert "RETIRED" in memory_md
+    # Migration marker (hidden, not auto-injected by Claude Code's autoMemory)
+    marker = src_parent / "memory" / MIGRATION_MARKER_NAME
+    assert marker.is_file()
+    assert str(memory_home) in marker.read_text()
     # Archive
     assert (src_parent / "memory" / "old-memory-archive" / "project_alpha.md").is_file()
     assert (src_parent / "memory" / "old-memory-archive" / "feedback_foo.md").is_file()
@@ -65,8 +67,9 @@ def test_migrate_dir_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert not any((memory_home / "when").iterdir())
     # Archive not created
     assert not (src_parent / "memory" / "old-memory-archive").exists()
-    # MEMORY.md untouched (still original)
-    assert "RETIRED" not in (src_parent / "memory" / "MEMORY.md").read_text()
+    # Migration marker not written; original MEMORY.md untouched
+    assert not (src_parent / "memory" / MIGRATION_MARKER_NAME).exists()
+    assert (src_parent / "memory" / "MEMORY.md").is_file()
 
 
 def test_migrate_dir_idempotent_skips_retired(tmp_path: Path) -> None:
@@ -115,3 +118,40 @@ def test_migrate_dir_missing_source_is_empty_report(tmp_path: Path) -> None:
     )
     assert report.migrated == 0
     assert report.skipped_missing == 1
+
+
+def test_migrate_dir_dedupes_byte_identical_bodies(tmp_path: Path) -> None:
+    """Two source dirs holding the same legacy file under different project
+    slugs must migrate the body once and skip the second copy.
+
+    This is the regression test for the duplicate-pair bug, where the same
+    repo accessed under two filesystem paths (e.g. ``~/Dropbox/github/X`` and
+    ``~/Library/CloudStorage/Dropbox/github/X``) created two memory dirs and
+    duplicated every file when migrated.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+    (memory_home / "INDEX.md").write_text("# Index\n")
+
+    body = "---\nname: foo\ntype: feedback\n---\n\nshared body content\n"
+    src_a = tmp_path / "proj-a" / "memory"
+    src_b = tmp_path / "proj-b" / "memory"
+    src_a.mkdir(parents=True)
+    src_b.mkdir(parents=True)
+    (src_a / "feedback_x.md").write_text(body)
+    (src_b / "feedback_x.md").write_text(body)
+
+    rep_a = migrate_dir(source_dir=src_a, memory_home=memory_home,
+                        dry_run=False, allow_llm=False)
+    rep_b = migrate_dir(source_dir=src_b, memory_home=memory_home,
+                        dry_run=False, allow_llm=False)
+
+    assert rep_a.migrated == 1 and rep_a.skipped_duplicate == 0
+    assert rep_b.migrated == 0 and rep_b.skipped_duplicate == 1
+    # Only one when/ file ends up in MEMORY_HOME despite two sources
+    when_files = sorted((memory_home / "when").iterdir())
+    assert len(when_files) == 1, [f.name for f in when_files]
+    # Both originals are archived (rescue path preserved)
+    assert (src_a / "old-memory-archive" / "feedback_x.md").is_file()
+    assert (src_b / "old-memory-archive" / "feedback_x.md").is_file()

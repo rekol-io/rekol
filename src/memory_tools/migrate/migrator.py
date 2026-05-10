@@ -5,10 +5,12 @@ multiple calls for ``auto`` mode.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Set
 
+import frontmatter
 import yaml
 
 from memory_tools.migrate.archive import archive_file, write_retirement_pointer
@@ -16,7 +18,7 @@ from memory_tools.migrate.classify import Classification, classify_file
 from memory_tools.migrate.discover import (
     LegacyFile,
     discover_files_in_dir,
-    is_retirement_pointer,
+    has_migration_marker,
 )
 
 
@@ -38,7 +40,38 @@ class MigrationReport:
     archived: int = 0
     skipped_retired: int = 0
     skipped_missing: int = 0
+    skipped_duplicate: int = 0       # body-hash matched an already-migrated file
     errors: List[str] = field(default_factory=list)
+
+
+def _body_hash(body: str) -> str:
+    """SHA-256 of the body text, whitespace-normalized.
+
+    Used to dedupe legacy files whose bodies are byte-identical but whose
+    auto-generated frontmatter (e.g., ``description: Legacy memory from <slug>``)
+    differs only because of the source path.  Same body → same hash → migrate
+    only once.
+    """
+    normalized = "\n".join(line.rstrip() for line in body.strip().splitlines())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _existing_body_hashes(memory_home: Path) -> Set[str]:
+    """Return the set of body hashes for every file already in ``memory_home``."""
+    hashes: Set[str] = set()
+    for layer in LAYER_DIR_MAP.values():
+        layer_dir = memory_home / layer
+        if not layer_dir.is_dir():
+            continue
+        for entry in layer_dir.iterdir():
+            if entry.suffix != ".md" or not entry.is_file():
+                continue
+            try:
+                post = frontmatter.load(entry)
+                hashes.add(_body_hash(post.content))
+            except Exception:  # noqa: BLE001 — best-effort; skip unreadable
+                continue
+    return hashes
 
 
 def _serialize_memory_file(classification: Classification) -> str:
@@ -89,8 +122,7 @@ def migrate_dir(
         report.skipped_missing = 1
         return report
 
-    memory_md = source_dir / "MEMORY.md"
-    if is_retirement_pointer(memory_md):
+    if has_migration_marker(source_dir):
         report.skipped_retired = 1
         return report
 
@@ -105,11 +137,29 @@ def migrate_dir(
     index_context = index_md.read_text(encoding="utf-8", errors="replace") \
         if index_md.exists() else ""
 
+    # Snapshot of body hashes already present in memory_home — drives dedup
+    # below.  Updated as we migrate so duplicates within this batch also skip.
+    seen_hashes = _existing_body_hashes(memory_home)
+
     for lf in files:
         try:
             c = classify_file(lf, index_context=index_context, allow_llm=allow_llm)
         except Exception as exc:  # noqa: BLE001 — log and continue
             report.errors.append(f"classify failed for {lf.source_path}: {exc}")
+            continue
+
+        body_hash = _body_hash(c.body)
+        if body_hash in seen_hashes:
+            # Same body already migrated — archive the duplicate but don't write.
+            report.skipped_duplicate += 1
+            if not dry_run:
+                try:
+                    archive_file(lf)
+                    report.archived += 1
+                except Exception as exc:  # noqa: BLE001
+                    report.errors.append(
+                        f"archive failed for duplicate {lf.source_path}: {exc}"
+                    )
             continue
 
         if dry_run:
@@ -118,12 +168,14 @@ def migrate_dir(
                 report.by_heuristic += 1
             else:
                 report.by_llm += 1
+            seen_hashes.add(body_hash)
             continue
 
         target = _resolve_target_path(memory_home, c)
         try:
             target.write_text(_serialize_memory_file(c))
             archive_file(lf)
+            seen_hashes.add(body_hash)
             report.migrated += 1
             report.archived += 1
             if c.method == "heuristic":
@@ -133,7 +185,7 @@ def migrate_dir(
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"write/archive failed for {lf.source_path}: {exc}")
 
-    if not dry_run and report.migrated > 0:
+    if not dry_run and (report.migrated > 0 or report.skipped_duplicate > 0):
         write_retirement_pointer(source_dir, memory_home=memory_home)
 
     return report
