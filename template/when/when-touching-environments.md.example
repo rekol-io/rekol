@@ -1,18 +1,20 @@
 ---
 name: Before scoping an ops task
-description: Apply operations to all environments unless explicitly told otherwise
+description: Default scoping rule for changes that could affect multiple environments
 type: when
 tags: [environments, ops, scope]
 aliases: [which environment, all envs, scope, environments]
-see_also: [always/environments.md]
+see_also: []
 created: 2026-04-27
 updated: 2026-04-27
 ---
 
-# Before scoping an ops task
-
-Replace this body with your environment conventions. Example shape:
-
-- List all environments you operate across.
-- State the default: "apply to all" vs "ask which" — pick one.
-- Document any PRD/account mappings per environment.
+<!--
+  This file is a stub.  Add your environment conventions below this comment.
+  Examples (DELETE these and write your own):
+    - List of environments you operate across (dev/staging/prod, machines, clusters)
+    - Default scoping ("apply to all unless told otherwise" vs "ask which")
+    - Per-environment account/PRD mappings
+  An empty stub is preferable to placeholder text — Claude will treat any body
+  text here as guidance and act on it.
+-->
