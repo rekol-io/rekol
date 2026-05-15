@@ -5,8 +5,8 @@ type: topic
 tags: [prometheus, monitoring, helm, iac, urls]
 aliases: [prom, prometheus url, metrics endpoint, helm values]
 see_also: [topics/reaper.md]
-created: 2026-04-27
-updated: 2026-04-27
+created: 2026-04-27T10:00:00-04:00
+updated: 2026-04-27T10:00:00-04:00
 ---
 
 # Prometheus — canonical source
