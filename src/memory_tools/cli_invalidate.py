@@ -28,8 +28,8 @@ from memory_tools.store import IndexStore
               help="Optional one-line note describing why the memory is being "
                    "invalidated.  Appended as a body comment.")
 @click.option("--at", "invalidated_at",
-              help="ISO-8601 date the memory's facts stopped being true. "
-                   "Defaults to today.")
+              help="ISO-8601 datetime (or date) the memory's facts stopped "
+                   "being true. Defaults to now.")
 def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
     """Mark FILE_PATH as invalidated (set ``invalidated_at`` in frontmatter).
 
@@ -55,14 +55,18 @@ def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
             f"file and remove the field."
         )
 
-    today = dt.date.today().isoformat()
-    post.metadata["invalidated_at"] = invalidated_at or today
-    post.metadata["updated"] = today
+    # Bump both timestamps to a precise datetime so chronological ordering
+    # across same-day invalidations is unambiguous.  ``--at`` accepts either
+    # a date or full datetime string and is passed through unchanged.
+    now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    today_date = dt.date.today().isoformat()
+    post.metadata["invalidated_at"] = invalidated_at or now_iso
+    post.metadata["updated"] = now_iso
 
     if reason:
         post.content = (
             post.content.rstrip()
-            + f"\n\n<!-- invalidated {today}: {reason} -->\n"
+            + f"\n\n<!-- invalidated {today_date}: {reason} -->\n"
         )
 
     target.write_text(frontmatter.dumps(post) + "\n")

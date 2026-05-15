@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 import frontmatter
@@ -348,3 +349,69 @@ def test_memory_propose_writes_pending_review(tmp_path: Path, monkeypatch) -> No
     assert "deploy via docker compose pull on Dell" in body
     # Plain prose without signal markers is not surfaced
     assert "Random unrelated paragraph" not in body
+
+
+def test_memory_capture_timestamps_are_datetime(tmp_path: Path, monkeypatch) -> None:
+    """Captured ``created`` and ``updated`` are full ISO-8601 datetimes with
+    timezone offset, not just calendar dates.  This makes ordering between
+    same-day captures unambiguous and supports time-anchored queries.
+
+    ``valid_from`` stays date-only because its semantics are "started being
+    true on this day", not "captured at this instant".
+    """
+    _seed_memory(tmp_path)
+    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(index_main, ["rebuild"])
+
+    result = runner.invoke(capture_main, [
+        "--layer", "topic",
+        "--file", "timestamped.md",
+        "--name", "Time-stamped capture",
+        "--description", "Tests that captures include datetime + offset",
+        "--body", "A small body so the conflict check has something to compare.",
+    ])
+    assert result.exit_code == 0, result.output
+
+    post = frontmatter.load(tmp_path / "topics" / "timestamped.md")
+    for field in ("created", "updated"):
+        value = post.metadata[field]
+        assert "T" in value, (
+            f"expected ISO-8601 datetime with T separator for {field}, "
+            f"got {value!r}"
+        )
+        parsed = datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None, (
+            f"expected timezone-aware datetime for {field}, got {value!r}"
+        )
+
+    # valid_from stays date-only — different semantics from created/updated.
+    valid_from = post.metadata["valid_from"]
+    assert "T" not in valid_from, (
+        f"expected date-only valid_from, got {valid_from!r}"
+    )
+
+
+def test_memory_invalidate_writes_datetime(tmp_path: Path, monkeypatch) -> None:
+    """memory-invalidate writes datetime timestamps to invalidated_at + updated
+    (not just calendar dates) so same-day invalidations order unambiguously."""
+    _seed_memory(tmp_path)
+    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(index_main, ["rebuild"])
+
+    target = tmp_path / "topics" / "prometheus.md"
+    result = runner.invoke(invalidate_main, [str(target)])
+    assert result.exit_code == 0, result.output
+
+    post = frontmatter.load(target)
+    for field in ("invalidated_at", "updated"):
+        value = post.metadata[field]
+        assert "T" in value, (
+            f"expected ISO-8601 datetime with T separator for {field}, "
+            f"got {value!r}"
+        )
+        parsed = datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None, (
+            f"expected timezone-aware datetime for {field}, got {value!r}"
+        )

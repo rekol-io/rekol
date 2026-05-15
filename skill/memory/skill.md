@@ -22,4 +22,6 @@ Only on explicit "remember this" / correction / new canonical source. Never sile
 2. `memory-capture --layer <L> --file <name>.md --name "..." --description "..." [--tags a,b] [--aliases x,y]`
 3. Update `MEMORY.md` only if the memory deserves always-on status.
 
+`created`/`updated` are auto-stamped as ISO-8601 datetimes with offset (e.g. `2026-05-14T15:30:00-04:00`); `valid_from` stays date-only.
+
 `always/` has an 8 KB hard cap — overflow goes to `topics/` or `when/`.

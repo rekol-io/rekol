@@ -118,7 +118,12 @@ def main(
         # file is immediately useful for search without manual editing.
         body_text = body or f"# {name}\n\n{description}\n"
 
-    today = dt.date.today().isoformat()
+    # Capture timestamps as timezone-aware ISO-8601 datetimes so chronological
+    # ordering across same-day captures is unambiguous.  ``valid_from`` stays
+    # date-only — its semantics are "what day did this fact start being true",
+    # not "what moment did I capture it."
+    now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    today_date = dt.date.today().isoformat()
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
     # Use yaml.dump so that values containing YAML-special characters (e.g.
@@ -130,9 +135,9 @@ def main(
         "type": layer,
         "tags": tag_list,
         "aliases": alias_list,
-        "created": today,
-        "updated": today,
-        "valid_from": valid_from or today,
+        "created": now_iso,
+        "updated": now_iso,
+        "valid_from": valid_from or today_date,
     }
     frontmatter = (
         "---\n"
