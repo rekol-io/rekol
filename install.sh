@@ -308,6 +308,74 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7B — Install auto-reindex hook script
+# =============================================================================
+# Symlinks the auto-reindex shell script into ${TOOLS_HOME}/hooks/ so the
+# PostToolUse hook (Step 7C) can reference a stable path.  Symlink-back-to-repo
+# mirrors the ~/bin shim pattern from Step 2 — edits to the script in the repo
+# are picked up live with no reinstall.
+
+run "mkdir -p '${TOOLS_HOME}/hooks'"
+
+local_autoreindex_src="${COMPONENT_DIR}/hooks/auto-reindex.sh"
+local_autoreindex_dst="${TOOLS_HOME}/hooks/auto-reindex.sh"
+
+# Back up any pre-existing non-symlink at the destination (mirrors Step 2)
+if [[ -e "$local_autoreindex_dst" ]] && [[ ! -L "$local_autoreindex_dst" ]]; then
+  local_autoreindex_backup="${local_autoreindex_dst}.bak-${TS}"
+  say "backing up existing ${local_autoreindex_dst} → ${local_autoreindex_backup}"
+  run "mv '${local_autoreindex_dst}' '${local_autoreindex_backup}'"
+  log_journal "BACKED-UP ${local_autoreindex_dst} -> ${local_autoreindex_backup}"
+fi
+
+run "ln -sf '${local_autoreindex_src}' '${local_autoreindex_dst}'"
+log_journal "SYMLINK ${local_autoreindex_dst} -> ${local_autoreindex_src}"
+
+# =============================================================================
+# Step 7C — PostToolUse auto-reindex hook merge into settings.json
+# =============================================================================
+# Wires the auto-reindex script (Step 7B) into Claude Code's PostToolUse event
+# with matcher "Write|Edit".  Every time the agent edits a file under
+# $MEMORY_HOME, the script fires `memory-index update` asynchronously so the
+# vector DB stays in sync without per-edit latency.
+#
+# Idempotency: skips the merge if the exact command is already present in any
+# existing PostToolUse hook entry (same pattern as Step 7).
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_PTU="${COMPONENT_DIR}/hooks/posttooluse-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing PostToolUse snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_PTU}"
+  else
+    HAS_PTU_HOOK="$(
+      jq --slurpfile snip "${SNIPPET_PTU}" '
+        (.hooks.PostToolUse // []) as $cur
+        | ($snip[0].hooks.PostToolUse[0].hooks[0].command) as $cmd
+        | any($cur[]; .hooks // [] | any(.command == $cmd))
+      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_PTU_HOOK" == "true" ]]; then
+      say "PostToolUse auto-reindex hook already present — no-op"
+    else
+      # Independent backup for this step (Step 7's backup predates the env
+      # mutation in Step 7.5 and would not reflect post-7.5 state)
+      local_settings_ptu_backup="${SETTINGS_JSON}.bak-ptu-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_ptu_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ptu_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_PTU}' \
+        '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + \$snip[0].hooks.PostToolUse)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED PostToolUse auto-reindex hook into ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
 # Step 8 — Dropbox ignore file (best-effort; non-fatal if Dropbox absent)
 # =============================================================================
 # Prevents the local vector index and write-lock from being synced to Dropbox,
