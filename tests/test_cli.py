@@ -467,9 +467,16 @@ def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
 
     from memory_tools.cli_session_index import main as session_idx_main
     runner = CliRunner()
-    runner.invoke(session_idx_main, ["--full"])
+    setup_result = runner.invoke(session_idx_main, ["--full"])
+    assert setup_result.exit_code == 0, setup_result.output
 
     result = runner.invoke(search_main, ["hello there", "--promote-candidates"])
     assert result.exit_code == 0, result.output
+    # Confirm the promotion-candidate annotation fired because sessions
+    # actually contributed, not because of an unrelated empty-search path.
+    assert "FROM SESSIONS (top " in result.output
+    # Sanity: 'top 0' would mean sessions didn't actually hit, which would
+    # make the promotion-candidate assertion below a false signal.
+    assert "(top 0)" not in result.output, result.output
     # promote-candidates surface should mention session count + zero memory hits
     assert "promotion candidate" in result.output.lower()
