@@ -2,8 +2,7 @@
 
 Layered, cross-indexed memory system with local vector search, for use with Claude Code.
 
-See the design spec in the cassandra-team-workspace repo at
-`docs/superpowers/specs/2026-04-27-persistent-memory-system-design.md` for the full rationale.
+See the design spec at [`docs/persistent-memory-system-design.md`](./docs/persistent-memory-system-design.md) for the full rationale.
 
 ## Install
 
