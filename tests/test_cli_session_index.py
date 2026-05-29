@@ -46,7 +46,8 @@ def test_session_index_incremental_is_idempotent(tmp_path: Path, monkeypatch) ->
     )
 
     runner = CliRunner()
-    runner.invoke(cli_main, ["--full"])
+    setup_result = runner.invoke(cli_main, ["--full"])
+    assert setup_result.exit_code == 0, setup_result.output
     result = runner.invoke(cli_main, ["--incremental"])
     assert result.exit_code == 0, result.output
     # Incremental with mtime-skip should NOT touch the file at all

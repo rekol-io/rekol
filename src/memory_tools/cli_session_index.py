@@ -52,7 +52,10 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
         raise click.UsageError("--full and --incremental are mutually exclusive")
     cfg = load_config()
     if not cfg.session_search_enabled:
-        click.echo("session_search_enabled=false in config; nothing to do.")
+        click.echo(
+            "session_search_enabled=false in config; nothing to do. "
+            "Set session_search_enabled: true in memory.config.yaml to enable."
+        )
         sys.exit(0)
     projects_root = cfg.claude_projects_dir
     if not projects_root.is_dir():
@@ -67,16 +70,13 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             click.echo(f"... {done}/{total} files indexed", err=True)
         progress_cb = _emit_progress
 
-    store = SessionStore(db_path=cfg.sessions_db_path, dim=384)
-    store.init_schema()
-    try:
+    with SessionStore(db_path=cfg.sessions_db_path, dim=384) as store:
+        store.init_schema()
         # --full forces re-walk even of unchanged files; default (incremental)
         # trusts files_seen mtime+size and skips matches.
         stats = ingest_directory(
             projects_root, store, force=mode_full, progress_cb=progress_cb
         )
-    finally:
-        store.close()
 
     click.echo(
         f"files_seen={stats.files_seen} "
