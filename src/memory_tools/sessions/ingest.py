@@ -124,7 +124,7 @@ def iter_messages_in_file(jsonl_path: Path, stats: Optional[_RawIterResult] = No
                 continue
             try:
                 iso, unix = _parse_timestamp(timestamp)
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 if stats is not None:
                     stats.malformed_count += 1
                 continue
@@ -166,19 +166,17 @@ def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -
 
     raw_stats = _RawIterResult()
     # Batched transaction — single commit per file rather than per row.
-    # Avoids ~100k fsyncs during initial backfill on deep-history machines.
-    store.conn.execute("BEGIN")
-    try:
+    # `with conn:` commits on normal exit, rolls back on exception, and
+    # interacts correctly with Python sqlite3's implicit transaction state
+    # (a manual BEGIN raises OperationalError if the module thinks a
+    # transaction is already open).
+    with store.conn:
         for msg in iter_messages_in_file(path, raw_stats):
             rowid = store.insert_message_no_commit(msg)
             if rowid is None:
                 stats.messages_skipped_dupe += 1
             else:
                 stats.messages_inserted += 1
-        store.conn.commit()
-    except Exception:
-        store.conn.rollback()
-        raise
 
     # files_seen is recorded AFTER the messages commit so a crash mid-file
     # leaves the file un-recorded and the next run reingests it.
