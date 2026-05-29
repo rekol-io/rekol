@@ -11,8 +11,12 @@ risks the other, and the DBs are sized appropriately for their corpora.
 from __future__ import annotations
 
 import sqlite3
+import warnings
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 SCHEMA_MESSAGES = """
@@ -98,13 +102,25 @@ class SessionStore:
     def _try_load_vec(self) -> None:
         try:
             import sqlite_vec
-
+        except ImportError:
+            # sqlite-vec genuinely absent; numpy fallback path is silent-by-design
+            self._vec_loaded = False
+            return
+        try:
             self.conn.enable_load_extension(True)
             sqlite_vec.load(self.conn)
             self.conn.enable_load_extension(False)
             self._vec_loaded = True
-        except Exception:
-            # sqlite-vec extension unavailable; vector search will be disabled
+        except Exception as exc:
+            # sqlite-vec installed but extension loading failed (e.g., Python
+            # built without SQLITE_ENABLE_LOAD_EXTENSION). Warn so a future run
+            # that succeeds doesn't silently create a split-brain index.
+            warnings.warn(
+                f"sqlite-vec is installed but could not be loaded ({exc!r}); "
+                "falling back to numpy cosine search. If this becomes consistent, "
+                "either remove sqlite-vec from the env or fix the loader.",
+                stacklevel=2,
+            )
             self._vec_loaded = False
 
     def init_schema(self) -> None:
@@ -167,7 +183,7 @@ class SessionStore:
         self.conn.commit()
         return cur.lastrowid
 
-    def upsert_embedding(self, rowid: int, vec) -> None:
+    def upsert_embedding(self, rowid: int, vec: np.ndarray) -> None:
         """Attach an embedding to an existing message row.
 
         Routes to ``messages_vec`` (vec0 virtual table) when sqlite-vec is
@@ -208,7 +224,8 @@ class SessionStore:
             "       bm25(messages_fts) AS bm25_score "
             "FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
             "WHERE messages_fts MATCH ? "
-            "ORDER BY bm25_score LIMIT ?",
+            # ASC because raw bm25() is negative — most-negative is the strongest match.
+            "ORDER BY bm25_score ASC LIMIT ?",
             (query, top_k),
         ).fetchall()
         out: List[dict] = []
@@ -220,7 +237,7 @@ class SessionStore:
             out.append(d)
         return out
 
-    def search_vec(self, query_vec, top_k: int = 5) -> List[dict]:
+    def search_vec(self, query_vec: np.ndarray, top_k: int = 5) -> List[dict]:
         """Vector search via sqlite-vec when available; numpy cosine fallback otherwise."""
         import numpy as np
 
@@ -245,6 +262,9 @@ class SessionStore:
                 out.append(d)
             return out
         # Numpy cosine fallback over the renamed fallback table.
+        # NOTE: loads all embeddings into memory and computes cosine in numpy.
+        # Acceptable up to ~50k messages; beyond that the per-query cost grows
+        # linearly and a real ANN structure (sqlite-vec, faiss) is the right fix.
         rows = self.conn.execute(
             "SELECT m.id, m.session_id, m.message_uuid, m.role, m.content, "
             "       m.cwd, m.timestamp_iso, m.timestamp_unix, m.jsonl_path, m.line_number, "
