@@ -12,7 +12,7 @@ Memory root: `$MEMORY_HOME`. Layers: `always/`, `when/`, `topics/`, `knowledge/`
 Reading full topic files for a single fact wastes context. The index already stores heading-scoped chunks with line ranges; one `memory-search` call returns the most-relevant snippets across all files. Use it as the **first** lookup, not the fallback.
 
 1. `MEMORY.md` is already in context — scan for trigger pointers.
-2. **Default lookup: `memory-search "phrase" --top 5 --json`.** Use the returned `file_path` + `line_start`/`line_end` to read just that range when you need surrounding context. Only read the whole file when the chunk is genuinely insufficient.
+2. **Default lookup: `memory-search "phrase" --top 5 --json`.** The result is a JSON object with these keys: `query` (the input), `memory` (array of curated hits — authoritative, read first), `sessions` (array of transcript hits — supplementary, lower-priority), `is_promotion_candidate` (bool — true when memory was queried, returned nothing, and sessions hit; signals something worth capturing), and `sources_queried` (which tiers were actually searched). For each memory hit, use `file_path` + `line_start`/`line_end` to read just that range when you need surrounding context. For each session hit, use `jsonl_path` + `line_number` to locate the message in the original transcript. Only read the whole file when the chunk is genuinely insufficient.
 3. **Direct file read** when you already know the exact filename (e.g. `topics/<noun>.md` matches the user's noun verbatim, or `when/when-<activity>.md` matches the activity).
 4. **Last-resort grep**: `grep -rE "^(tags|aliases):" "$MEMORY_HOME"` for keyword lookup if search and direct match both miss.
 
