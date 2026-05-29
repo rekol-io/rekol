@@ -50,9 +50,15 @@ def test_memory_search_cli_json(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(search_main, ["prometheus url", "--top", "3", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert len(data) >= 1
-    assert any("prometheus" in hit["file_path"].lower() for hit in data)
-    assert "score" in data[0]
+    # New JSON shape (Phase 2): top-level object {query, memory, sessions,
+    # is_promotion_candidate, sources_queried} — flat-array shape is gone.
+    assert isinstance(data, dict)
+    assert data["query"] == "prometheus url"
+    hits = data["memory"]
+    assert len(hits) >= 1
+    assert any("prometheus" in hit["file_path"].lower() for hit in hits)
+    assert "score" in hits[0]
+    assert "memory" in data["sources_queried"]
 
 
 def test_memory_capture_cli_handles_colon_in_name(tmp_path: Path, monkeypatch) -> None:
@@ -82,7 +88,7 @@ def test_memory_capture_cli_handles_colon_in_name(tmp_path: Path, monkeypatch) -
     result = runner.invoke(search_main, ["reaper canonical source", "--top", "3", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert any("reaper" in hit["file_path"].lower() for hit in data), \
+    assert any("reaper" in hit["file_path"].lower() for hit in data["memory"]), \
         f"reaper.md was not indexed after capture. Output: {result.output}"
 
 
@@ -269,7 +275,7 @@ def test_memory_capture_project_scoping(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(search_main, ["transformer agent", "--top", "5", "--json"])
     assert result.exit_code == 0
     data = json.loads(result.output)
-    assert any("phase2.md" in hit["file_path"] for hit in data), result.output
+    assert any("phase2.md" in hit["file_path"] for hit in data["memory"]), result.output
 
     # INDEX.md has a per-project section
     index_md = (tmp_path / ".index" / "INDEX.md").read_text()
@@ -415,3 +421,55 @@ def test_memory_invalidate_writes_datetime(tmp_path: Path, monkeypatch) -> None:
         assert parsed.tzinfo is not None, (
             f"expected timezone-aware datetime for {field}, got {value!r}"
         )
+
+
+def test_memory_search_source_memory_skips_sessions(tmp_path, monkeypatch):
+    # Set up a memory-only environment; sessions DB will be empty
+    home = tmp_path / "h"
+    home.mkdir()
+    monkeypatch.setenv("MEMORY_HOME", str(home))
+    (home / "memory.config.yaml").write_text(
+        "embedding_model: test-hashing\n"
+        f"claude_projects_dir: {tmp_path}/no-projects-here\n"
+    )
+    (home / "topics").mkdir()
+    (home / "topics" / "litellm.md").write_text(
+        "---\nname: litellm\ndescription: notes\ntype: reference\n"
+        "tags: [litellm]\naliases: [base url]\ncreated: 2026-05-01T00:00:00+00:00\n"
+        "updated: 2026-05-01T00:00:00+00:00\n---\n"
+        "## LiteLLM\n\nbase_url for the proxy.\n"
+    )
+    runner = CliRunner()
+    runner.invoke(index_main, ["rebuild"])
+
+    result = runner.invoke(search_main, ["litellm", "--source", "memory"])
+    assert result.exit_code == 0, result.output
+    assert "FROM MEMORY" in result.output
+    assert "FROM SESSIONS" not in result.output
+
+
+def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
+    # Memory empty, sessions populated — query surfaces as a promotion candidate
+    home = tmp_path / "h"
+    home.mkdir()
+    fake_projects = tmp_path / "projects" / "proj"
+    fake_projects.mkdir(parents=True)
+    import shutil
+    shutil.copy(
+        Path(__file__).parent / "fixtures" / "sample_session.jsonl",
+        fake_projects / "session.jsonl",
+    )
+    monkeypatch.setenv("MEMORY_HOME", str(home))
+    (home / "memory.config.yaml").write_text(
+        "embedding_model: test-hashing\n"
+        f"claude_projects_dir: {fake_projects.parent}\n"
+    )
+
+    from memory_tools.cli_session_index import main as session_idx_main
+    runner = CliRunner()
+    runner.invoke(session_idx_main, ["--full"])
+
+    result = runner.invoke(search_main, ["hello there", "--promote-candidates"])
+    assert result.exit_code == 0, result.output
+    # promote-candidates surface should mention session count + zero memory hits
+    assert "promotion candidate" in result.output.lower()
