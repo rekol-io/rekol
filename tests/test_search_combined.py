@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from memory_tools.embeddings import HashingEmbedder
@@ -78,3 +77,19 @@ def test_search_all_promote_candidates(tmp_path: Path) -> None:
         memory_store=mem, session_store=sess,
     )
     assert result.is_promotion_candidate is True
+
+
+def test_search_all_source_sessions_alone_does_not_flag_promotion(tmp_path: Path) -> None:
+    """Regression: when only sessions is queried, is_promotion_candidate must
+    be False even if there are session hits, because memory was never asked.
+    Without the sources_queried guard, this returns True spuriously.
+    """
+    sess = _seed_sessions(tmp_path)
+    embedder = HashingEmbedder(dim=384)
+    result = search_all(
+        query="litellm", embedder=embedder,
+        session_store=sess, source="sessions",
+    )
+    assert "sessions" in result.sources_queried
+    assert "memory" not in result.sources_queried
+    assert result.is_promotion_candidate is False
