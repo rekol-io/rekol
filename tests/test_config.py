@@ -38,3 +38,11 @@ def test_index_db_path_default_inside_memory_home(tmp_path: Path, monkeypatch) -
     monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
     cfg = load_config()
     assert cfg.index_db_path == tmp_path / ".index" / "index.db"
+
+
+def test_config_exposes_sessions_db_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+    cfg = load_config()
+    assert cfg.sessions_db_path == tmp_path / ".index" / "sessions.db"
+    assert cfg.claude_projects_dir.name == "projects"
+    assert cfg.session_search_enabled is True
