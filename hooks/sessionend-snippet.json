@@ -1,5 +1,5 @@
 {
-  "_comment": "Optional opt-in hook. Merge into ~/.claude/settings.json hooks.SessionEnd if you want a reminder to capture memories at session end. Does NOT auto-extract — heuristic-only and explicitly user-driven.",
+  "_comment": "Optional opt-in hook. Merge into ~/.claude/settings.json hooks.SessionEnd. First handler reminds you to capture durable memories (does NOT auto-extract — heuristic-only and explicitly user-driven). Second handler incrementally reindexes Claude Code session transcripts so memory-search can surface them without a separate cron.",
   "hooks": {
     "SessionEnd": [
       {
@@ -8,6 +8,10 @@
           {
             "type": "command",
             "command": "if [ -n \"$MEMORY_HOME\" ]; then echo '[memory] session ended — if you learned something durable, run `memory-capture` (see the memory skill)'; fi"
+          },
+          {
+            "type": "command",
+            "command": "claude-session-index --incremental"
           }
         ]
       }
