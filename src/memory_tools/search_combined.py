@@ -28,11 +28,22 @@ class CombinedSearchResult:
     query: str
     memory_hits: List[dict] = field(default_factory=list)
     session_hits: List[dict] = field(default_factory=list)
+    sources_queried: List[str] = field(default_factory=list)
 
     @property
     def is_promotion_candidate(self) -> bool:
-        """True when sessions had real hits but memory had none."""
-        return len(self.memory_hits) == 0 and len(self.session_hits) > 0
+        """True when memory was queried, returned nothing, and sessions hit.
+
+        Requires ``"memory" in sources_queried`` — otherwise the empty
+        ``memory_hits`` may just mean memory was never asked. Without this
+        guard, a caller using ``source="sessions"`` would get spurious
+        promotion signals.
+        """
+        return (
+            "memory" in self.sources_queried
+            and len(self.memory_hits) == 0
+            and len(self.session_hits) > 0
+        )
 
 
 def _merge_session_hits(
@@ -47,6 +58,10 @@ def _merge_session_hits(
     the BM25 wrapper already produces positive higher-is-better scores
     comparable to cosine similarities, mixing them directly is reasonable for
     v1. RRF is a deferred follow-up.
+
+    On a score tie, the FTS hit is kept because ``fts_hits + vec_hits`` lists
+    FTS first and the ``>`` comparison is strict. If you swap the argument
+    order, vec will win ties instead.
     """
     by_key: dict[tuple[str, str], dict] = {}
     for hit in fts_hits + vec_hits:
@@ -80,10 +95,12 @@ def search_all(
 
     if source in ("memory", "all") and memory_store is not None:
         result.memory_hits = memory_store.search(query_vec, top_k=memory_top_k)
+        result.sources_queried.append("memory")
 
     if source in ("sessions", "all") and session_store is not None:
         fts_hits = session_store.search_fts(query, top_k=sessions_top_k)
         vec_hits = session_store.search_vec(query_vec, top_k=sessions_top_k)
         result.session_hits = _merge_session_hits(fts_hits, vec_hits, sessions_top_k)
+        result.sources_queried.append("sessions")
 
     return result
