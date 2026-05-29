@@ -110,9 +110,35 @@ fi
 run "mkdir -p '${TOOLS_HOME}'"
 
 if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
-  say "creating venv at ${TOOLS_HOME}/.venv"
-  run "python3 -m venv '${TOOLS_HOME}/.venv'"
-  log_journal "CREATED venv ${TOOLS_HOME}/.venv"
+  # Prefer an interpreter built with --enable-loadable-sqlite-extensions so
+  # sqlite-vec can actually load (vec0 KNN). python.org's macOS installer
+  # ships extension loading DISABLED by deliberate policy, so the system
+  # default `python3` on a Mac that has that installer wins PATH and the
+  # venv inherits the broken sqlite3 module — sqlite-vec silently falls
+  # back to a numpy cosine scan, with a warning on every search.
+  #
+  # Preference order:
+  #   1. uv-managed Python (python-build-standalone — always has extensions)
+  #   2. Homebrew Python (built with extensions)
+  #   3. Fall back to whatever python3 is first on PATH
+  PY3="$(command -v python3 || true)"
+  if command -v uv >/dev/null 2>&1; then
+    uv_py="$(uv python find 2>/dev/null || true)"
+    if [[ -n "$uv_py" ]] && [[ -x "$uv_py" ]]; then
+      PY3="$uv_py"
+    fi
+  fi
+  if [[ -z "$PY3" || ! -x "$PY3" ]] || ! "$PY3" -c "import sqlite3; c=sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension')" >/dev/null 2>&1; then
+    for candidate in /opt/homebrew/bin/python3 /usr/local/opt/python@3/bin/python3; do
+      if [[ -x "$candidate" ]] && "$candidate" -c "import sqlite3; c=sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension')" >/dev/null 2>&1; then
+        PY3="$candidate"
+        break
+      fi
+    done
+  fi
+  say "creating venv at ${TOOLS_HOME}/.venv using ${PY3}"
+  run "'${PY3}' -m venv '${TOOLS_HOME}/.venv'"
+  log_journal "CREATED venv ${TOOLS_HOME}/.venv interpreter=${PY3}"
 fi
 
 say "installing/upgrading memory-tools into venv"
@@ -125,7 +151,7 @@ run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
 
 run "mkdir -p '${BIN_DIR}'"
 
-for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose; do
+for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose memory-migrate claude-session-index; do
   local_src="${COMPONENT_DIR}/bin/${cmd}"
   local_dst="${BIN_DIR}/${cmd}"
 
