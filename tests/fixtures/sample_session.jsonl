@@ -1,0 +1,7 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-04-24T01:29:01.260Z","sessionId":"s-1","content":"New Session"}
+{"parentUuid":null,"type":"user","message":{"role":"user","content":"hello there"},"uuid":"u-1","timestamp":"2026-04-24T01:29:01.303Z","sessionId":"s-1","cwd":"/tmp/repoA"}
+{"parentUuid":"u-1","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"uuid":"u-tool","timestamp":"2026-04-24T01:29:01.800Z","sessionId":"s-1","cwd":"/tmp/repoA"}
+{"parentUuid":"u-tool","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]},"uuid":"u-result","timestamp":"2026-04-24T01:29:02.000Z","sessionId":"s-1","cwd":"/tmp/repoA"}
+{"parentUuid":"u-result","type":"assistant","message":{"role":"assistant","content":"hello back"},"uuid":"u-2","timestamp":"2026-04-24T01:29:02.500Z","sessionId":"s-1","cwd":"/tmp/repoA"}
+{"parentUuid":"u-2","type":"user","message":{"role":"user","content":[{"type":"text","text":"second user turn with list content"}]},"uuid":"u-3","timestamp":"2026-04-24T01:29:05.000Z","sessionId":"s-1","cwd":"/tmp/repoA"}
+{"type":"queue-operation","operation":"dequeue","timestamp":"2026-04-24T01:29:06.000Z","sessionId":"s-1"}

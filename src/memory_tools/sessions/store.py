@@ -183,6 +183,35 @@ class SessionStore:
         self.conn.commit()
         return cur.lastrowid
 
+    def insert_message_no_commit(self, msg: dict) -> Optional[int]:
+        """Same as insert_message but caller controls the transaction.
+
+        Used by ``ingest_file`` which wraps an entire file in one BEGIN/COMMIT
+        for performance. Duplicate uuid still returns None (no error).
+        """
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO messages(session_id, message_uuid, parent_uuid, role, "
+                "content, cwd, timestamp_iso, timestamp_unix, jsonl_path, line_number) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    msg["session_id"],
+                    msg["message_uuid"],
+                    msg.get("parent_uuid"),
+                    msg["role"],
+                    msg["content"],
+                    msg.get("cwd"),
+                    msg["timestamp_iso"],
+                    int(msg["timestamp_unix"]),
+                    msg["jsonl_path"],
+                    int(msg["line_number"]),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return None
+        return cur.lastrowid
+
     def upsert_embedding(self, rowid: int, vec: np.ndarray) -> None:
         """Attach an embedding to an existing message row.
 
