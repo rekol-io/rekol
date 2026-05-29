@@ -14,6 +14,8 @@ DEFAULTS: dict = dict(
     secret_check_on_capture=True,
     git_track=False,
     chunk_max_bytes=1500,
+    claude_projects_dir="~/.claude/projects",
+    session_search_enabled=True,
 )
 
 
@@ -31,6 +33,8 @@ class Config:
     secret_check_on_capture: bool
     git_track: bool
     chunk_max_bytes: int
+    claude_projects_dir: Path
+    session_search_enabled: bool
 
     @property
     def index_db_path(self) -> Path:
@@ -40,6 +44,15 @@ class Config:
             Path at ``$MEMORY_HOME/.index/index.db``.
         """
         return self.memory_home / ".index" / "index.db"
+
+    @property
+    def sessions_db_path(self) -> Path:
+        """Absolute path to the SQLite sessions database (transcripts index).
+
+        Returns:
+            Path at ``$MEMORY_HOME/.index/sessions.db``.
+        """
+        return self.memory_home / ".index" / "sessions.db"
 
 
 def load_config() -> Config:
@@ -76,4 +89,6 @@ def load_config() -> Config:
         secret_check_on_capture=bool(data["secret_check_on_capture"]),
         git_track=bool(data["git_track"]),
         chunk_max_bytes=int(data["chunk_max_bytes"]),
+        claude_projects_dir=Path(os.path.expanduser(str(data["claude_projects_dir"]))),
+        session_search_enabled=bool(data["session_search_enabled"]),
     )

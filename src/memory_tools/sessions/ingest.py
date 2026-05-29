@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from .store import SessionStore
 
@@ -187,11 +187,25 @@ def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -
     return stats
 
 
-def ingest_directory(root: Path, store: SessionStore, *, force: bool = False) -> IngestStats:
-    """Ingest every .jsonl under root (typically ``~/.claude/projects``)."""
+def ingest_directory(
+    root: Path,
+    store: SessionStore,
+    *,
+    force: bool = False,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> IngestStats:
+    """Ingest every .jsonl under root (typically ``~/.claude/projects``).
+
+    When ``progress_cb`` is provided, it is invoked every 50 files with
+    ``(files_done, files_total)`` so callers can print a counter for
+    multi-minute backfills. Tests typically pass ``None`` to keep stdout
+    clean.
+    """
     root = Path(root)
     total = IngestStats()
-    for jsonl in sorted(root.glob("**/*.jsonl")):
+    jsonls = sorted(root.glob("**/*.jsonl"))
+    files_total = len(jsonls)
+    for index, jsonl in enumerate(jsonls, start=1):
         file_stats = ingest_file(jsonl, store, force=force)
         total.files_seen += file_stats.files_seen
         total.files_ingested += file_stats.files_ingested
@@ -200,4 +214,6 @@ def ingest_directory(root: Path, store: SessionStore, *, force: bool = False) ->
         total.messages_skipped_dupe += file_stats.messages_skipped_dupe
         total.messages_skipped_malformed += file_stats.messages_skipped_malformed
         total.messages_skipped_no_text += file_stats.messages_skipped_no_text
+        if progress_cb is not None and (index % 50 == 0 or index == files_total):
+            progress_cb(index, files_total)
     return total
