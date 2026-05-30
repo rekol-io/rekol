@@ -16,7 +16,7 @@ def _group() -> SessionGroup:
             path=Path("/src/Topic A/note.md"),
             rel_to_source="Topic A/note.md",
             rel_to_session="note.md",
-            mtime_unix=1745835000,  # 2025-04-28T09:30:00Z
+            mtime_unix=1745835000,  # 2025-04-28T10:10:00Z
         )],
     )
 
@@ -55,6 +55,22 @@ def test_uuid_differs_across_prefixes() -> None:
 
 def test_session_id_differs_across_prefixes() -> None:
     assert _session_id("arc", "Topic A") != _session_id("other", "Topic A")
+
+
+def test_two_files_same_session_same_session_id_different_uuid() -> None:
+    group = SessionGroup(
+        session_name="Topic A",
+        folder_abs="/src/Topic A",
+        rel_to_source="Topic A",
+        files=[
+            FileEntry(Path("/src/Topic A/a.md"), "Topic A/a.md", "a.md", 1745835000),
+            FileEntry(Path("/src/Topic A/b.md"), "Topic A/b.md", "b.md", 1745835001),
+        ],
+    )
+    rows = build_rows(group, prefix="arc", texts={"a.md": "body a", "b.md": "body b"})
+    assert len(rows) == 2
+    assert rows[0]["sessionId"] == rows[1]["sessionId"]   # same session
+    assert rows[0]["uuid"] != rows[1]["uuid"]             # distinct messages
 
 
 def test_build_rows_skips_files_with_no_extracted_text() -> None:
