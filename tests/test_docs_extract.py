@@ -18,6 +18,8 @@ def test_is_text_native_rejects_binary_and_jsonl() -> None:
     assert not is_text_native(Path("a.html"))
     # .jsonl is deliberately skipped: extension collides with our output format
     assert not is_text_native(Path("a.jsonl"))
+    # extensionless files (e.g. Makefile) have no suffix → not text-native
+    assert not is_text_native(Path("Makefile"))
 
 
 def test_extract_text_passes_through_plain_text(tmp_path: Path) -> None:
@@ -36,6 +38,10 @@ def test_extract_text_returns_none_when_over_max_bytes(tmp_path: Path) -> None:
     f = tmp_path / "big.log"
     f.write_text("x" * 5000)
     assert extract_text(f, max_bytes=1000) is None
+
+
+def test_extract_text_returns_none_for_missing_file(tmp_path: Path) -> None:
+    assert extract_text(tmp_path / "ghost.txt", max_bytes=10_000) is None
 
 
 def test_extract_text_replaces_bad_encoding(tmp_path: Path) -> None:
