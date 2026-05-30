@@ -27,6 +27,7 @@ memory-invalidate = "memory_tools.cli_invalidate:main"
 memory-propose = "memory_tools.cli_propose:main"
 memory-migrate = "memory_tools.cli_migrate:main"
 claude-session-index = "memory_tools.cli_session_index:main"
+memory-docs-convert = "memory_tools.cli_docs_convert:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
