@@ -151,7 +151,7 @@ run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
 
 run "mkdir -p '${BIN_DIR}'"
 
-for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose memory-migrate claude-session-index; do
+for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose memory-migrate claude-session-index memory-docs-convert; do
   local_src="${COMPONENT_DIR}/bin/${cmd}"
   local_dst="${BIN_DIR}/${cmd}"
 
