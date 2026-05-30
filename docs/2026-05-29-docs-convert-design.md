@@ -224,15 +224,16 @@ memory-docs-convert SOURCE_DIR [--prefix backstage-ai-archive]
   reads), never hardcoded.
 
 **Stats output** (matches `claude-session-index` style; numbers below are the
-expected result for the `backstage_ai` `sessions/` input):
+**verified** result of the dry-run against the `backstage_ai` `sessions/` input):
 
 ```
-folders_seen=24 jsonl_written=17 files_converted=131
-files_skipped_unsupported=160 files_skipped_empty=? files_skipped_too_large=0 errors=0
+folders_seen=24 jsonl_written=17 files_converted=125
+files_skipped_unsupported=160 files_skipped_empty=6 files_skipped_too_large=0 errors=0
 ```
 
-(`files_skipped_empty` is left as `?` because it depends on how many text files
-extract to whitespace-only — determined at run time, not statically countable.)
+Accounting balances: 125 converted + 6 empty + 160 unsupported = 291 total files.
+The 6 empties are all 0–1 byte `prompts-auto-save` placeholder stubs (nothing to
+index). 131 text-native files by extension − 6 empty = 125 converted.
 
 ---
 
