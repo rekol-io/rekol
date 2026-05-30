@@ -10,6 +10,7 @@ risks the other, and the DBs are sized appropriately for their corpora.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import warnings
 from pathlib import Path
@@ -17,6 +18,41 @@ from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     import numpy as np
+
+
+# Matches a token that carries at least one letter or digit (Unicode-aware).
+# ``[^\W_]`` is "word char but not underscore" — i.e. alphanumeric — so a lone
+# operator token like ``-`` or ``_`` has no match and gets dropped.
+_FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
+
+
+def build_fts_match(query: str) -> Optional[str]:
+    """Turn a raw user query into a safe FTS5 ``MATCH`` expression.
+
+    FTS5 ``MATCH`` has its own query grammar: a leading ``-`` means NOT, ``:``
+    is a column filter, ``*`` is a prefix operator, and so on. Passing user text
+    straight in lets an ordinary query like ``slack-daemon ANTHROPIC_API_KEY``
+    raise ``OperationalError: no such column: ...`` (or silently mis-parse).
+
+    We defuse the grammar by emitting each whitespace-separated token as a
+    double-quoted FTS5 phrase (embedded quotes doubled), AND-combined with
+    spaces — preserving the existing implicit-AND keyword semantics while
+    stripping all operator meaning.
+
+    Tokens with no alphanumeric content (e.g. a lone ``-``) are dropped, because
+    a quoted phrase that tokenises to nothing is itself an FTS5 syntax error.
+    Returns ``None`` when nothing searchable remains, so callers can skip the
+    query rather than issue an empty ``MATCH`` (which FTS5 rejects).
+    """
+    phrases: List[str] = []
+    for token in query.split():
+        if not _FTS_HAS_ALNUM.search(token):
+            continue
+        escaped = token.replace('"', '""')
+        phrases.append(f'"{escaped}"')
+    if not phrases:
+        return None
+    return " ".join(phrases)
 
 
 SCHEMA_MESSAGES = """
@@ -246,7 +282,14 @@ class SessionStore:
         similarities. Inversion formulas like ``1/(1+bm25)`` are unsafe — they
         produce negative outputs for strong matches and divide-by-zero at
         ``bm25 == -1.0``.
+
+        The raw query is sanitised into quoted FTS5 phrases first (see
+        :func:`build_fts_match`); a query with no searchable tokens returns no
+        hits rather than issuing an invalid empty ``MATCH``.
         """
+        match_query = build_fts_match(query)
+        if match_query is None:
+            return []
         rows = self.conn.execute(
             "SELECT m.id, m.session_id, m.message_uuid, m.role, m.content, "
             "       m.cwd, m.timestamp_iso, m.timestamp_unix, m.jsonl_path, m.line_number, "
@@ -255,7 +298,7 @@ class SessionStore:
             "WHERE messages_fts MATCH ? "
             # ASC because raw bm25() is negative — most-negative is the strongest match.
             "ORDER BY bm25_score ASC LIMIT ?",
-            (query, top_k),
+            (match_query, top_k),
         ).fetchall()
         out: List[dict] = []
         for r in rows:

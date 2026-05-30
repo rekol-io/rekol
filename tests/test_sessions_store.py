@@ -129,6 +129,71 @@ def test_search_fts_score_is_positive_higher_is_better(tmp_path: Path) -> None:
     store.close()
 
 
+def test_search_fts_handles_punctuated_query_without_crashing(tmp_path: Path) -> None:
+    """Regression: a raw query with FTS5 operator chars (``-``, ``:``, ``_``)
+    used to be passed straight into MATCH and raised
+    ``sqlite3.OperationalError: no such column: ...``. The query must be
+    sanitised into quoted phrases first.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    store.insert_message(
+        _make_msg(uuid="a", session="s1")
+        | {"content": "the slack-daemon must unset ANTHROPIC_API_KEY for bedrock auth"}
+    )
+    store.insert_message(
+        _make_msg(uuid="b", session="s1", line=2) | {"content": "unrelated message about cats"}
+    )
+    # Hyphen, underscore, and a normal word together — the original crasher.
+    hits = store.search_fts("slack-daemon ANTHROPIC_API_KEY bedrock", top_k=5)
+    assert len(hits) == 1
+    assert hits[0]["message_uuid"] == "a"
+    store.close()
+
+
+def test_search_fts_defuses_leading_hyphen_operator(tmp_path: Path) -> None:
+    """A leading ``-`` is FTS5's NOT operator; sanitisation must treat it as a
+    literal term so ``-bedrock`` finds 'bedrock' rather than excluding it.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    store.insert_message(
+        _make_msg(uuid="a", session="s1") | {"content": "deploy notes mention bedrock"}
+    )
+    hits = store.search_fts("-bedrock", top_k=5)
+    assert len(hits) == 1
+    assert hits[0]["message_uuid"] == "a"
+    store.close()
+
+
+def test_search_fts_colon_query_does_not_crash(tmp_path: Path) -> None:
+    """A ``:`` is FTS5 column-filter syntax; a raw ``foo:bar`` query must not
+    raise.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    store.insert_message(
+        _make_msg(uuid="a", session="s1") | {"content": "the config sets base_url:litellm here"}
+    )
+    # The ``:`` is treated as part of a literal phrase (not FTS5 column syntax),
+    # so it matches the same adjacent token sequence in the content.
+    hits = store.search_fts("base_url:litellm", top_k=5)
+    assert hits[0]["message_uuid"] == "a"
+    store.close()
+
+
+def test_search_fts_empty_query_returns_no_hits(tmp_path: Path) -> None:
+    """A whitespace-only (or operator-only) query has nothing searchable; it
+    must return [] rather than issuing an empty MATCH (which FTS5 rejects).
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    store.insert_message(_make_msg(uuid="a", session="s1") | {"content": "hello"})
+    assert store.search_fts("   ", top_k=5) == []
+    assert store.search_fts("- :", top_k=5) == []
+    store.close()
+
+
 def test_files_seen_skip_logic(tmp_path: Path) -> None:
     store = SessionStore(db_path=tmp_path / "s.db", dim=384)
     store.init_schema()
