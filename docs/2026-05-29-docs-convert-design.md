@@ -52,7 +52,7 @@ to the ingester or store.
 | Output location | `~/.claude/projects/<prefix>/` | The dir the ingester already reads (`cfg.claude_projects_dir`) |
 | Source folder | **Left untouched** | `sessions/` stays in the repo as source of truth / git history |
 | Privacy | Local-only; no Dropbox, no git | `~/.claude/projects` is not synced/committed; `sessions.db` already Dropbox-excluded via xattr. No new leak surface. |
-| uuids | **Deterministic** (sha1 of relative path) | Makes re-runs idempotent via the ingester's `UNIQUE(session_id, message_uuid)` |
+| uuids | **Deterministic, prefix-salted** (sha1 of `prefix` + relative path) | Makes re-runs idempotent via the ingester's `UNIQUE(session_id, message_uuid)`, while preventing collisions across different source trees converted under different prefixes |
 
 ---
 
@@ -68,7 +68,7 @@ memory-tools/
     cli_docs_convert.py                     # Click CLI: flags, orchestration, stats output
     docs_convert/
       __init__.py
-      walk.py        # discover leaf folders + text files; classify by extension
+      walk.py        # group by immediate child of SOURCE_DIR; collect text files recursively
       extract.py     # bytes → plain text per file type (raw passthrough)
       transcript.py  # build synthetic JSONL rows (deterministic uuids, mtime timestamps)
       writer.py      # write one .jsonl per session folder into the target dir
@@ -108,11 +108,13 @@ files — not fragmented into one session per leaf directory. This matches the
 mental model: one `backstage_ai` topic folder = one session.
 
 - Files placed directly under `SOURCE_DIR` (not in any child dir) are grouped
-  into a synthetic `_root` session.
+  into a synthetic `_root` session. (For the `backstage_ai` input the only
+  root-level file is `.DS_Store`, which is non-text, so no `_root` session is
+  emitted in practice.)
 - A child directory with **zero** text files anywhere beneath it produces **no**
-  `.jsonl` (counted in `folders_seen` but not `jsonl_written`). This is why the
-  stats example below shows `folders_seen=24 jsonl_written=18` — 6 folders had no
-  text-native files.
+  `.jsonl` (counted in `folders_seen` but not `jsonl_written`). For the
+  `backstage_ai` input: 24 immediate child folders, of which 17 contain at least
+  one text-native file — hence `folders_seen=24 jsonl_written=17`.
 - Each message's `content` is prefixed with the file's path relative to its
   session folder, so a search hit shows which nested file it came from.
 
@@ -138,16 +140,23 @@ Field rationale:
 - **`message.role: "document"`** — stored role (ingester uses `message.role or
   row_type`); tags the hit as a document in search output.
 - **`message.content`** — the file's path relative to its session folder, then a
-  blank line, then the extracted text. The path prefix makes the originating
-  nested file visible in search snippets.
-- **Deterministic `uuid`** = `sha1(path relative to SOURCE_DIR)` — stable across
-  runs; the ingester's `UNIQUE(session_id, message_uuid)` makes re-conversion
-  idempotent.
-- **`sessionId`** = `sha1(session-folder name relative to SOURCE_DIR)` — groups
-  all of an immediate-child folder's (recursive) files under one session.
+  blank line, then the extracted text. The path prefix is applied **only after**
+  the extracted text passes the non-empty guard (see Extraction), so a
+  path-only, content-empty message is never emitted. The prefix makes the
+  originating nested file visible in search snippets.
+- **Deterministic, prefix-salted `uuid`** = `sha1(prefix + "\0" + path relative
+  to SOURCE_DIR)` — stable across runs (idempotent via the ingester's
+  `UNIQUE(session_id, message_uuid)`), and **collision-safe across source trees**:
+  two different SOURCE_DIRs that share a folder layout (e.g. both have a
+  `Security/` folder) would otherwise produce identical uuids and the second
+  run's files would be silently dropped as dupes. Salting with `prefix` (which
+  is unique per archive) prevents that.
+- **`sessionId`** = `sha1(prefix + "\0" + session-folder name relative to
+  SOURCE_DIR)` — groups all of an immediate-child folder's (recursive) files
+  under one session; prefix-salted for the same cross-source reason.
 - **`timestamp`** = file mtime — real chronology for date-sorted search and the
   `YYYY-MM-DD` display line.
-- **`cwd`** = source folder absolute path — shown in search so the origin folder
+- **`cwd`** = session-folder absolute path — shown in search so the origin folder
   is visible.
 - **One row per file** (no chunking) — large files become one big message; FTS5
   handles arbitrary length and search snippets truncate anyway.
@@ -161,11 +170,21 @@ The only module aware of file types. Best-effort; never throws on one bad file.
 **Text-native** (raw UTF-8 passthrough, `errors="replace"`):
 `md, txt, log, csv, tsv, json, py, sh, xml, yaml, yml`
 
-**Skip** (counted, never opened):
+**Skip** (counted as `files_skipped_unsupported`, never opened):
 `html, htm, xlsx, png, svg, pyc, ds_store`, and any other unlisted extension.
 
+**`.jsonl` is deliberately skipped**, not passed through as text. Its extension
+collides with this tool's own output format, and source `.jsonl` files (e.g.
+`Falcon Audit 2026-04-28/falcon_fix_log.jsonl`, an app log of
+`{"instance_id": …}` rows) are not transcript-shaped. Passing one through would
+emit a JSONL file the ingester then tries to parse as a transcript, where every
+row counts as malformed. Skipping it avoids that confusion.
+
 **Guards (each lands in a stat bucket — no silent drops):**
-- Empty after read (whitespace-only) → skip, `files_skipped_empty`.
+- Empty after read (whitespace-only) → skip, `files_skipped_empty`. This check
+  runs on the **extracted text, before** the path prefix is prepended in
+  `transcript.py`, so an empty file never becomes a path-only "ghost" message
+  that would slip past the ingester's own no-text guard.
 - Over `--max-bytes` (default 10 MB) → skip with logged warning,
   `files_skipped_too_large`. (The largest real file is a 5.3 MB JSON, which
   passes; this is a backstop for pathological inputs.)
@@ -190,19 +209,30 @@ memory-docs-convert SOURCE_DIR [--prefix backstage-ai-archive]
 - `--prefix` — subdir under `~/.claude/projects/` to namespace the archive
   (default `backstage-ai-archive`).
 - `--index/--no-index` (default `--index`) — after writing JSONL, chain
-  `claude-session-index --full`. `--no-index` writes files only (inspectable
-  artifact preserved). Resolves the "two commands" cost of the chosen approach.
+  `claude-session-index --incremental` (**not** `--full`). `--no-index` writes
+  files only (inspectable artifact preserved). Resolves the "two commands" cost
+  of the chosen approach.
+  - **Why `--incremental`, not `--full`:** `--full` passes `force=True` to
+    `ingest_directory`, which re-walks and re-ingests **every** file under
+    `~/.claude/projects` — all ~1,046 real transcripts — defeating the
+    `files_seen` mtime-skip gate. `--incremental` skips unchanged files but still
+    ingests the brand-new prefix files (they have no `files_seen` record yet), so
+    it produces the identical end state far faster.
 - `--dry-run` — walk + classify + report what *would* be written, write nothing.
   Mirrors the `install.sh` dry-run convention.
 - Target dir resolves from `cfg.claude_projects_dir` (same config the ingester
   reads), never hardcoded.
 
-**Stats output** (matches `claude-session-index` style):
+**Stats output** (matches `claude-session-index` style; numbers below are the
+expected result for the `backstage_ai` `sessions/` input):
 
 ```
-folders_seen=24 jsonl_written=18 files_converted=140
-files_skipped_unsupported=143 files_skipped_empty=3 files_skipped_too_large=0 errors=0
+folders_seen=24 jsonl_written=17 files_converted=131
+files_skipped_unsupported=160 files_skipped_empty=? files_skipped_too_large=0 errors=0
 ```
+
+(`files_skipped_empty` is left as `?` because it depends on how many text files
+extract to whitespace-only — determined at run time, not statically countable.)
 
 ---
 
@@ -210,7 +240,8 @@ files_skipped_unsupported=143 files_skipped_empty=3 files_skipped_too_large=0 er
 
 Three independent layers make re-running always safe:
 
-1. Deterministic uuids → identical rows on every run.
+1. Deterministic, prefix-salted uuids → identical rows on every run for the same
+   `(prefix, SOURCE_DIR)`, distinct rows across different prefixes.
 2. Writer overwrites its own `--prefix` dir cleanly.
 3. Ingester `UNIQUE(session_id, message_uuid)` dedups at insert.
 
@@ -229,12 +260,18 @@ Three independent layers make re-running always safe:
 
 ## Testing (TDD)
 
-- **`test_docs_walk`** — leaf-folder discovery, extension classification, nested
-  dirs (≥4 levels, matching `Security/tmsec-scope/.../xlsx`), empty folders.
+- **`test_docs_walk`** — immediate-child grouping (files ≥4 levels deep, e.g.
+  `Security/tmsec-scope/.../*.json`, group under the `Security` session, not
+  fragmented), extension classification, empty folders (counted, no jsonl),
+  `.jsonl` skipped.
 - **`test_docs_extract`** — text passthrough; empty → None; oversize → None;
   bad-encoding → replace, no crash.
-- **`test_docs_transcript`** — deterministic uuid stability (same path → same
-  uuid), mtime → ISO timestamp, `role=document`, schema validity.
+- **`test_docs_transcript`** — deterministic uuid stability (same path + same
+  prefix → same uuid); **different prefix → different uuid** (cross-source
+  collision guard); mtime → ISO timestamp, `role=document`, schema validity;
+  path-prefix applied after the empty-check (no path-only ghost message).
+- **`test_docs_walk`** also covers the **`_root` session** (a text file directly
+  under SOURCE_DIR groups into `_root`).
 - **`test_docs_convert_cli`** — end-to-end on `fixtures/docs_tree/`: dry-run
   writes nothing; real run writes N jsonl; **round-trip**: convert fixture → run
   the real `SessionStore`/ingest path → assert messages are searchable. The
@@ -258,6 +295,9 @@ Three independent layers make re-running always safe:
 - HTML extraction (revisit if weekly-status history is needed and not captured
   elsewhere).
 - xlsx extraction via openpyxl (the 123 Security/TMSEC spreadsheets).
-- Per-file chunking for very large files.
+- Per-file chunking for very large files. (Consequence in v1: the 5.3 MB
+  `unassigned_p2_tickets.json` becomes a single FTS5 row — one large, low-
+  precision hit. Acceptable for an archive; chunking is the fix if precision on
+  big files matters later.)
 - A generic multi-source "synthetic transcript" library — generalise only when a
   second concrete source type appears (YAGNI).
