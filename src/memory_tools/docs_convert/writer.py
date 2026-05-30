@@ -31,14 +31,24 @@ def write_sessions(
     """
     out_dir = Path(target_dir) / prefix
     if out_dir.exists():
+        if not out_dir.is_dir():
+            raise ValueError(f"out_dir exists but is not a directory: {out_dir}")
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     written: List[Path] = []
+    seen_stems: Dict[str, str] = {}   # stem -> originating session_name
     for session_name, rows in sorted(rows_by_session.items()):
         if not rows:
             continue
-        dst = out_dir / f"{_safe_filename(session_name)}.jsonl"
+        stem = _safe_filename(session_name)
+        if stem in seen_stems:
+            raise ValueError(
+                f"Filename collision: {session_name!r} and {seen_stems[stem]!r} "
+                f"both sanitise to {stem!r}.jsonl"
+            )
+        seen_stems[stem] = session_name
+        dst = out_dir / f"{stem}.jsonl"
         with dst.open("w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row, ensure_ascii=False))

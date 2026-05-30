@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from memory_tools.docs_convert.writer import write_sessions, _safe_filename
 
 
@@ -52,3 +54,18 @@ def test_write_sessions_skips_empty_session(tmp_path: Path) -> None:
     written = write_sessions(tmp_path, prefix="arc", rows_by_session={"Empty": []})
     assert written == []
     assert not (tmp_path / "arc" / "Empty.jsonl").exists()
+
+
+def test_write_sessions_raises_on_filename_collision(tmp_path: Path) -> None:
+    # "Topic A" and "Topic  A" (double space) both sanitise to "Topic-A"
+    rows = {"Topic A": [{"type": "user", "uuid": "u1", "message": {"content": "x"}}],
+            "Topic  A": [{"type": "user", "uuid": "u2", "message": {"content": "y"}}]}
+    with pytest.raises(ValueError, match="collision"):
+        write_sessions(tmp_path, prefix="arc", rows_by_session=rows)
+
+
+def test_write_sessions_unicode_roundtrips(tmp_path: Path) -> None:
+    rows = [{"type": "user", "uuid": "u1", "message": {"content": "Café 日本語"}}]
+    write_sessions(tmp_path, prefix="arc", rows_by_session={"Unicode": rows})
+    line = (tmp_path / "arc" / "Unicode.jsonl").read_text(encoding="utf-8").strip()
+    assert json.loads(line)["message"]["content"] == "Café 日本語"
