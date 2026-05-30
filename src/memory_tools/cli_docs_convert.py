@@ -22,8 +22,14 @@ from memory_tools.config import load_config
 from memory_tools.docs_convert import convert_tree
 
 
+_DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
+
+
 @click.command()
-@click.argument("source_dir", type=click.Path(path_type=Path))
+@click.argument(
+    "source_dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
 @click.option(
     "--prefix", default="backstage-ai-archive", show_default=True,
     help="Subdirectory under claude_projects_dir to write the synthetic "
@@ -31,7 +37,7 @@ from memory_tools.docs_convert import convert_tree
          "archives never collide.",
 )
 @click.option(
-    "--max-bytes", default=10 * 1024 * 1024, show_default=True, type=int,
+    "--max-bytes", default=_DEFAULT_MAX_BYTES, show_default=True, type=int,
     help="Skip any single file larger than this (backstop against one huge file "
          "becoming one giant low-precision search hit).",
 )
@@ -47,10 +53,6 @@ from memory_tools.docs_convert import convert_tree
 )
 def main(source_dir: Path, prefix: str, max_bytes: int, index: bool, dry_run: bool) -> None:
     """Convert SOURCE_DIR (a tree of text files) into synthetic transcripts."""
-    if not source_dir.is_dir():
-        click.echo(f"source_dir does not exist or is not a directory: {source_dir}", err=True)
-        sys.exit(2)
-
     cfg = load_config()
     target_dir = cfg.claude_projects_dir
     target_dir.mkdir(parents=True, exist_ok=True)
