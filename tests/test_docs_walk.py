@@ -24,13 +24,13 @@ def _make_tree(root: Path) -> None:
 
 def test_group_sessions_groups_by_immediate_child(tmp_path: Path) -> None:
     _make_tree(tmp_path)
-    groups = {g.session_name: g for g in group_sessions(tmp_path, max_bytes=10_000)}
+    groups = {g.session_name: g for g in group_sessions(tmp_path)}
     assert set(groups) == {"Topic A", "Security", "_root"}  # Binaries excluded
 
 
 def test_group_sessions_collects_nested_files_under_one_session(tmp_path: Path) -> None:
     _make_tree(tmp_path)
-    groups = {g.session_name: g for g in group_sessions(tmp_path, max_bytes=10_000)}
+    groups = {g.session_name: g for g in group_sessions(tmp_path)}
     sec = groups["Security"]
     rels = sorted(f.rel_to_session for f in sec.files)
     assert rels == ["scope/investigation/deep.json", "top.csv"]
@@ -38,7 +38,7 @@ def test_group_sessions_collects_nested_files_under_one_session(tmp_path: Path) 
 
 def test_group_sessions_root_session_for_loose_files(tmp_path: Path) -> None:
     _make_tree(tmp_path)
-    groups = {g.session_name: g for g in group_sessions(tmp_path, max_bytes=10_000)}
+    groups = {g.session_name: g for g in group_sessions(tmp_path)}
     root = groups["_root"]
     assert [f.rel_to_session for f in root.files] == ["loose.md"]
 
@@ -48,12 +48,20 @@ def test_group_sessions_excludes_jsonl_and_binary(tmp_path: Path) -> None:
     (tmp_path / "Mixed" / "keep.md").write_text("yes")
     (tmp_path / "Mixed" / "log.jsonl").write_text('{"x":1}')
     (tmp_path / "Mixed" / "img.png").write_bytes(b"\x89PNG")
-    groups = {g.session_name: g for g in group_sessions(tmp_path, max_bytes=10_000)}
+    groups = {g.session_name: g for g in group_sessions(tmp_path)}
     assert [f.rel_to_session for f in groups["Mixed"].files] == ["keep.md"]
 
 
 def test_group_sessions_rel_to_source_includes_session_folder(tmp_path: Path) -> None:
     _make_tree(tmp_path)
-    groups = {g.session_name: g for g in group_sessions(tmp_path, max_bytes=10_000)}
+    groups = {g.session_name: g for g in group_sessions(tmp_path)}
     a_note = next(f for f in groups["Topic A"].files if f.rel_to_session == "note1.md")
     assert a_note.rel_to_source == "Topic A/note1.md"
+
+
+def test_group_sessions_root_only_tree(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("alpha")
+    (tmp_path / "b.txt").write_text("beta")
+    groups = group_sessions(tmp_path)
+    assert [g.session_name for g in groups] == ["_root"]
+    assert sorted(f.rel_to_session for f in groups[0].files) == ["a.md", "b.txt"]

@@ -27,7 +27,9 @@ class FileEntry:
 @dataclass
 class SessionGroup:
     session_name: str
-    folder_abs: str
+    folder_abs: str            # absolute (resolved) session-folder path; informational only —
+                               # do NOT reconstruct file paths from folder_abs + rel_to_source
+                               # (rel paths are unresolved; a symlinked source_dir would mismatch)
     rel_to_source: str
     files: List[FileEntry] = field(default_factory=list)
 
@@ -41,12 +43,10 @@ def _entry_for(file_path: Path, source_dir: Path, session_dir: Path) -> FileEntr
     )
 
 
-def group_sessions(source_dir: Path, max_bytes: int) -> List[SessionGroup]:
+def group_sessions(source_dir: Path) -> List[SessionGroup]:
     """Return one SessionGroup per immediate-child dir (plus _root) with text files.
 
-    ``max_bytes`` is accepted for signature symmetry with the rest of the
-    pipeline but size-filtering happens in extract_text at conversion time, so a
-    file that is too large still appears here and is reported as skipped later.
+    Size-filtering is the caller's concern at extract time (see extract_text).
     Sorting (children alphabetical, files by rel_to_session) makes output
     deterministic.
     """
