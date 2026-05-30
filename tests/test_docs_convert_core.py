@@ -35,3 +35,29 @@ def test_convert_tree_dry_run_writes_nothing(tmp_path: Path) -> None:
     stats = convert_tree(src, out, prefix="arc", max_bytes=10_000, dry_run=True)
     assert stats.jsonl_written == 1           # reports what WOULD be written
     assert not (out / "arc").exists()         # but nothing on disk
+
+
+def test_convert_tree_counts_too_large_files(tmp_path: Path) -> None:
+    src = tmp_path / "src"; src.mkdir()
+    (src / "S").mkdir()
+    (src / "S" / "big.md").write_text("x" * 200)
+    stats = convert_tree(src, tmp_path / "out", prefix="p", max_bytes=10)
+    assert stats.files_skipped_too_large == 1
+    assert stats.files_converted == 0
+
+
+def test_convert_tree_multi_session_and_root(tmp_path: Path) -> None:
+    src = tmp_path / "src"; src.mkdir()
+    (src / "loose.md").write_text("root level")          # _root session
+    (src / "A").mkdir(); (src / "A" / "a.md").write_text("aaa")
+    (src / "B").mkdir(); (src / "B" / "b.md").write_text("bbb")
+    stats = convert_tree(src, tmp_path / "out", prefix="p", max_bytes=10_000)
+    assert stats.jsonl_written == 3   # _root + A + B
+    assert stats.files_converted == 3
+
+
+def test_convert_stats_as_line_format() -> None:
+    line = ConvertStats(folders_seen=2, jsonl_written=1, files_converted=1).as_line()
+    assert line == ("folders_seen=2 jsonl_written=1 files_converted=1 "
+                    "files_skipped_unsupported=0 files_skipped_empty=0 "
+                    "files_skipped_too_large=0 errors=0")
