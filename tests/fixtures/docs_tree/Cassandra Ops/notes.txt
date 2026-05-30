@@ -1,0 +1,1 @@
+litellm base url configured at simone.home
