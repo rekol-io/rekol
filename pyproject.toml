@@ -29,14 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-memory-index = "rekol.cli_index:main"
-memory-search = "rekol.cli_search:main"
-memory-capture = "rekol.cli_capture:main"
-memory-invalidate = "rekol.cli_invalidate:main"
-memory-propose = "rekol.cli_propose:main"
-memory-migrate = "rekol.cli_migrate:main"
-claude-session-index = "rekol.cli_session_index:main"
-memory-docs-convert = "rekol.cli_docs_convert:main"
+rekol = "rekol.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
