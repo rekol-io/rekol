@@ -1,4 +1,4 @@
-"""Config loading from $REKOL_HOME/memory.config.yaml, with defaults.
+"""Config loading from $REKOL_HOME/rekol.config.yaml (memory.config.yaml as fallback).
 
 The data-directory location is read from ``$REKOL_HOME`` (primary), falling
 back to ``$MEMORY_HOME`` so existing installs that only export ``MEMORY_HOME``
@@ -39,8 +39,9 @@ def resolve_memory_home() -> str | None:
 
 @dataclass
 class Config:
-    """Resolved configuration for rekol, derived from $REKOL_HOME/memory.config.yaml.
+    """Resolved configuration for rekol.
 
+    Derived from $REKOL_HOME/rekol.config.yaml (memory.config.yaml as fallback).
     The data-directory location is read from ``$REKOL_HOME`` (primary), falling
     back to ``$MEMORY_HOME``. Unknown keys in the YAML file are silently ignored
     so that future config additions remain forward-compatible with older tool
@@ -78,9 +79,9 @@ class Config:
 def load_config() -> Config:
     """Load and validate configuration from $REKOL_HOME (or $MEMORY_HOME).
 
-    Reads ``$REKOL_HOME/memory.config.yaml`` when it exists; falls back to
-    :data:`DEFAULTS` for any key that is absent. Unknown keys in the YAML
-    are silently ignored (forward-compatible).
+    Reads ``$REKOL_HOME/rekol.config.yaml`` (``memory.config.yaml`` as fallback)
+    when it exists; falls back to :data:`DEFAULTS` for any key that is absent.
+    Unknown keys in the YAML are silently ignored (forward-compatible).
 
     Returns:
         A fully populated :class:`Config` instance.
@@ -98,7 +99,11 @@ def load_config() -> Config:
             "(MEMORY_HOME is accepted as a fallback)."
         )
     root = Path(os.path.expanduser(env))
-    config_file = root / "memory.config.yaml"
+    # rekol.config.yaml is the current name; memory.config.yaml is read as a
+    # fallback so memory roots created by older versions keep working untouched.
+    config_file = root / "rekol.config.yaml"
+    if not config_file.exists():
+        config_file = root / "memory.config.yaml"
     data: dict = dict(DEFAULTS)
     if config_file.exists():
         loaded = yaml.safe_load(config_file.read_text()) or {}

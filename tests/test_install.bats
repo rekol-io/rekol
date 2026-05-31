@@ -42,7 +42,7 @@ teardown() {
     # MEMORY_HOME directory itself should not exist (mkdir -p is dry-run wrapped)
     [ ! -d "${MEMORY_HOME}/always" ]
     [ ! -d "${MEMORY_HOME}/.index" ]
-    [ ! -f "${MEMORY_HOME}/MEMORY.md" ]
+    [ ! -f "${MEMORY_HOME}/REKOL.md" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -57,14 +57,14 @@ teardown() {
     [ "$status" -eq 0 ]
 
     # Template content seeded correctly
-    [ -f "${MEMORY_HOME}/MEMORY.md" ]
+    [ -f "${MEMORY_HOME}/REKOL.md" ]
     [ -f "${MEMORY_HOME}/always/identity.md" ]
     [ -d "${MEMORY_HOME}/when" ]
     [ -d "${MEMORY_HOME}/topics" ]
 
-    # memory.config.yaml was created from .example
-    [ -f "${MEMORY_HOME}/memory.config.yaml" ]
-    [ ! -f "${MEMORY_HOME}/memory.config.yaml.example" ]
+    # rekol.config.yaml was created from .example
+    [ -f "${MEMORY_HOME}/rekol.config.yaml" ]
+    [ ! -f "${MEMORY_HOME}/rekol.config.yaml.example" ]
 
     # Index built
     [ -f "${MEMORY_HOME}/.index/index.db" ]

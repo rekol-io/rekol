@@ -29,7 +29,7 @@ readonly COMPONENT_DIR
 TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/rekol}}"
 BIN_DIR_DEFAULT="$HOME/bin"
 readonly SETTINGS_JSON="$HOME/.claude/settings.json"
-readonly SKILL_DIR="$HOME/.claude/skills/memory"
+readonly SKILL_BASE="$HOME/.claude/skills"
 readonly ZSHRC="$HOME/.zshrc"
 
 # Mutable config (set by flag parsing)
@@ -242,21 +242,27 @@ fi
 # =============================================================================
 
 if [[ "$DO_SKILL" == "1" ]]; then
-  run "mkdir -p '${SKILL_DIR}'"
+  # Install both the canonical `rekol` skill and the `memory` back-compat shim.
+  # Claude Code derives the /<name> trigger from the directory name and has no
+  # aliases field, so the shim directory is what keeps `/memory` working.
+  for skill_name in rekol memory; do
+    skill_dst_dir="${SKILL_BASE}/${skill_name}"
+    run "mkdir -p '${skill_dst_dir}'"
 
-  local_skill_src="${COMPONENT_DIR}/skill/memory/skill.md"
-  local_skill_dst="${SKILL_DIR}/skill.md"
+    local_skill_src="${COMPONENT_DIR}/skill/${skill_name}/skill.md"
+    local_skill_dst="${skill_dst_dir}/skill.md"
 
-  # Back up only when content differs — avoids churn on repeated installs
-  if [[ -f "$local_skill_dst" ]] && ! cmp -s "${local_skill_src}" "${local_skill_dst}"; then
-    local_skill_backup="${local_skill_dst}.bak-${TS}"
-    say "backing up existing ${local_skill_dst} → ${local_skill_backup}"
-    run "cp '${local_skill_dst}' '${local_skill_backup}'"
-    log_journal "BACKED-UP ${local_skill_dst} -> ${local_skill_backup}"
-  fi
+    # Back up only when content differs — avoids churn on repeated installs
+    if [[ -f "$local_skill_dst" ]] && ! cmp -s "${local_skill_src}" "${local_skill_dst}"; then
+      local_skill_backup="${local_skill_dst}.bak-${TS}"
+      say "backing up existing ${local_skill_dst} → ${local_skill_backup}"
+      run "cp '${local_skill_dst}' '${local_skill_backup}'"
+      log_journal "BACKED-UP ${local_skill_dst} -> ${local_skill_backup}"
+    fi
 
-  run "cp '${local_skill_src}' '${local_skill_dst}'"
-  log_journal "INSTALLED skill ${local_skill_dst}"
+    run "cp '${local_skill_src}' '${local_skill_dst}'"
+    log_journal "INSTALLED skill ${local_skill_dst}"
+  done
 fi
 
 # =============================================================================
@@ -425,15 +431,18 @@ if [[ ! -f "${RESOLVED_HOME}/.dropboxignore" ]]; then
 fi
 
 # =============================================================================
-# Step 8.5 — Local git repo for audit trail (opt-in via memory.config.yaml)
+# Step 8.5 — Local git repo for audit trail (opt-in via rekol.config.yaml (memory.config.yaml as fallback))
 # =============================================================================
-# When memory.config.yaml has `git_track: true`, init a local git repo in
+# When rekol.config.yaml (memory.config.yaml as fallback) has `git_track: true`, init a local git repo in
 # $REKOL_HOME so memory captures and edits get a real commit history.  This
 # is the only meaningful recovery path from Dropbox conflict copies (which
 # silently overwrite without auditable diffs).  No remote is configured — the
 # git repo is local-only by design.
 
-CONFIG_YAML="${RESOLVED_HOME}/memory.config.yaml"
+# rekol.config.yaml is the current name; fall back to memory.config.yaml so an
+# existing root created by an older install is still read.
+CONFIG_YAML="${RESOLVED_HOME}/rekol.config.yaml"
+[[ -f "${CONFIG_YAML}" ]] || CONFIG_YAML="${RESOLVED_HOME}/memory.config.yaml"
 # Strip the key, leading whitespace, any trailing inline comment, and any
 # trailing whitespace.  Without the comment-stripping pass, a config like
 # `git_track: true  # for audit` would parse to "true # for audit" and the
