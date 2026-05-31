@@ -12,8 +12,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .store import SessionStore
+
+if TYPE_CHECKING:
+    from rekol.embeddings import BaseEmbedder
 
 
 @dataclass
@@ -148,7 +152,13 @@ def iter_messages_in_file(jsonl_path: Path, stats: _RawIterResult | None = None)
             )
 
 
-def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -> IngestStats:
+def ingest_file(
+    jsonl_path: Path,
+    store: SessionStore,
+    *,
+    force: bool = False,
+    embedder: BaseEmbedder | None = None,
+) -> IngestStats:
     """Ingest a single JSONL file.
 
     Honours mtime+size skip via ``files_seen``: if the file is unchanged
@@ -156,9 +166,15 @@ def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -
     and no other work. Set ``force=True`` to bypass the skip (used by
     ``--full`` mode).
 
-    All inserts for the file happen in a single transaction (BEGIN ... COMMIT)
-    to avoid the per-row fsync cost that would otherwise dominate backfill on
-    machines with deep transcript history.
+    When ``embedder`` is provided, every newly-inserted message is also embedded
+    (batched once per file) and written to the vector index, making transcript
+    search semantic rather than keyword-only. ``embedder=None`` keeps the
+    FTS5-only path for speed.
+
+    All inserts for the file — messages *and* their embeddings — happen in a
+    single transaction (BEGIN ... COMMIT) to avoid the per-row fsync cost that
+    would otherwise dominate backfill on machines with deep transcript history,
+    and to keep rows and embeddings atomic.
     """
     path = Path(jsonl_path)
     stat = path.stat()
@@ -177,15 +193,24 @@ def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -
     # (a manual BEGIN raises OperationalError if the module thinks a
     # transaction is already open).
     with store.conn:
+        # (rowid, content) for each newly-inserted message, embedded in one
+        # batch after the insert loop so model inference happens once per file.
+        pending_embeddings: list[tuple[int, str]] = []
         for msg in iter_messages_in_file(path, raw_stats):
             rowid = store.insert_message_no_commit(msg)
             if rowid is None:
                 stats.messages_skipped_dupe += 1
             else:
                 stats.messages_inserted += 1
+                if embedder is not None:
+                    pending_embeddings.append((rowid, msg["content"]))
+        if embedder is not None and pending_embeddings:
+            vectors = embedder.embed_batch([content for _, content in pending_embeddings])
+            for (rowid, _content), vector in zip(pending_embeddings, vectors, strict=True):
+                store.upsert_embedding_no_commit(rowid, vector)
 
-    # files_seen is recorded AFTER the messages commit so a crash mid-file
-    # leaves the file un-recorded and the next run reingests it.
+    # files_seen is recorded AFTER the messages+embeddings commit so a crash
+    # mid-file leaves the file un-recorded and the next run reingests it.
     store.record_file_seen(str(path), mtime_unix, size_bytes)
     stats.files_ingested = 1
     stats.messages_skipped_no_text = raw_stats.no_text_count
@@ -193,14 +218,57 @@ def ingest_file(jsonl_path: Path, store: SessionStore, *, force: bool = False) -
     return stats
 
 
+def embed_missing(
+    store: SessionStore,
+    embedder: BaseEmbedder,
+    *,
+    batch_size: int = 256,
+    progress_cb: Callable[[int], None] | None = None,
+) -> int:
+    """Backfill embeddings for any messages that lack one. Returns the count.
+
+    This is the self-heal for the mtime+size skip gate: a file ingested while
+    embeddings were off (FTS-only, or ``--no-embed``) is never revisited by the
+    walk, and a forced re-walk does not help because its messages dedupe to
+    ``rowid=None`` and so are never re-embedded. Scanning for unembedded rows
+    directly is the only way to bring such an index to full semantic coverage
+    without a destructive rebuild.
+
+    Cheap in the steady state: when every message is already embedded the count
+    guard returns immediately without the anti-join. The work, when needed, is
+    done in batched transactions (one commit per batch) for the same fsync
+    reason as ``ingest_file``.
+    """
+    if store.count_messages() == store.count_embeddings():
+        return 0
+    total = 0
+    while True:
+        batch = store.fetch_unembedded(limit=batch_size)
+        if not batch:
+            break
+        with store.conn:
+            vectors = embedder.embed_batch([content for _rowid, content in batch])
+            for (rowid, _content), vector in zip(batch, vectors, strict=True):
+                store.upsert_embedding_no_commit(rowid, vector)
+        total += len(batch)
+        if progress_cb is not None:
+            progress_cb(total)
+    return total
+
+
 def ingest_directory(
     root: Path,
     store: SessionStore,
     *,
     force: bool = False,
+    embedder: BaseEmbedder | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> IngestStats:
     """Ingest every .jsonl under root (typically ``~/.claude/projects``).
+
+    When ``embedder`` is provided it is passed through to each file so message
+    embeddings are written alongside the rows (semantic search); ``None`` keeps
+    the FTS5-only path.
 
     When ``progress_cb`` is provided, it is invoked every 50 files with
     ``(files_done, files_total)`` so callers can print a counter for
@@ -212,7 +280,7 @@ def ingest_directory(
     jsonls = sorted(root.glob("**/*.jsonl"))
     files_total = len(jsonls)
     for index, jsonl in enumerate(jsonls, start=1):
-        file_stats = ingest_file(jsonl, store, force=force)
+        file_stats = ingest_file(jsonl, store, force=force, embedder=embedder)
         total.files_seen += file_stats.files_seen
         total.files_ingested += file_stats.files_ingested
         total.files_skipped_unchanged += file_stats.files_skipped_unchanged

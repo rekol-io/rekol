@@ -273,6 +273,71 @@ class SessionStore:
             )
         self.conn.commit()
 
+    def upsert_embedding_no_commit(self, rowid: int, vec: np.ndarray) -> None:
+        """Same as ``upsert_embedding`` but the caller controls the transaction.
+
+        Used by ``ingest_file`` so a whole file's message embeddings are written
+        in the same single BEGIN/COMMIT as the message inserts — avoiding the
+        per-row fsync that would otherwise dominate a deep-history backfill, and
+        keeping message rows and their embeddings atomic (a crash leaves the
+        file un-recorded in ``files_seen`` and the next run reingests cleanly).
+        """
+        import numpy as np
+
+        if vec.dtype != np.float32:
+            vec = vec.astype(np.float32)
+        if self._vec_loaded:
+            self.conn.execute("DELETE FROM messages_vec WHERE rowid = ?", (rowid,))
+            self.conn.execute(
+                "INSERT INTO messages_vec(rowid, embedding) VALUES(?, ?)",
+                (rowid, vec.tobytes()),
+            )
+        else:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO messages_vec_numpy(rowid, embedding) VALUES(?, ?)",
+                (rowid, vec.tobytes()),
+            )
+
+    def _vec_table(self) -> str:
+        """Name of the embedding table in use (vec0 vs numpy fallback).
+
+        A single internal constant, never user input, so it is safe to splice
+        into the SQL below.
+        """
+        return "messages_vec" if self._vec_loaded else "messages_vec_numpy"
+
+    def count_messages(self) -> int:
+        """Total message rows. Used as a cheap guard for the self-heal pass."""
+        return int(self.conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"])
+
+    def count_embeddings(self) -> int:
+        """Total embedding rows.
+
+        Embeddings are a subset of message rowids (never orphaned: messages are
+        never deleted here), so ``count_embeddings() == count_messages()`` iff
+        every message is embedded — letting the repair pass skip the (more
+        expensive) anti-join in the steady state.
+        """
+        return int(
+            self.conn.execute(f"SELECT COUNT(*) AS n FROM {self._vec_table()}").fetchone()["n"]
+        )
+
+    def fetch_unembedded(self, limit: int) -> list[tuple[int, str]]:
+        """Return up to ``limit`` (rowid, content) pairs for unembedded messages.
+
+        Drives the self-heal pass that backfills embeddings for an index built
+        FTS-only (or with ``--no-embed``): the mtime+size skip gate would never
+        revisit those files, so this is the only path to full semantic coverage
+        short of a destructive rebuild.
+        """
+        rows = self.conn.execute(
+            f"SELECT m.id AS id, m.content AS content FROM messages m "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {self._vec_table()} v WHERE v.rowid = m.id) "
+            f"ORDER BY m.id LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [(int(r["id"]), r["content"]) for r in rows]
+
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.
 
