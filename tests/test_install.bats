@@ -196,6 +196,31 @@ teardown() {
   [ -f "$REKOLH/.index/sessions.db" ]
 }
 
+@test "install does not abort when the config omits git_track" {
+  # Regression: Step 8.5 greps the config for git_track under `set -o pipefail`.
+  # A config that omits the key makes grep exit 1, which used to abort the whole
+  # install. A hand-written/partial config must still install cleanly (git
+  # tracking simply stays off, the safe default).
+  SBHOME="$TESTROOT/sandhome-gt"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-gt"
+  mkdir -p "$REKOLH"
+  # Deliberately NO git_track line, and no projects dir (backfill self-gates).
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-hook --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  # Got past Step 8.5 and built the curated index.
+  [ -f "$REKOLH/.index/index.db" ]
+  # git tracking stayed off (no key present, no repo initialised).
+  [ ! -d "$REKOLH/.git" ]
+}
+
 @test "full install seeds generic template and yields a working search" {
   # Plan 2: migration is now opt-in (no --migrate here), and the template is
   # genericized, so the from-zero install path can run end-to-end in CI.
