@@ -4,7 +4,7 @@ If you are a fresh Claude Code instance and a user points you at this file, read
 
 ## What this is
 
-A persistent memory system for Claude Code. Data lives in `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback) — typically a Dropbox-backed directory. Four layers of markdown:
+A persistent memory system for Claude Code. Data lives in `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback) — a local folder you own; sync it across machines however you like (Dropbox, iCloud Drive, a git remote, Syncthing, or not at all). The vector index under `.index/` stays local and must be excluded from sync. Four layers of markdown:
 
 - `always/*.md` — re-injected every session via the SessionStart hook. Hard budget 8 KB total.
 - `when/when-<activity>.md` — task-triggered defaults. You read these when about to do the matching activity.

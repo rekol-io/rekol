@@ -42,6 +42,7 @@ def convert_tree(
     prefix: str,
     max_bytes: int,
     dry_run: bool = False,
+    text_extensions: frozenset[str] | None = None,
 ) -> ConvertStats:
     """Walk source_dir, extract text, build rows, write one .jsonl per session.
 
@@ -56,10 +57,10 @@ def convert_tree(
     # Separate rglob pass: group_sessions discards non-text-native files and
     # cannot report what it dropped, so count them here for honest accounting.
     for p in source_dir.rglob("*"):
-        if p.is_file() and not is_text_native(p):
+        if p.is_file() and not is_text_native(p, text_extensions=text_extensions):
             stats.files_skipped_unsupported += 1
 
-    groups = group_sessions(source_dir)
+    groups = group_sessions(source_dir, text_extensions=text_extensions)
     # folders_seen = immediate child directories (the unit a session maps to).
     stats.folders_seen = sum(1 for c in source_dir.iterdir() if c.is_dir())
 

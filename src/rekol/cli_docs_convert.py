@@ -1,26 +1,24 @@
-"""memory-docs-convert: turn a text-file tree into synthetic Claude Code JSONL.
+"""rekol import: turn a text-file tree into synthetic Claude Code JSONL.
 
 Writes one .jsonl per immediate-child folder of SOURCE_DIR into
-``<claude_projects_dir>/<prefix>/`` so the existing claude-session-index
-ingester surfaces the content in memory-search. By default it then chains
-``claude-session-index --incremental`` to ingest immediately.
+``<claude_projects_dir>/<prefix>/`` so the existing rekol session-index
+ingester surfaces the content in rekol search. By default it then chains
+``rekol session-index --incremental`` to ingest immediately.
 
-    memory-docs-convert ~/path/to/sessions --prefix backstage-ai-archive
-    memory-docs-convert ~/path/to/sessions --no-index      # write only
-    memory-docs-convert ~/path/to/sessions --dry-run        # report, write nothing
+    rekol import ~/path/to/sessions --prefix backstage-ai-archive
+    rekol import ~/path/to/sessions --no-index      # write only
+    rekol import ~/path/to/sessions --dry-run        # report, write nothing
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from rekol.config import load_config
-from rekol.docs_convert import convert_tree
+from rekol.docs_convert import TEXT_EXTENSIONS, convert_tree
 
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
 
@@ -50,7 +48,7 @@ _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
     "--index/--no-index",
     default=True,
     show_default=True,
-    help="After writing, chain `claude-session-index --incremental` to ingest. "
+    help="After writing, chain `rekol session-index --incremental` to ingest. "
     "--incremental (not --full) so the existing ~1000 transcripts are not "
     "needlessly re-walked.",
 )
@@ -59,11 +57,36 @@ _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
     is_flag=True,
     help="Report what would be written without writing anything.",
 )
-def main(source_dir: Path, prefix: str, max_bytes: int, index: bool, dry_run: bool) -> None:
+@click.option(
+    "--include",
+    default="",
+    help="Comma-separated extra extensions to treat as text (no dots), e.g. "
+    "'html,rst'. Added on top of the built-in allowlist.",
+)
+@click.option(
+    "--exclude",
+    default="",
+    help="Comma-separated extensions to drop from the allowlist (no dots), e.g. 'json,csv'. "
+    "Exclude takes precedence over --include if the same extension appears in both.",
+)
+def main(
+    source_dir: Path,
+    prefix: str,
+    max_bytes: int,
+    index: bool,
+    dry_run: bool,
+    include: str,
+    exclude: str,
+) -> None:
     """Convert SOURCE_DIR (a tree of text files) into synthetic transcripts."""
     cfg = load_config()
     target_dir = cfg.claude_projects_dir
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    def _split(raw: str) -> set[str]:
+        return {e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip()}
+
+    text_extensions = (TEXT_EXTENSIONS | _split(include)) - _split(exclude)
 
     stats = convert_tree(
         source_dir=source_dir,
@@ -71,6 +94,7 @@ def main(source_dir: Path, prefix: str, max_bytes: int, index: bool, dry_run: bo
         prefix=prefix,
         max_bytes=max_bytes,
         dry_run=dry_run,
+        text_extensions=text_extensions,
     )
     click.echo(stats.as_line())
 
@@ -81,22 +105,21 @@ def main(source_dir: Path, prefix: str, max_bytes: int, index: bool, dry_run: bo
     if not index:
         return
 
-    # Chain the existing ingester (incremental: skip unchanged transcripts).
-    if shutil.which("claude-session-index") is None:
-        click.echo(
-            "claude-session-index not on PATH; JSONL written but not indexed. "
-            "Open a fresh shell or run `claude-session-index --incremental` manually.",
-            err=True,
-        )
-        sys.exit(3)
-    click.echo("running claude-session-index --incremental ...", err=True)
-    completed = subprocess.run(["claude-session-index", "--incremental"], check=False)
-    if completed.returncode != 0:
-        click.echo(
-            f"claude-session-index exited {completed.returncode}; index may be partial.",
-            err=True,
-        )
-        sys.exit(completed.returncode)
+    # Ingest the just-written transcripts by invoking the session-index
+    # subcommand in-process. Lazy import to avoid the cli -> cli_docs_convert
+    # -> cli import cycle. standalone_mode=False makes Click return/raise
+    # instead of sys.exit, so a failure here doesn't kill the whole convert.
+    from rekol.cli import main as rekol_cli
+
+    click.echo("ingesting new transcripts (session-index --incremental) ...", err=True)
+    # We only translate SystemExit here; cli_session_index uses sys.exit on every
+    # error path. ClickException/Abort (none today) are intentionally allowed to propagate.
+    try:
+        rekol_cli(["session-index", "--incremental"], standalone_mode=False)
+    except SystemExit as exc:  # some leaf commands still sys.exit on error paths
+        if exc.code not in (0, None):
+            click.echo(f"session-index exited {exc.code}; index may be partial.", err=True)
+            sys.exit(exc.code)
 
 
 if __name__ == "__main__":

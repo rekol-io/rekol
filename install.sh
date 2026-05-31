@@ -2,7 +2,7 @@
 # rekol installer — idempotent; safe to rerun on an already-bootstrapped machine.
 #
 # Required environment variable:
-#   REKOL_HOME — path to the memory root directory (Dropbox-backed recommended)
+#   REKOL_HOME — path to the memory root directory (local; sync it however you like)
 #                (MEMORY_HOME is accepted as a fallback for existing installs)
 #
 # Optional flags:
@@ -88,7 +88,7 @@ done
 # --- Pre-flight: REKOL_HOME (or MEMORY_HOME fallback) must be set ---
 
 if [[ -z "${REKOL_HOME:-}" && -z "${MEMORY_HOME:-}" ]]; then
-  printf 'error: neither REKOL_HOME nor MEMORY_HOME is set. Point REKOL_HOME at a Dropbox-backed directory (MEMORY_HOME is accepted as a fallback).\n' >&2
+  printf 'error: neither REKOL_HOME nor MEMORY_HOME is set. Point REKOL_HOME at any directory (sync it via Dropbox/iCloud/git/Syncthing or keep it local) (MEMORY_HOME is accepted as a fallback).\n' >&2
   exit 2
 fi
 
@@ -422,13 +422,14 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
-# Step 8 — Dropbox ignore file (best-effort; non-fatal if Dropbox absent)
+# Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
-# Prevents the local vector index and write-lock from being synced to Dropbox,
-# which would cause conflicts across machines.
+# Keep the local vector index out of any file-sync (it is machine-specific,
+# rebuildable, and would conflict across machines). We write `.dropboxignore`;
+# for other sync tools exclude `.index/` yourself.
 
 if [[ ! -f "${RESOLVED_HOME}/.dropboxignore" ]]; then
-  say "writing ${RESOLVED_HOME}/.dropboxignore to keep .index/ out of Dropbox"
+  say "writing ${RESOLVED_HOME}/.dropboxignore to keep machine-specific .index/ out of sync (for other sync tools, exclude .index/ yourself)"
   run "printf '.index/\n.writing.lock\n' > '${RESOLVED_HOME}/.dropboxignore'"
   log_journal "CREATED ${RESOLVED_HOME}/.dropboxignore"
 fi

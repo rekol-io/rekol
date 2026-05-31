@@ -41,5 +41,12 @@ Memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback):
 The markdown is the source of truth; `.index/` is a disposable, rebuildable
 SQLite vector index (never synced).
 
+## Sync (optional)
+`$REKOL_HOME` is a local folder you own; sync it across machines however you
+like — Dropbox, iCloud Drive, a git remote, Syncthing, or not at all. The
+vector index under `.index/` stays local and must be excluded from sync (it is
+machine-specific and rebuildable). The installer writes `.dropboxignore`; for
+other sync tools, exclude `.index/` yourself.
+
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).

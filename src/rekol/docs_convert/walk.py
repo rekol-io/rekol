@@ -47,7 +47,9 @@ def _entry_for(file_path: Path, source_dir: Path, session_dir: Path) -> FileEntr
     )
 
 
-def group_sessions(source_dir: Path) -> list[SessionGroup]:
+def group_sessions(
+    source_dir: Path, text_extensions: frozenset[str] | None = None
+) -> list[SessionGroup]:
     """Return one SessionGroup per immediate-child dir (plus _root) with text files.
 
     Size-filtering is the caller's concern at extract time (see extract_text).
@@ -59,7 +61,11 @@ def group_sessions(source_dir: Path) -> list[SessionGroup]:
 
     # _root session: text files directly under source_dir (non-recursive)
     root_files = sorted(
-        (p for p in source_dir.iterdir() if p.is_file() and is_text_native(p)),
+        (
+            p
+            for p in source_dir.iterdir()
+            if p.is_file() and is_text_native(p, text_extensions=text_extensions)
+        ),
         key=lambda p: p.name,
     )
     if root_files:
@@ -75,7 +81,11 @@ def group_sessions(source_dir: Path) -> list[SessionGroup]:
     # One session per immediate child directory
     for child in sorted((p for p in source_dir.iterdir() if p.is_dir()), key=lambda p: p.name):
         text_files = sorted(
-            (p for p in child.rglob("*") if p.is_file() and is_text_native(p)),
+            (
+                p
+                for p in child.rglob("*")
+                if p.is_file() and is_text_native(p, text_extensions=text_extensions)
+            ),
             key=lambda p: p.relative_to(child).as_posix(),
         )
         if not text_files:
