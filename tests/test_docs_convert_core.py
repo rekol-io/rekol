@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.docs_convert import ConvertStats, convert_tree
+from rekol.docs_convert import ConvertStats, convert_tree
 
 
 def _tree(root: Path) -> None:

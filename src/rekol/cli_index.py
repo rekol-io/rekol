@@ -6,10 +6,10 @@ import sys
 
 import click
 
-from memory_tools.config import load_config
-from memory_tools.embeddings import get_embedder
-from memory_tools.indexer import Indexer
-from memory_tools.store import IndexStore
+from rekol.config import load_config
+from rekol.embeddings import get_embedder
+from rekol.indexer import Indexer
+from rekol.store import IndexStore
 
 
 @click.group()

@@ -23,11 +23,11 @@ from datetime import UTC, datetime
 
 import click
 
-from memory_tools.config import load_config
-from memory_tools.embeddings import get_embedder
-from memory_tools.search_combined import Source, search_all
-from memory_tools.sessions.store import SessionStore
-from memory_tools.store import IndexStore
+from rekol.config import load_config
+from rekol.embeddings import get_embedder
+from rekol.search_combined import Source, search_all
+from rekol.sessions.store import SessionStore
+from rekol.store import IndexStore
 
 
 def _format_session_timestamp(ts_unix: int) -> str:

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from memory_tools.embeddings import (
+from rekol.embeddings import (
     BaseEmbedder,
     HashingEmbedder,
     get_embedder,

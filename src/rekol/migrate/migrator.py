@@ -13,9 +13,9 @@ from pathlib import Path
 import frontmatter
 import yaml
 
-from memory_tools.migrate.archive import archive_file, write_retirement_pointer
-from memory_tools.migrate.classify import Classification, classify_file
-from memory_tools.migrate.discover import (
+from rekol.migrate.archive import archive_file, write_retirement_pointer
+from rekol.migrate.classify import Classification, classify_file
+from rekol.migrate.discover import (
     discover_files_in_dir,
     has_migration_marker,
 )

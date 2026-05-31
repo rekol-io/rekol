@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.config import load_config
+from rekol.config import load_config
 
 
 def test_load_config_from_memory_home(tmp_path: Path, monkeypatch) -> None:

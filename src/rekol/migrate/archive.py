@@ -18,7 +18,7 @@ import datetime as dt
 import shutil
 from pathlib import Path
 
-from memory_tools.migrate.discover import MIGRATION_MARKER_NAME, LegacyFile
+from rekol.migrate.discover import MIGRATION_MARKER_NAME, LegacyFile
 
 ARCHIVE_DIR_NAME = "old-memory-archive"
 

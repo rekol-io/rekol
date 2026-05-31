@@ -5,12 +5,12 @@ from pathlib import Path
 import frontmatter
 from click.testing import CliRunner
 
-from memory_tools.cli_capture import main as capture_main
-from memory_tools.cli_index import main as index_main
-from memory_tools.cli_invalidate import main as invalidate_main
-from memory_tools.cli_propose import extract_candidates
-from memory_tools.cli_propose import main as propose_main
-from memory_tools.cli_search import main as search_main
+from rekol.cli_capture import main as capture_main
+from rekol.cli_index import main as index_main
+from rekol.cli_invalidate import main as invalidate_main
+from rekol.cli_propose import extract_candidates
+from rekol.cli_propose import main as propose_main
+from rekol.cli_search import main as search_main
 
 
 def _seed_memory(root: Path) -> None:
@@ -553,7 +553,7 @@ def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
         f"embedding_model: test-hashing\nclaude_projects_dir: {fake_projects.parent}\n"
     )
 
-    from memory_tools.cli_session_index import main as session_idx_main
+    from rekol.cli_session_index import main as session_idx_main
 
     runner = CliRunner()
     setup_result = runner.invoke(session_idx_main, ["--full"])

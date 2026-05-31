@@ -22,8 +22,8 @@ from typing import Any
 
 import click
 
-from memory_tools.migrate.discover import discover_auto_memory_sources
-from memory_tools.migrate.migrator import MigrationReport, migrate_dir
+from rekol.migrate.discover import discover_auto_memory_sources
+from rekol.migrate.migrator import MigrationReport, migrate_dir
 
 
 def _memory_home() -> Path:

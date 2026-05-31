@@ -19,8 +19,8 @@ from pathlib import Path
 
 import click
 
-from memory_tools.config import load_config
-from memory_tools.docs_convert import convert_tree
+from rekol.config import load_config
+from rekol.docs_convert import convert_tree
 
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
 
