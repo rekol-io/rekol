@@ -18,7 +18,9 @@ every layer:
    retained as a fallback so Leon's live setup keeps working.
 4. Rebrand all user-facing text (README, docs, hooks, skill, templates, CHANGELOG).
 5. Rename the GitHub repo `memory-tools` → `rekol` (documented step; auto-redirects).
-6. Note (no execution) that PyPI publishing will use the name `rekol` at v0.1.
+6. Record (no execution) the PyPI name-reservation plan: claim `rekol` via a
+   legitimate `0.1.0a1` pre-release published over Trusted Publishing, before public
+   launch (see Task 9).
 
 The existing **167-test suite is the regression safety net**. After the package
 rename and after the CLI consolidation, the full suite must pass. New tests are
@@ -128,10 +130,16 @@ Three distinct env vars exist; do not conflate them:
 | `REKOL_HOME` | New primary name for the data directory | **Yes** — introduced |
 | `MEMORY_TOOLS_HOME` | The **install location** of the venv/shims (used by `bin/*` and `install.sh`) | Rename to `REKOL_TOOLS_HOME` as part of the shim/installer task, but keep a fallback too (Task 6) |
 
-`MEMORY.md` (the always-on memory index file at the data root) is a **filename**, not
-the brand. It is intentionally **left unchanged** — renaming it would break every
-user's existing memory root and the SessionStart hook that `cat`s it. Flagged for
-Leon in the self-review.
+**Data-level names are a DEFERRED decision, NOT a permanent keep.** The data-level
+names — `MEMORY.md` (the always-on memory index file at the data root),
+`memory.config.yaml`, the `skill/memory/` directory, and the skill name `memory` —
+are **held stable by this rebrand for safety only**. Renaming any of them here would
+break every user's existing memory root, the `config.py` reader, the SessionStart
+hook that `cat`s `MEMORY.md`, and skill discovery — risk this brand-only rebrand
+should not take on. **They are explicitly flagged for revisit in Plan 2
+(genericization), where the right generic names are decided and a back-compat
+migration is designed.** Do not read "unchanged in this plan" as "settled forever":
+this rebrand defers the data-name decision to Plan 2; it does not resolve it.
 
 ---
 
@@ -518,17 +526,21 @@ Leon's live shell exports `MEMORY_HOME`.
 
 2. **`skill/memory/skill.md`:** rebrand prose and the `memory-search` mention
    (~line 8/17) to `rekol search`; `$MEMORY_HOME` → `$REKOL_HOME` (note fallback).
-   **Directory rename decision:** the skill currently lives at `skill/memory/`.
-   Renaming to `skill/rekol/` is cleaner but the skill *name* `memory` is what users
-   trigger and may be referenced elsewhere. **Flag for Leon** (see self-review) —
-   default plan keeps the dir as `skill/memory/` and only rebrands the content,
-   to avoid breaking skill discovery.
+   **Directory rename decision (DEFERRED to Plan 2):** the skill currently lives at
+   `skill/memory/`. Renaming to `skill/rekol/` is cleaner but the skill *name*
+   `memory` is what users trigger and may be referenced elsewhere. This rebrand
+   **keeps the dir as `skill/memory/` and only rebrands the content** to avoid
+   breaking skill discovery — but this is a **safety hold, not a permanent keep**.
+   The dir/name decision is **flagged for revisit in Plan 2 (genericization)**, where
+   a rename + trigger-compat path is designed.
 
 3. **`template/`:** `memory.config.yaml.example`, `MEMORY.md`, and the `*.example`
-   files — grep for `memory-tools` / `memory-` commands and rebrand. Keep the
-   `MEMORY.md` filename and the `memory.config.yaml` filename unless Leon decides to
-   rename them (flagged — renaming the config filename would require a matching
-   change in `config.py` which currently reads `memory.config.yaml`).
+   files — grep for `memory-tools` / `memory-` commands and rebrand. **Keep the
+   `MEMORY.md` filename and the `memory.config.yaml` filename in this rebrand** —
+   renaming the config filename would require a matching change in `config.py` which
+   currently reads `memory.config.yaml`. This is a **deferred decision**, not a
+   permanent keep: the data-level filenames are **flagged for revisit in Plan 2
+   (genericization)**, which owns the rename + back-compat-read design.
 
 4. **Docs + top-level prose:** `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`,
    `READ-ME-CLAUDE.md`, `docs/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`,
@@ -577,11 +589,27 @@ auto-redirects the old URL, so existing clones and links keep resolving.
 
 ---
 
-### Task 9 — PyPI note (no execution)
+### Task 9 — PyPI name reservation plan (note / future task, not executed here)
 
 The distribution name is now `rekol` (set in Task 3). The name `rekol` has been
-verified available on PyPI. **Publishing is out of scope** for this plan; it happens
-when v0.1 ships. No action here — recorded for traceability.
+verified available on PyPI. **Nothing is published in this plan** — but the *strategy*
+for claiming and protecting the name is recorded here as a future task.
+
+**Reserve by publishing a legitimate early pre-release, not a placeholder.**
+Right **after** the rebrand renames the package (Task 3) and the tree builds cleanly,
+reserve `rekol` by publishing a **real** early pre-release: **`0.1.0a1`**. Do **not**
+upload a hollow placeholder/squat: under **PEP 541** an empty placeholder is
+discouraged and offers weak protection (it can be challenged/reclaimed), whereas a
+genuine pre-release of the actual package is a normal, defensible claim.
+
+**Use PyPI Trusted Publishing (no API tokens).** Set up **Trusted Publishing**
+(OIDC from GitHub Actions) so releases are minted by a GitHub Actions workflow with
+no long-lived API tokens stored anywhere. Configure the trusted publisher on PyPI for
+the `leonkatz/rekol` repo + release workflow, then publish `0.1.0a1` from CI.
+
+**Timing.** Do this **before any public launch** so the name is locked when the repo
+goes public — but it is **not urgent while the repo/name is still private**. This is
+recorded as a **future task**, **not executed in this plan**.
 
 ---
 
@@ -678,6 +706,38 @@ subsection — see Deliverables):
 
 Document the **expected first-run output** so the quickstart is verifiable.
 
+### Interactive onboarding — discover & import what already exists
+
+> **Specified here, built in Plan 2.** The capabilities below are a **requirement
+> recorded by this section**; they are **designed and implemented in Plan 2
+> (genericization & onboarding)**, not in this rebrand. This rebrand only fixes the
+> requirement.
+
+The from-zero flow above assumes a truly empty machine. On a **real** machine, a new
+user almost always already has searchable material lying around. So install /
+`rekol init` should be **interactive** — it detects what exists and **offers to
+ingest it** rather than starting blank. Onboarding steps:
+
+1. **Detect existing Claude Code session transcripts** at
+   `~/.claude/projects/**/*.jsonl` and offer to index them
+   (`rekol session-index`): *"Found N past Claude Code sessions — index them so
+   REKOL can search your history?"* This is the **single biggest first-run
+   value-add** — it turns install into an instantly searchable history of past work
+   instead of an empty store.
+2. **Offer to import an existing notes/docs corpus** (`rekol import <dir>`) — for
+   example an Obsidian vault or a folder of markdown notes.
+3. **Detect cloud-sync folders** — Dropbox, iCloud Drive
+   (`~/Library/Mobile Documents`), Google Drive, OneDrive, Syncthing — and offer
+   them as `REKOL_HOME` location options. Default to a **local** directory; explain
+   that the markdown **syncs** across devices via the cloud folder, but the vector
+   **index stays local** and **must be excluded from sync** (it is machine-specific,
+   rebuildable, and would corrupt/churn if synced).
+4. **Opt-in legacy / other-agent memory migration** — the existing `--migrate` path,
+   offered (not forced) during onboarding.
+
+These interactive-onboarding capabilities are **specified here but implemented in
+Plan 2 (genericization & onboarding)**.
+
 ### Clean-room test beds (how WE validate fresh-start without Leon's data/install)
 
 1. **Docker container (primary).** A clean Linux image:
@@ -750,6 +810,18 @@ the test bed now, run it for real once Plan 2's content exists.
       assert a from-zero install (empty `REKOL_HOME`, seeded from `template/`) yields
       a working `rekol search`. Note: meaningful **only after Plan 2** provides the
       genericized template/`identity.md` content.
+- [ ] **Data-level names are flagged as DEFERRED, not kept forever:** the plan states
+      explicitly that `MEMORY.md`, `memory.config.yaml`, `skill/memory/`, and the
+      skill name `memory` are held stable here **only for safety** and **must be
+      revisited in Plan 2 (genericization)** — not silently kept.
+- [ ] **Interactive-onboarding requirement recorded:** the Fresh-Start section
+      documents install/`rekol init` discovering Claude Code transcripts
+      (`~/.claude/projects/**/*.jsonl`), offering corpus import, detecting cloud-sync
+      folders (index excluded from sync), and opt-in `--migrate` — all marked
+      **built in Plan 2**.
+- [ ] **PyPI reservation plan recorded:** Task 9 specifies a legitimate `0.1.0a1`
+      pre-release over Trusted Publishing (OIDC, no tokens), before public launch —
+      as a future task, not executed in this plan.
 
 ---
 
@@ -757,10 +829,16 @@ the test bed now, run it for real once Plan 2's content exists.
 
 1. **`skill/memory/` directory + skill name `memory`** — rebrand content only (keep
    dir/name `memory`) or rename to `skill/rekol/` and rename the skill? Renaming may
-   break existing skill triggers. *Default: keep `memory`, rebrand content.*
+   break existing skill triggers. *Default for THIS rebrand: keep `memory`, rebrand
+   content. This is a **deferred decision, not a permanent keep** — the dir/name is
+   flagged for revisit in **Plan 2 (genericization)**, which owns the rename +
+   trigger-compat design.*
 2. **`MEMORY.md` filename and `memory.config.yaml` filename** at the data root — keep
    (avoids breaking every existing memory root) or rename to a `REKOL.md` /
-   `rekol.config.yaml` with back-compat reads? *Default: keep filenames.*
+   `rekol.config.yaml` with back-compat reads? *Default for THIS rebrand: keep
+   filenames. **Deferred, not settled** — these data-level filenames are explicitly
+   flagged for revisit in **Plan 2 (genericization)**, which owns the rename +
+   back-compat-read design. Do not treat "kept here" as "kept forever."*
 3. **`MEMORY_TOOLS_HOME` (install location var)** — rename to `REKOL_TOOLS_HOME` with
    fallback (Task 6 default) or leave entirely? *Default: rename with fallback.*
 4. **SessionStart banner wording** — `[rekol] ...` vs keeping `[memory] ...`? Cosmetic.
@@ -773,6 +851,16 @@ the test bed now, run it for real once Plan 2's content exists.
    fresh-start validation run until **Plan 2 (genericization)** lands (the smoke test
    needs generic template content to assert against). *Default: build now, validate
    after Plan 2.*
+8. **Interactive-onboarding scope (built in Plan 2)** — the Fresh-Start section now
+   specifies an interactive install/`rekol init` that discovers Claude Code
+   transcripts, offers corpus import, detects cloud-sync folders, and offers opt-in
+   `--migrate`. Confirm the ordering/wording of these prompts and that the
+   "Found N past Claude Code sessions" transcript-index offer is the headline
+   first-run step. *Default: specify here, design/build in Plan 2.*
+9. **PyPI reservation timing** — reserve `rekol` via a legitimate `0.1.0a1`
+   pre-release over Trusted Publishing **before public launch** but **not** while the
+   name/repo is still private? *Default: prepare the Trusted-Publishing workflow now,
+   publish `0.1.0a1` just before going public.*
 
 ---
 
