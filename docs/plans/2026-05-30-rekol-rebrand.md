@@ -24,6 +24,15 @@ The existing **167-test suite is the regression safety net**. After the package
 rename and after the CLI consolidation, the full suite must pass. New tests are
 added for the env-var fallback precedence and the unified CLI dispatch.
 
+Two rollout sections at the end of this plan cover what happens *after* the code
+lands:
+
+- **Parallel Dogfooding & Safe Cutover** — migrating Leon's own live `memory-*`
+  system to REKOL with zero risk (no lossy migration; fully reversible).
+- **Fresh-Start / Clean-Room Onboarding & Test Bed** — validating the brand-new-user
+  first-run experience via a Docker test bed + smoke test (content dependency on
+  Plan 2 genericization is flagged there).
+
 ### Non-goals
 
 - No behavior changes to search/index/capture/migrate logic.
@@ -576,6 +585,134 @@ when v0.1 ships. No action here — recorded for traceability.
 
 ---
 
+## Parallel Dogfooding & Safe Cutover
+
+This section covers migrating **Leon's own live `memory-*` system** to REKOL with
+zero risk. The rebrand renames the engine; it does not transform any data.
+
+### Core safety principle
+
+The memory **data** (markdown + frontmatter under the memory root) and the **code**
+that reads it are decoupled. The vector index is **disposable and rebuildable** at
+any time. REKOL reads the **identical** markdown/frontmatter format — it is the same
+engine, only renamed. Therefore:
+
+- There is **no lossy migration**. The data files never transform.
+- **Every step is reversible** — rollback is just repointing config back at the old
+  install, because the markdown was never touched.
+
+### Parallel setup (run REKOL beside the live system, zero impact)
+
+Stand REKOL up alongside the live `memory-*` install so the two never interfere:
+
+- Install REKOL into its **own venv** — **not** the live
+  `~/.local/share/memory-tools/.venv`.
+- Set `REKOL_HOME` to a **copy** of the live data (e.g. `~/rekol-memory`, copied from
+  `~/Dropbox/memory`), with its **own** index. The live system keeps using
+  `~/Dropbox/memory` untouched.
+- Post-rebrand the `rekol` command, the `rekol` package, and the `REKOL_HOME` env var
+  do **not** collide with `memory-*` / `memory_tools` / `MEMORY_HOME`, so both systems
+  coexist on one Mac.
+- Dogfood via the CLI (`rekol search`, `rekol capture`, etc.). To dogfood the **Claude
+  Code integration** without disturbing the global system, scope REKOL's hooks/skill
+  to the rekol project via a **project-level** `.claude/settings.json` — do **not**
+  edit the global `~/.claude/settings.json`.
+
+### Validation criteria before cutover
+
+Run in parallel for **~2 weeks** on real workflows. Confirm that each of these
+matches the live system:
+
+- Search quality and ranking.
+- Captures (content + frontmatter written correctly).
+- Incremental index updates.
+- Hook behavior (auto-reindex, SessionStart banner, etc.).
+
+### Divergence note
+
+Captures made through REKOL during the parallel window land in the **copy**, not the
+live store (and vice-versa). Either refresh the copy periodically, or accept
+divergence during the test window — the two stores **unify at cutover**.
+
+### Cutover (only once validated)
+
+1. Point `REKOL_HOME` at the real `~/Dropbox/memory` (same files, separate index).
+2. Swap the **global** Claude hooks/skill from `memory-*` to `rekol`.
+3. Rebuild the REKOL index (`rekol index rebuild`).
+4. **Keep the old `memory-tools` install in place** — do **not** uninstall it, so
+   rollback stays trivial.
+
+### Rollback (explicit steps)
+
+If anything misbehaves after cutover:
+
+1. Revert the **global** Claude hooks/skill from `rekol` back to `memory-*`.
+2. (Optional) repoint your shell back to the old `MEMORY_HOME` if you changed it.
+3. Done — the **data never changed**, so nothing is lost. The old install is still
+   present and immediately usable.
+
+---
+
+## Fresh-Start / Clean-Room Onboarding & Test Bed
+
+This section covers validating the **brand-new-user** experience — the from-zero
+first run — which Leon's own machine cannot represent.
+
+### Why a clean-room is needed
+
+Leon's machine is loaded with years of real memory and a live install, so it
+**cannot** represent a brand-new user's first run. We need a clean-room to validate
+the from-zero onboarding experience and portability.
+
+### The fresh-start flow a new user follows
+
+Document this as a **quickstart target** (the README "Quickstart (fresh install)"
+subsection — see Deliverables):
+
+1. Clone `rekol`.
+2. Set `REKOL_HOME` to an **empty** directory.
+3. Run `./install.sh` — the installer seeds the empty root from `template/`, builds
+   the first index, and installs hooks/skill.
+4. Edit `always/identity.md`.
+5. First `rekol search` / `rekol capture`.
+
+Document the **expected first-run output** so the quickstart is verifiable.
+
+### Clean-room test beds (how WE validate fresh-start without Leon's data/install)
+
+1. **Docker container (primary).** A clean Linux image:
+   clone → `pip install -e .` (or run `install.sh` in a Linux-appropriate mode) →
+   empty `REKOL_HOME` → seed from template → `rekol index rebuild` → assert
+   `rekol search` returns the seeded template content. This doubles as the
+   **Linux-portability check** (a roadmap goal).
+   Deliverables: a `Dockerfile` (or `docker/` dir) + a `scripts/fresh-start-smoke.sh`
+   that asserts a from-zero install yields a working search over the seeded template.
+2. **Local sandbox (secondary).** A fresh `HOME` + empty `REKOL_HOME` + fresh venv,
+   exactly like the existing `tests/test_install.bats` sandbox. The full-install bats
+   test (currently skipped pending Plan 2) is rewritten here to assert the
+   fresh-start path end-to-end.
+3. **Throwaway macOS user account (tertiary).** Most faithful to the real Mac UX,
+   heaviest to set up; **optional**.
+
+### Dependency to flag (depends on Plan 2)
+
+The fresh-start **content** — the generic `template/`, the generic `identity.md`, and
+opt-in migration — is produced by **Plan 2 (genericization)**. So fresh-start
+**validation** should run **after Plan 2 lands**. This section defines the
+**test-bed mechanism** (container + smoke test) that the rebrand introduces; the
+genericized content it exercises comes from Plan 2. The dependency is explicit: build
+the test bed now, run it for real once Plan 2's content exists.
+
+### Deliverables introduced by this section (future tasks, not executed now)
+
+- `Dockerfile` (or `docker/` dir).
+- `scripts/fresh-start-smoke.sh` (from-zero install → working search assertion).
+- README "Quickstart (fresh install)" subsection.
+- Re-enable the skipped `tests/test_install.bats` full-install test against the
+  sandbox.
+
+---
+
 ## Self-Review Checklist (run before opening the rebrand PR)
 
 - [ ] **No `memory_tools` import remains:** `grep -rn "memory_tools" src/ tests/`
@@ -603,6 +740,16 @@ when v0.1 ships. No action here — recorded for traceability.
       returns only intentional `MEMORY_HOME` / `MEMORY_TOOLS_HOME` fallback references.
 - [ ] **Live-setup safety:** with only `MEMORY_HOME` exported (no `REKOL_HOME`), a
       manual `rekol search "..."` against Leon's real memory root still works.
+- [ ] **Parallel coexistence verified:** REKOL (own venv, `REKOL_HOME` → copy of the
+      data, own index) runs alongside the live `memory-*` install with no collisions
+      on command name, package name, env vars, or global Claude hooks/skill.
+- [ ] **Cutover keeps a rollback path:** old `memory-tools` install is **not**
+      uninstalled at cutover; reverting the global hooks/skill restores the old
+      system with no data loss.
+- [ ] **Fresh-start test bed exists:** `Dockerfile` + `scripts/fresh-start-smoke.sh`
+      assert a from-zero install (empty `REKOL_HOME`, seeded from `template/`) yields
+      a working `rekol search`. Note: meaningful **only after Plan 2** provides the
+      genericized template/`identity.md` content.
 
 ---
 
@@ -618,6 +765,14 @@ when v0.1 ships. No action here — recorded for traceability.
    fallback (Task 6 default) or leave entirely? *Default: rename with fallback.*
 4. **SessionStart banner wording** — `[rekol] ...` vs keeping `[memory] ...`? Cosmetic.
 5. **GitHub rename timing** — before or after the rebrand PR merges? *Default: after.*
+6. **Parallel dogfooding window** — is ~2 weeks of parallel run on real workflows the
+   right validation bar before cutover, and do we refresh the data copy periodically
+   or accept divergence until cutover? *Default: 2 weeks, accept divergence.*
+7. **Fresh-start test bed sequencing** — build the Docker test bed +
+   `scripts/fresh-start-smoke.sh` as part of the rebrand, but gate the *real*
+   fresh-start validation run until **Plan 2 (genericization)** lands (the smoke test
+   needs generic template content to assert against). *Default: build now, validate
+   after Plan 2.*
 
 ---
 
