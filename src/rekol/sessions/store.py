@@ -338,6 +338,35 @@ class SessionStore:
         ).fetchall()
         return [(int(r["id"]), r["content"]) for r in rows]
 
+    def existing_vec_dim(self) -> int | None:
+        """Embedding dimension already stored on disk, or None if undetermined.
+
+        ``init_schema`` creates ``messages_vec`` with ``CREATE ... IF NOT
+        EXISTS``, so re-opening a DB that was built at a different dimension is a
+        silent no-op — the table keeps its original width and the mismatch only
+        surfaces later as a cryptic sqlite-vec error on the first insert. This
+        lets callers detect the conflict up front and tell the user how to fix
+        it.
+
+        vec0 path: parse the declared ``float[N]`` from the table's schema.
+        numpy fallback: infer N from the byte length of any stored row (float32,
+        4 bytes each); returns None when the table is empty (no width yet).
+        """
+        if self._vec_loaded:
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'messages_vec'"
+            ).fetchone()
+            if row is None or not row["sql"]:
+                return None
+            match = re.search(r"float\s*\[\s*(\d+)\s*\]", row["sql"])
+            return int(match.group(1)) if match else None
+        row = self.conn.execute(
+            "SELECT LENGTH(embedding) AS nbytes FROM messages_vec_numpy LIMIT 1"
+        ).fetchone()
+        if row is None or row["nbytes"] is None:
+            return None
+        return int(row["nbytes"]) // 4  # float32 → 4 bytes per dimension
+
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.
 

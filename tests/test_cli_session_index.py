@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import numpy as np
 from click.testing import CliRunner
 
 from rekol.cli_session_index import main as cli_main
@@ -108,6 +109,40 @@ def test_session_index_no_embed_leaves_vector_index_empty(tmp_path: Path, monkey
     hits = store.search_vec(query_vec, top_k=3)
     store.close()
     assert hits == []
+
+
+def test_session_index_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """A sessions.db built at one embedding dimension must not be silently
+    re-indexed under a different-dim model: the CLI should fail fast with an
+    actionable message rather than crash on the first vector insert.
+    """
+    home = _setup_home(tmp_path, monkeypatch)  # config uses test-hashing => 384-dim
+    db_path = home / ".index" / "sessions.db"
+
+    # Pre-build the index at a deliberately different dimension (8).
+    store = SessionStore(db_path=db_path, dim=8)
+    store.init_schema()
+    rid = store.insert_message(
+        dict(
+            session_id="s-1",
+            message_uuid="u-1",
+            parent_uuid=None,
+            role="user",
+            content="hello",
+            cwd="/tmp/repo",
+            timestamp_iso="2026-05-28T20:00:00Z",
+            timestamp_unix=1748462400,
+            jsonl_path="/fake.jsonl",
+            line_number=2,
+        )
+    )
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.zeros(8, dtype=np.float32))
+    store.close()
+
+    result = CliRunner().invoke(cli_main, ["--full"])
+    assert result.exit_code == 2, result.output
+    assert "8-dim" in result.output and "384-dim" in result.output
 
 
 def test_session_index_embed_heals_a_no_embed_index(tmp_path: Path, monkeypatch) -> None:
