@@ -114,6 +114,58 @@ def test_search_vec_returns_top_k(tmp_path: Path) -> None:
     store.close()
 
 
+def test_upsert_embedding_no_commit_batches_within_caller_transaction(tmp_path: Path) -> None:
+    """The no-commit variant lets ingest write a whole file's embeddings in one
+    transaction (no per-row fsync). Rows must be searchable once the caller's
+    transaction commits.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rowid_a = store.insert_message(_make_msg(uuid="a"))
+    rowid_b = store.insert_message(_make_msg(uuid="b", line=2))
+    with store.conn:
+        store.upsert_embedding_no_commit(rowid_a, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        store.upsert_embedding_no_commit(rowid_b, np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+    hits = store.search_vec(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), top_k=1)
+    assert len(hits) == 1
+    assert hits[0]["message_uuid"] == "b"
+    store.close()
+
+
+def test_fetch_unembedded_and_counts(tmp_path: Path) -> None:
+    """The self-heal primitives must report which messages lack an embedding so
+    an index built FTS-only (or with --no-embed) can be brought to full
+    semantic coverage without a destructive rebuild.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid_a = store.insert_message(_make_msg(uuid="a"))
+    rid_b = store.insert_message(_make_msg(uuid="b", line=2))
+    rid_c = store.insert_message(_make_msg(uuid="c", line=3))
+    assert store.count_messages() == 3
+    assert store.count_embeddings() == 0
+    # All three are unembedded initially.
+    pending = store.fetch_unembedded(limit=10)
+    assert {rowid for rowid, _content in pending} == {rid_a, rid_b, rid_c}
+    # Embed one; it must drop out of the unembedded set and the counts update.
+    with store.conn:
+        store.upsert_embedding_no_commit(rid_a, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    assert store.count_embeddings() == 1
+    remaining = store.fetch_unembedded(limit=10)
+    assert rid_a not in {rowid for rowid, _content in remaining}
+    assert {rowid for rowid, _content in remaining} == {rid_b, rid_c}
+    store.close()
+
+
+def test_fetch_unembedded_respects_limit(tmp_path: Path) -> None:
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    for i in range(5):
+        store.insert_message(_make_msg(uuid=f"u{i}", line=i + 1))
+    assert len(store.fetch_unembedded(limit=2)) == 2
+    store.close()
+
+
 def test_search_fts_score_is_positive_higher_is_better(tmp_path: Path) -> None:
     """Regression: BM25 returns negative scores; the wrapper must negate so
     the higher-is-better merge in search_combined is correct.
