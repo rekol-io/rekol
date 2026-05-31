@@ -30,7 +30,7 @@ def memory_root(tmp_path: Path) -> Path:
         root / "always" / "identity.md",
         "Identity",
         "always",
-        "# Identity\n\nLeon is a senior manager.\n",
+        "# Identity\n\nAlex is a senior engineer.\n",
         tags=["identity"],
         aliases=["me"],
     )

@@ -1,6 +1,6 @@
 """Thin wrapper around `claude -p` for the migration classifier.
 
-We use Sonnet by default (Leon's preference).  The wrapper:
+We use Sonnet by default (good cost/quality tradeoff for classification).  The wrapper:
 
 * Probes whether `claude` is on PATH (``is_claude_available``).
 * Invokes ``claude -p --model <model> --output-format json`` with a stdin-fed prompt.

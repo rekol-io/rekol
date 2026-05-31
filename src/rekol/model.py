@@ -19,6 +19,12 @@ import frontmatter
 ALLOWED_TYPES = frozenset({"always", "when", "topic", "knowledge"})
 REQUIRED_FIELDS = ("name", "description", "type")
 
+# scope is reserved for a future shared-team store but is NOT read or validated
+# in v0.1. We accept any value (default "private") so that a memory file which
+# already uses scope: informally still parses and indexes instead of being
+# silently dropped. Validation + migration land when the shared store does.
+DEFAULT_SCOPE = "private"
+
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -38,6 +44,10 @@ class MemoryFile:
         name: Human-readable name (``name`` frontmatter field).
         description: One-line description (``description`` frontmatter field).
         type: Memory layer — one of ``always``, ``when``, ``topic``, ``knowledge``.
+        scope: Visibility scope — reserved for a future shared-team store.
+            Defaults to ``"private"``.  Any value is accepted in v0.1
+            (no validation) so that files already using ``scope:`` informally
+            still parse and index.
         body: Markdown body text (everything after the frontmatter block).
         tags: Zero or more topic tags used for keyword search.
         aliases: Alternative names / search triggers for this memory.
@@ -57,6 +67,7 @@ class MemoryFile:
     description: str
     type: str
     body: str
+    scope: str = DEFAULT_SCOPE
     tags: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     see_also: list[str] = field(default_factory=list)
@@ -116,6 +127,7 @@ def parse_file(path: Path) -> MemoryFile:
         name=str(meta["name"]),
         description=str(meta["description"]),
         type=str(meta["type"]),
+        scope=str(meta.get("scope", DEFAULT_SCOPE)),
         body=post.content,
         tags=_coerce_list(meta, "tags", path),
         aliases=_coerce_list(meta, "aliases", path),

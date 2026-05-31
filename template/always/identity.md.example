@@ -2,6 +2,7 @@
 name: Identity
 description: Who I am, role, platform
 type: always
+scope: private
 tags: [identity, profile]
 aliases: [me, who am i]
 created: 2026-04-27T10:00:00-04:00
