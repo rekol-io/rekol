@@ -532,6 +532,10 @@ else
   fi
 fi
 
+if [[ "${TEST_MODE}" != "1" ]]; then
+  say "run 'rekol init' to index existing Claude Code history and import notes"
+fi
+
 # =============================================================================
 # Done
 # =============================================================================

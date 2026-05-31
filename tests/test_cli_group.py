@@ -21,6 +21,7 @@ EXPECTED_COMMANDS = {
     "migrate",
     "session-index",
     "import",
+    "init",
 }
 
 
