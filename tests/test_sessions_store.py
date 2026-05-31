@@ -157,6 +157,21 @@ def test_fetch_unembedded_and_counts(tmp_path: Path) -> None:
     store.close()
 
 
+def test_existing_vec_dim_reports_stored_dimension(tmp_path: Path) -> None:
+    """existing_vec_dim must report the width an index was built with, so a later
+    run under a different-dimension model can fail fast instead of crashing
+    cryptically on the first vector insert.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    # vec0 reads the dim from the schema; numpy fallback infers it from the row.
+    assert store.existing_vec_dim() == 4
+    store.close()
+
+
 def test_fetch_unembedded_respects_limit(tmp_path: Path) -> None:
     store = SessionStore(db_path=tmp_path / "s.db", dim=4)
     store.init_schema()
