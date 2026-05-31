@@ -1,23 +1,28 @@
-# Batch Document Converter (`memory-docs-convert`) — Design
+# Batch Document Converter (`rekol import`) — Design
 
 **Date:** 2026-05-29
 **Status:** Approved (design), pending implementation plan
 **Author:** Leon Katz (with Claude)
 
+> **Note (2026-05-30):** This is a dated, historical design record. The
+> user-facing command was later renamed to `rekol import` as part of the REKOL
+> rebrand; package-path and shim internals below reflect the pre-rebrand
+> `memory_tools` layout as designed at the time and are kept for the record.
+
 ---
 
 ## Problem
 
-`claude-session-index` indexes only Claude Code conversation transcripts under
+`rekol session-index` indexes only Claude Code conversation transcripts under
 `~/.claude/projects/**/*.jsonl`, matching a specific schema (`type` ∈
 {user, assistant}, `uuid`, `sessionId`, `timestamp`, `message.content`). Any
-other corpus of text files is invisible to `memory-search`.
+other corpus of text files is invisible to `rekol search`.
 
 The immediate driver is ~11 MB of `backstage_ai` artifacts under
 `cassandra-team-workspace/sessions/` (morning briefings, weekly statuses, 1:1
 prep, cost JSON, retro boards, security ticket data) organised as one folder
 per topic, with many dated files inside each. This content is not in transcript
-form, so it cannot enter `memory-search` without a transform.
+form, so it cannot enter `rekol search` without a transform.
 
 The broader driver: there will be **future** occasions where a directory tree
 of text files needs to become searchable in bulk. This tool generalises that
@@ -25,14 +30,14 @@ one operation.
 
 ## Goal
 
-A reusable, first-class memory-tools CLI that converts an arbitrary directory
+A reusable, first-class REKOL CLI command that converts an arbitrary directory
 tree of text files into synthetic Claude Code JSONL transcripts, so the
-**existing** `claude-session-index` ingester picks them up with **zero changes**
+**existing** `rekol session-index` ingester picks them up with **zero changes**
 to the ingester or store.
 
 ## Non-Goals
 
-- No change to `claude-session-index`, `SessionStore`, or the search path.
+- No change to `rekol session-index`, `SessionStore`, or the search path.
 - No binary extraction (xlsx, png, svg) in v1.
 - No HTML extraction in v1 (see Decisions).
 - No chunking of large files — one file becomes one message.
@@ -44,7 +49,7 @@ to the ingester or store.
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Tool home | First-class memory-tools CLI (`memory-docs-convert`) | Reusable toolkit member; gets shim + tests + versioning |
+| Tool home | First-class REKOL CLI command (`rekol import`) | Reusable toolkit member; gets shim + tests + versioning |
 | Mapping | **folder → session, file → message** | Mirrors how Claude Code stores transcripts (810 sessions / 11.9k messages, avg 14.7 msgs/session). Each dated file stays an independent searchable hit. |
 | Message role | `message.role = "document"` | Ingester stores `message.role or row_type`; surfaces as `[document]` in search without touching ingester code. `type` stays `"user"` to pass the `_MESSAGE_TYPES` filter. |
 | File scope | Text-native only | Covers all 140 text files (~11 MB), zero new dependencies |
@@ -199,17 +204,17 @@ in v1, so no markup parser is needed.
 ## CLI Surface
 
 ```
-memory-docs-convert SOURCE_DIR [--prefix backstage-ai-archive]
-                               [--max-bytes 10485760]
-                               [--index/--no-index]
-                               [--dry-run]
+rekol import SOURCE_DIR [--prefix backstage-ai-archive]
+                       [--max-bytes 10485760]
+                       [--index/--no-index]
+                       [--dry-run]
 ```
 
 - `SOURCE_DIR` — tree to convert (e.g. `…/cassandra-team-workspace/sessions`).
 - `--prefix` — subdir under `~/.claude/projects/` to namespace the archive
   (default `backstage-ai-archive`).
 - `--index/--no-index` (default `--index`) — after writing JSONL, chain
-  `claude-session-index --incremental` (**not** `--full`). `--no-index` writes
+  `rekol session-index --incremental` (**not** `--full`). `--no-index` writes
   files only (inspectable artifact preserved). Resolves the "two commands" cost
   of the chosen approach.
   - **Why `--incremental`, not `--full`:** `--full` passes `force=True` to
@@ -223,7 +228,7 @@ memory-docs-convert SOURCE_DIR [--prefix backstage-ai-archive]
 - Target dir resolves from `cfg.claude_projects_dir` (same config the ingester
   reads), never hardcoded.
 
-**Stats output** (matches `claude-session-index` style; numbers below are the
+**Stats output** (matches `rekol session-index` style; numbers below are the
 **verified** result of the dry-run against the `backstage_ai` `sessions/` input):
 
 ```
@@ -254,7 +259,7 @@ Three independent layers make re-running always safe:
   the run (explicit exception types, meaningful messages — no bare `except`).
 - `SOURCE_DIR` missing / not a dir → exit 2 with a clear message.
 - Target dir (`claude_projects_dir`) missing → created (mirrors ingester).
-- `--index` chosen but `claude-session-index` not on PATH → warning, JSONL still
+- `--index` chosen but `rekol session-index` not on PATH → warning, JSONL still
   written, non-zero advisory exit.
 
 ---

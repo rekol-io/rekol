@@ -1,11 +1,11 @@
-# Contributing to memory-tools
+# Contributing to REKOL
 
-Thanks for your interest! memory-tools is a small project; the flow is simple.
+Thanks for your interest! REKOL is a small project; the flow is simple.
 
 ## Development setup
 ```bash
-git clone https://github.com/<you>/memory-tools   # your fork
-cd memory-tools
+git clone https://github.com/<you>/rekol   # your fork
+cd rekol
 python3.11 -m venv .venv-dev && . .venv-dev/bin/activate
 pip install -e ".[dev]"
 pre-commit install
@@ -19,7 +19,7 @@ pre-commit install
    test that fails before and passes after.
 4. Run the gate locally:
    ```bash
-   ruff check . && ruff format --check . && mypy src/memory_tools && pytest -q
+   ruff check . && ruff format --check . && mypy src/rekol && pytest -q
    ```
    (`pre-commit` runs ruff + mypy automatically on `git commit`.)
 5. Push to your fork and open a Pull Request against `main`.

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from memory_tools.migrate.llm import (
+from rekol.migrate.llm import (
     LLMUnavailable,
     call_claude_classifier,
     is_claude_available,

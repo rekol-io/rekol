@@ -7,7 +7,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from memory_tools.cli_session_index import main as cli_main
+from rekol.cli_session_index import main as cli_main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_session.jsonl"
 

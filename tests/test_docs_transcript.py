@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.docs_convert.transcript import _row_uuid, _session_id, build_rows
-from memory_tools.docs_convert.walk import FileEntry, SessionGroup
+from rekol.docs_convert.transcript import _row_uuid, _session_id, build_rows
+from rekol.docs_convert.walk import FileEntry, SessionGroup
 
 
 def _group() -> SessionGroup:

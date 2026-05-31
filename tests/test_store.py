@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from memory_tools.store import IndexStore
+from rekol.store import IndexStore
 
 
 @pytest.fixture()

@@ -21,8 +21,8 @@ from typing import Literal
 
 import frontmatter
 
-from memory_tools.migrate.discover import LegacyFile
-from memory_tools.migrate.llm import LLMUnavailable, call_claude_classifier
+from rekol.migrate.discover import LegacyFile
+from rekol.migrate.llm import LLMUnavailable, call_claude_classifier
 
 Layer = Literal["always", "when", "topic", "knowledge"]
 

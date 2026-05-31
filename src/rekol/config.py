@@ -1,4 +1,9 @@
-"""Config loading from $MEMORY_HOME/memory.config.yaml, with defaults."""
+"""Config loading from $REKOL_HOME/memory.config.yaml, with defaults.
+
+The data-directory location is read from ``$REKOL_HOME`` (primary), falling
+back to ``$MEMORY_HOME`` so existing installs that only export ``MEMORY_HOME``
+keep working.
+"""
 
 from __future__ import annotations
 
@@ -19,12 +24,27 @@ DEFAULTS: dict = dict(
 )
 
 
+def resolve_memory_home() -> str | None:
+    """Resolve the data-directory location from the environment.
+
+    ``REKOL_HOME`` is the primary variable; ``MEMORY_HOME`` is kept as a
+    fallback so existing installs (which export ``MEMORY_HOME``) keep working.
+
+    Returns:
+        The raw (un-expanded) directory string, or ``None`` if neither
+        variable is set.
+    """
+    return os.environ.get("REKOL_HOME") or os.environ.get("MEMORY_HOME")
+
+
 @dataclass
 class Config:
-    """Resolved configuration for memory-tools, derived from $MEMORY_HOME/memory.config.yaml.
+    """Resolved configuration for rekol, derived from $REKOL_HOME/memory.config.yaml.
 
-    Unknown keys in the YAML file are silently ignored so that future
-    config additions remain forward-compatible with older tool versions.
+    The data-directory location is read from ``$REKOL_HOME`` (primary), falling
+    back to ``$MEMORY_HOME``. Unknown keys in the YAML file are silently ignored
+    so that future config additions remain forward-compatible with older tool
+    versions.
     """
 
     memory_home: Path
@@ -41,7 +61,7 @@ class Config:
         """Absolute path to the SQLite index database.
 
         Returns:
-            Path at ``$MEMORY_HOME/.index/index.db``.
+            Path at ``$REKOL_HOME/.index/index.db``.
         """
         return self.memory_home / ".index" / "index.db"
 
@@ -50,15 +70,15 @@ class Config:
         """Absolute path to the SQLite sessions database (transcripts index).
 
         Returns:
-            Path at ``$MEMORY_HOME/.index/sessions.db``.
+            Path at ``$REKOL_HOME/.index/sessions.db``.
         """
         return self.memory_home / ".index" / "sessions.db"
 
 
 def load_config() -> Config:
-    """Load and validate configuration from $MEMORY_HOME.
+    """Load and validate configuration from $REKOL_HOME (or $MEMORY_HOME).
 
-    Reads ``$MEMORY_HOME/memory.config.yaml`` when it exists; falls back to
+    Reads ``$REKOL_HOME/memory.config.yaml`` when it exists; falls back to
     :data:`DEFAULTS` for any key that is absent. Unknown keys in the YAML
     are silently ignored (forward-compatible).
 
@@ -66,13 +86,16 @@ def load_config() -> Config:
         A fully populated :class:`Config` instance.
 
     Raises:
-        RuntimeError: If the ``MEMORY_HOME`` environment variable is not set.
+        RuntimeError: If neither ``REKOL_HOME`` nor ``MEMORY_HOME`` is set.
     """
-    env = os.environ.get("MEMORY_HOME")
+    # REKOL_HOME is the primary data-directory variable; MEMORY_HOME is kept as
+    # a fallback so existing installs (which export MEMORY_HOME) keep working.
+    env = resolve_memory_home()
     if not env:
         raise RuntimeError(
-            "MEMORY_HOME environment variable is not set. "
-            "Export it to point at your memory home directory before running memory-tools."
+            "Neither REKOL_HOME nor MEMORY_HOME is set. Export REKOL_HOME to point "
+            "at your memory home directory before running rekol "
+            "(MEMORY_HOME is accepted as a fallback)."
         )
     root = Path(os.path.expanduser(env))
     config_file = root / "memory.config.yaml"

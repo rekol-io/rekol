@@ -13,11 +13,11 @@ from pathlib import Path
 import click
 import yaml
 
-from memory_tools.chunker import chunk_body
-from memory_tools.config import load_config
-from memory_tools.embeddings import get_embedder
-from memory_tools.indexer import Indexer
-from memory_tools.store import IndexStore
+from rekol.chunker import chunk_body
+from rekol.config import load_config
+from rekol.embeddings import get_embedder
+from rekol.indexer import Indexer
+from rekol.store import IndexStore
 
 # Singular layer names used in CLI and frontmatter type field.
 LAYERS = ("always", "when", "topic", "knowledge")

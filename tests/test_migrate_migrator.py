@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from memory_tools.migrate.archive import MIGRATION_MARKER_NAME
-from memory_tools.migrate.migrator import (
+from rekol.migrate.archive import MIGRATION_MARKER_NAME
+from rekol.migrate.migrator import (
     migrate_dir,
 )
 
@@ -139,7 +139,7 @@ def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> N
     (src / "x.md").write_text("---\n: : :\n: not valid yaml\n---\nbody\n")
     (src / "y.md").write_text("---\n@@@@\n---\nbody\n")
 
-    from memory_tools.migrate import classify
+    from rekol.migrate import classify
 
     original = classify.classify_file
 
@@ -148,7 +148,7 @@ def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> N
 
     classify.classify_file = failing_classify
     # The migrator imports classify_file by name at module load — patch it there too.
-    from memory_tools.migrate import migrator
+    from rekol.migrate import migrator
 
     migrator.classify_file = failing_classify
     try:

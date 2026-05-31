@@ -3,6 +3,6 @@
 
 ## Checklist
 - [ ] Tests added/updated and `pytest -q` passes
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src/memory_tools` pass
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src/rekol` pass
 - [ ] Conventional-commit messages
 - [ ] No personal data / machine-specific paths introduced

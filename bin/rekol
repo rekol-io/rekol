@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Shim for `rekol` — delegates to the venv Python entrypoint.
+# REKOL_TOOLS_HOME is the install location; MEMORY_TOOLS_HOME accepted as fallback.
+REKOL_TOOLS_HOME="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/rekol}}"
+VENV_PY="$REKOL_TOOLS_HOME/.venv/bin/python"
+
+if [[ ! -x "$VENV_PY" ]]; then
+  printf 'rekol venv not found at %s/.venv; run installer.\n' \
+    "$REKOL_TOOLS_HOME" >&2
+  exit 2
+fi
+
+exec "$VENV_PY" -m rekol.cli "$@"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.migrate.discover import (
+from rekol.migrate.discover import (
     discover_auto_memory_sources,
     discover_files_in_dir,
     is_retirement_pointer,
