@@ -1,4 +1,4 @@
-# Copy to $MEMORY_HOME/memory.config.yaml and edit.
+# Copy to $REKOL_HOME/memory.config.yaml and edit ($MEMORY_HOME accepted as fallback).
 embedding_model: BAAI/bge-small-en-v1.5
 always_on_budget_bytes: 8192
 secret_check_on_capture: true
