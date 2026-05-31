@@ -10,6 +10,17 @@ follow [Semantic Versioning](https://semver.org/).
   Conduct, issue/PR templates.
 - Quality gate: Ruff (lint+format), mypy, pre-commit, GitHub Actions CI.
 
+### Genericization & onboarding (Plan 2)
+- Data-level names branded REKOL (`rekol.config.yaml`, `REKOL.md`, `rekol`
+  skill) with back-compat reads of the legacy names (`memory.config.yaml`,
+  `MEMORY.md`, `/memory` shim).
+- `scope: private` frontmatter field reserved (parsed but not validated in v0.1; any value is accepted so existing files are never dropped from the index).
+- Legacy migration is now opt-in (`install.sh --migrate`).
+- `rekol import` gained `--include`/`--exclude` for file-type selection.
+- Sync reframed as local-first; `REKOL_HOME` is any folder you own.
+- New `rekol init` interactive onboarding (transcript indexing, corpus import,
+  cloud-sync detection, opt-in migration).
+
 ### Changed
 - Rebranded the project from `memory-tools` to **REKOL**: the Python package is
   now `rekol`, and the formerly separate `memory-*` console scripts are unified
