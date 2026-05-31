@@ -130,7 +130,12 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
         self._model = SentenceTransformer(model_name)
-        self._dim = int(self._model.get_sentence_embedding_dimension())
+        dim = self._model.get_sentence_embedding_dimension()
+        if dim is None:
+            raise ValueError(
+                f"sentence-transformers model {model_name!r} reported no embedding dimension"
+            )
+        self._dim = int(dim)
 
     @property
     def dim(self) -> int:

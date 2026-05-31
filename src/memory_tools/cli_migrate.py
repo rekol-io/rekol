@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -59,7 +61,7 @@ def main() -> None:
     """Migrate legacy Claude memory files into $MEMORY_HOME."""
 
 
-def _mode_flags() -> tuple[click.Option, click.Option, click.Option, click.Option]:
+def _mode_flags() -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
     """Shared option set for commit/dry-run mode."""
     return (
         click.option(

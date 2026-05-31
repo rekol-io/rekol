@@ -25,7 +25,7 @@ import click
 
 from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
-from memory_tools.search_combined import search_all
+from memory_tools.search_combined import Source, search_all
 from memory_tools.sessions.store import SessionStore
 from memory_tools.store import IndexStore
 
@@ -112,7 +112,7 @@ def _render_text(
 def main(
     query: tuple[str, ...],
     top_k: int,
-    source: str,
+    source: Source,
     promote_candidates: bool,
     as_json: bool,
 ) -> None:
