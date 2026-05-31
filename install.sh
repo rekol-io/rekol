@@ -422,6 +422,54 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7D — SessionEnd transcript-index hook merge into settings.json
+# =============================================================================
+# Wires sessionend-snippet.json into Claude Code's SessionEnd event so that
+# every time a session ends, `rekol session-index --incremental` reindexes the
+# just-finished transcript (and the snippet's first handler prints a capture
+# reminder).  This is what makes transcript memory CONTINUOUS + AUTOMATIC:
+# without it, sessions only index when the user runs `rekol session-index` by
+# hand.  Default-on under DO_HOOK (consistent with Steps 7 and 7C); --no-hook
+# disables all hook wiring.
+#
+# Idempotency: skips the merge if the snippet's first command is already present
+# in any existing SessionEnd hook entry (same pattern as Steps 7 and 7C).
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_SE="${COMPONENT_DIR}/hooks/sessionend-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing SessionEnd snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_SE}"
+  else
+    HAS_SE_HOOK="$(
+      jq --slurpfile snip "${SNIPPET_SE}" '
+        (.hooks.SessionEnd // []) as $cur
+        | ($snip[0].hooks.SessionEnd[0].hooks[0].command) as $cmd
+        | any($cur[]; .hooks // [] | any(.command == $cmd))
+      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_SE_HOOK" == "true" ]]; then
+      say "SessionEnd transcript-index hook already present — no-op"
+    else
+      # Independent backup for this step (earlier backups predate the 7.5/7C
+      # mutations and would not reflect the current on-disk state).
+      local_settings_se_backup="${SETTINGS_JSON}.bak-se-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_se_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_se_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_SE}' \
+        '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + \$snip[0].hooks.SessionEnd)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED SessionEnd transcript-index hook into ${SETTINGS_JSON}"
+      say "added SessionEnd transcript-index hook to ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,
@@ -507,6 +555,31 @@ if [[ -f "${RESOLVED_HOME}/.index/index.db" ]]; then
 else
   say "no index found — running rekol index rebuild"
   run "'${TOOLS_HOME}/.venv/bin/rekol' index rebuild"
+fi
+
+# =============================================================================
+# Step 9.5 — Backfill existing Claude Code transcripts into the sessions index
+# =============================================================================
+# Step 9 builds only the curated memory index.  This step seeds the sibling
+# sessions.db by reindexing all existing ~/.claude/projects/**/*.jsonl, so a
+# fresh install has searchable transcript history IMMEDIATELY rather than only
+# accumulating it from the next SessionEnd onward.  Embeddings are on by default
+# (semantic search), reusing the model already downloaded by Step 9 — so the
+# marginal cost is inference only.  The CLI self-gates: it no-ops when
+# session_search_enabled=false and exits non-fatally when the projects dir is
+# absent.  Wrapped non-fatal so a transcript hiccup never aborts the install
+# (set -euo pipefail is in effect).  Skipped in --test-mode (would otherwise
+# walk the real ~/.claude/projects on a CI/test machine).
+
+if [[ "${TEST_MODE}" == "1" ]]; then
+  say "test-mode: skipping session-search backfill"
+else
+  say "backfilling existing Claude Code transcripts into the sessions index (may take a few minutes)"
+  if "${TOOLS_HOME}/.venv/bin/rekol" session-index --full 2>&1 | sed 's/^/  /'; then
+    log_journal "BACKFILLED session index (session-index --full)"
+  else
+    say "session-search backfill skipped or failed (non-fatal) — run 'rekol session-index --full' later"
+  fi
 fi
 
 # =============================================================================
