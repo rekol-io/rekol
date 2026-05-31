@@ -17,3 +17,9 @@ This file is re-injected into every Claude session. Pointers below are phrased a
 - For any noun in the user's message matching a topic, read `topics/<noun>.md`.
 - Fallback: `rekol search "user's phrasing" --top 5 --json`.
 - When the user says "remember this" or corrects you, follow the capture protocol in the `memory` skill.
+
+## Scope
+
+Memory files may carry `scope: private` (the default) in their frontmatter.
+This field is reserved for a future shared-team store; all values are accepted
+but have no effect in v0.1.

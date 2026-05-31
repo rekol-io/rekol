@@ -56,7 +56,7 @@ def test_rekol_home_takes_precedence(monkeypatch) -> None:
 
 
 def test_memory_home_used_when_rekol_home_unset(monkeypatch) -> None:
-    # Guards Leon's live setup: a shell that only exports MEMORY_HOME must
+    # Back-compat: a shell that only exports MEMORY_HOME (no REKOL_HOME) must
     # still resolve via the fallback path.
     monkeypatch.delenv("REKOL_HOME", raising=False)
     monkeypatch.setenv("MEMORY_HOME", "/b")
