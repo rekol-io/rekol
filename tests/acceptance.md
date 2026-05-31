@@ -118,8 +118,8 @@ mac_setup phase 3 install hook.
   reading their `type:` frontmatter. The LLM fallback is exercised by unit
   tests (mocked) and only fires for files without recognizable frontmatter.
 - Filename casing: files with a leading-dash project_slug (auto-memory dirs
-  like `-Users-leon-katz-...`) produce output filenames that start with `-`
-  (e.g. `topics/-Users-leon-katz-...-heartbeat.md`). Functional but visually
+  like `-Users-example-user-...`) produce output filenames that start with `-`
+  (e.g. `topics/-Users-example-user-...-heartbeat.md`). Functional but visually
   ugly — not fixed in v1 since the plan specified `parent.name` verbatim.
 - No regressions in the pre-existing 40-test suite. Full memory-tools test
   count after T0–T7: 86 passed.

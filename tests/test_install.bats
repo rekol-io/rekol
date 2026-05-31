@@ -156,21 +156,22 @@ teardown() {
     [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }
 
-@test "install runs rekol migrate auto and succeeds when no legacy" {
-  # DEFERRED to Plan 2 (genericization): this is the only test that runs the
-  # full, non-test-mode install path — exercising the Claude Code hooks/skill
-  # and the legacy `rekol migrate auto` step. Plan 2 makes migration opt-in
-  # (--migrate, default off) and genericizes the hook/skill install, at which
-  # point this test is rewritten/removed. The generic install path (venv, seed,
-  # index, rekol search) is fully covered by tests 1-7, which pass in CI.
-  skip "deferred to Plan 2: full-install/auto-migration path is being genericized"
-  # TEST_MODE skips the migrator hook, so disable it here
+@test "full install seeds generic template and yields a working search" {
+  # Plan 2: migration is now opt-in (no --migrate here), and the template is
+  # genericized, so the from-zero install path can run end-to-end in CI.
   unset TEST_MODE || true
-  run env -u TEST_MODE \
-    MEMORY_HOME="$TEST_TMP/mem" \
-    HOME="$TEST_TMP/home" \
-    "$BATS_TEST_DIRNAME/../install.sh" --tools-home "$TEST_TMP/tools" --bin-dir "$TEST_TMP/bin"
+  # -u MEMORY_HOME: setup() exports MEMORY_HOME with the same value, so unset it
+  # here to exercise a true REKOL_HOME-only install (no fallback var present).
+  run env -u TEST_MODE -u MEMORY_HOME \
+    REKOL_HOME="$TESTROOT/mem" \
+    HOME="$TESTROOT/home" \
+    "$BATS_TEST_DIRNAME/../install.sh" \
+      --no-hook --no-skill --no-shellrc \
+      --tools-home "$TESTROOT/tools" --bin-dir "$TESTROOT/bin"
   [ "$status" -eq 0 ]
-  # No legacy memory exists in $HOME → migrator prints "nothing to migrate" OR empty
-  [[ "$output" == *"nothing to migrate"* || "$output" != *"ERROR"* ]]
+  # Template seeded REKOL.md + identity example into the empty root
+  [ -f "$TESTROOT/mem/REKOL.md" ]
+  # Search over the seeded content returns a hit (index was built by install)
+  run env REKOL_HOME="$TESTROOT/mem" "$TESTROOT/tools/.venv/bin/rekol" search "identity" --top 3
+  [ "$status" -eq 0 ]
 }

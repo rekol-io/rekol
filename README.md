@@ -24,6 +24,18 @@ export REKOL_HOME="$HOME/memory"   # any folder you like
 `install.sh` sets up a venv, the `rekol` CLI, the Claude Code hooks + skill,
 seeds a starter memory from `template/`, and builds the vector index.
 
+## Quickstart (fresh install)
+
+1. `git clone https://github.com/leonkatz/rekol && cd rekol`
+2. Point REKOL at a folder you own: `export REKOL_HOME=~/rekol-memory`
+   (sync it via Dropbox/iCloud/git/Syncthing or keep it local — the `.index/`
+   directory stays local and is excluded from sync).
+3. `./install.sh` — seeds the empty root from `template/`, builds the first
+   index, and installs the hook + skill.
+4. `rekol init` — indexes any existing Claude Code history and offers to import
+   your notes.
+5. Edit `always/identity.md`, then try `rekol search "..."` / `rekol capture`.
+
 ## CLI
 A single `rekol` command with subcommands:
 - `rekol search "query" [--top N] [--json]` — semantic + keyword search.
