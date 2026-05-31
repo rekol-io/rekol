@@ -3,6 +3,7 @@
 v1 is a minimal assist: prompts for layer, file name, frontmatter fields,
 then appends or creates the file and triggers an incremental reindex.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -17,7 +18,6 @@ from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
 from memory_tools.indexer import Indexer
 from memory_tools.store import IndexStore
-
 
 # Singular layer names used in CLI and frontmatter type field.
 LAYERS = ("always", "when", "topic", "knowledge")
@@ -40,35 +40,56 @@ CONFLICT_THRESHOLD = 0.85
 
 
 @click.command()
-@click.option("--layer", type=click.Choice(LAYERS), required=True,
-              help="Memory layer: always | when | topic | knowledge.")
-@click.option("--file", "filename", required=True,
-              help="Filename within the layer dir, e.g. 'prometheus.md'.")
-@click.option("--name", required=True,
-              help="Human-readable name for the frontmatter ``name`` field.")
-@click.option("--description", required=True,
-              help="One-line description for the frontmatter ``description`` field.")
-@click.option("--tags", default="",
-              help="Comma-separated list of tags.")
-@click.option("--aliases", default="",
-              help="Comma-separated list of search aliases.")
-@click.option("--body-file", type=click.Path(exists=True, dir_okay=False),
-              help="Path to a file containing the markdown body.")
-@click.option("--body", default="",
-              help="Inline markdown body (used when --body-file is not provided).")
-@click.option("--force", is_flag=True, default=False,
-              help="Skip the near-duplicate check and write anyway.")
-@click.option("--conflict-threshold", type=float, default=CONFLICT_THRESHOLD,
-              show_default=True,
-              help="Cosine-similarity threshold above which a candidate body is "
-                   "treated as a near-duplicate.")
-@click.option("--valid-from", default=None,
-              help="ISO-8601 date this memory's facts started being true. "
-                   "Defaults to today.")
-@click.option("--project", "project_slug", default=None,
-              help="Scope this memory to a project. Writes to "
-                   "projects/<slug>/<layer>/<file> instead of <layer>/<file>. "
-                   "Use a kebab-case slug like 'math-evolution-agent'.")
+@click.option(
+    "--layer",
+    type=click.Choice(LAYERS),
+    required=True,
+    help="Memory layer: always | when | topic | knowledge.",
+)
+@click.option(
+    "--file", "filename", required=True, help="Filename within the layer dir, e.g. 'prometheus.md'."
+)
+@click.option(
+    "--name", required=True, help="Human-readable name for the frontmatter ``name`` field."
+)
+@click.option(
+    "--description",
+    required=True,
+    help="One-line description for the frontmatter ``description`` field.",
+)
+@click.option("--tags", default="", help="Comma-separated list of tags.")
+@click.option("--aliases", default="", help="Comma-separated list of search aliases.")
+@click.option(
+    "--body-file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a file containing the markdown body.",
+)
+@click.option(
+    "--body", default="", help="Inline markdown body (used when --body-file is not provided)."
+)
+@click.option(
+    "--force", is_flag=True, default=False, help="Skip the near-duplicate check and write anyway."
+)
+@click.option(
+    "--conflict-threshold",
+    type=float,
+    default=CONFLICT_THRESHOLD,
+    show_default=True,
+    help="Cosine-similarity threshold above which a candidate body is treated as a near-duplicate.",
+)
+@click.option(
+    "--valid-from",
+    default=None,
+    help="ISO-8601 date this memory's facts started being true. Defaults to today.",
+)
+@click.option(
+    "--project",
+    "project_slug",
+    default=None,
+    help="Scope this memory to a project. Writes to "
+    "projects/<slug>/<layer>/<file> instead of <layer>/<file>. "
+    "Use a kebab-case slug like 'math-evolution-agent'.",
+)
 def main(
     layer: str,
     filename: str,

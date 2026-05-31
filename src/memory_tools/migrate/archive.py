@@ -11,6 +11,7 @@ the literal string ``$MEMORY_HOME`` (which Claude cannot resolve in injected
 text).  The hidden ``.MIGRATED`` marker has the same idempotency role for the
 migrate tool but is not auto-injected.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -18,7 +19,6 @@ import shutil
 from pathlib import Path
 
 from memory_tools.migrate.discover import MIGRATION_MARKER_NAME, LegacyFile
-
 
 ARCHIVE_DIR_NAME = "old-memory-archive"
 

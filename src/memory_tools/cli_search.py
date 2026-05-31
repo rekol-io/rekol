@@ -14,17 +14,18 @@ Promotion candidates:
   - --promote-candidates  print a one-line hint when sessions have hits
                           but memory does not, suggesting memory-capture.
 """
+
 from __future__ import annotations
 
 import json as json_mod
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import click
 
 from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
-from memory_tools.search_combined import search_all
+from memory_tools.search_combined import Source, search_all
 from memory_tools.sessions.store import SessionStore
 from memory_tools.store import IndexStore
 
@@ -32,7 +33,7 @@ from memory_tools.store import IndexStore
 def _format_session_timestamp(ts_unix: int) -> str:
     """Format a unix timestamp as YYYY-MM-DD for the text-output session line."""
     try:
-        return datetime.fromtimestamp(ts_unix, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts_unix, tz=UTC).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return "unknown"
 
@@ -53,29 +54,22 @@ def _render_text(
     """
     lines: list[str] = []
     if source in ("memory", "all"):
-        lines.append(
-            f"━━ FROM MEMORY (curated, {len(result.memory_hits)} hits) ━━━━━━━━━━━━━━"
-        )
+        lines.append(f"━━ FROM MEMORY (curated, {len(result.memory_hits)} hits) ━━━━━━━━━━━━━━")
         for h in result.memory_hits:
             heading = f" #{h['heading']}" if h.get("heading") else ""
             lines.append(
-                f"{h['score']:.3f}  {h['file_path']}{heading}"
-                f"  (L{h['line_start']}-{h['line_end']})"
+                f"{h['score']:.3f}  {h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']})"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
             lines.append("")
     if source in ("sessions", "all"):
-        lines.append(
-            f"━━ FROM SESSIONS (top {len(result.session_hits)}) ━━━━━━━━━━━━━━━━━━━━"
-        )
+        lines.append(f"━━ FROM SESSIONS (top {len(result.session_hits)}) ━━━━━━━━━━━━━━━━━━━━")
         for h in result.session_hits:
             date_str = _format_session_timestamp(h["timestamp_unix"])
             cwd = h.get("cwd") or "?"
             session_id_short = h["session_id"][:8]
-            lines.append(
-                f"{h['score']:.3f}  {date_str} — {cwd} — session {session_id_short}"
-            )
+            lines.append(f"{h['score']:.3f}  {date_str} — {cwd} — session {session_id_short}")
             lines.append(f"    [{h['role']}] {h['content'][:200]}")
             lines.append("")
     if promote_candidates and result.is_promotion_candidate:
@@ -89,31 +83,40 @@ def _render_text(
 @click.command()
 @click.argument("query", nargs=-1, required=True)
 @click.option(
-    "--top", "top_k", default=5, show_default=True, type=int,
+    "--top",
+    "top_k",
+    default=5,
+    show_default=True,
+    type=int,
     help="Maximum number of results per tier.",
 )
 @click.option(
-    "--source", "source",
+    "--source",
+    "source",
     type=click.Choice(["memory", "sessions", "all"]),
-    default="all", show_default=True,
+    default="all",
+    show_default=True,
     help="Which layer(s) to query.",
 )
 @click.option(
-    "--promote-candidates", is_flag=True,
+    "--promote-candidates",
+    is_flag=True,
     help="Annotate when sessions hit but memory does not.",
 )
 @click.option(
-    "--json", "as_json", is_flag=True,
+    "--json",
+    "as_json",
+    is_flag=True,
     help="Output results as a single JSON object.",
 )
 def main(
     query: tuple[str, ...],
     top_k: int,
-    source: str,
+    source: Source,
     promote_candidates: bool,
     as_json: bool,
 ) -> None:
-    """Search memory and conversation transcripts. Layered output by default.
+    r"""Search memory and conversation transcripts. Layered output by default.
 
     QUERY is a natural-language phrase. Multiple words are joined with
     spaces before embedding, so quoting is optional:
@@ -147,46 +150,46 @@ def main(
             sessions_top_k=top_k,
         )
         if as_json:
-            click.echo(json_mod.dumps(
-                dict(
-                    query=query_text,
-                    memory=[
-                        dict(
-                            file_path=h["file_path"],
-                            heading=h.get("heading"),
-                            line_start=h["line_start"],
-                            line_end=h["line_end"],
-                            score=h["score"],
-                            tags=h.get("tags", []),
-                            aliases=h.get("aliases", []),
-                            snippet=h["text"][:300],
-                        )
-                        for h in result.memory_hits
-                    ],
-                    sessions=[
-                        dict(
-                            session_id=h["session_id"],
-                            message_uuid=h["message_uuid"],
-                            role=h["role"],
-                            cwd=h.get("cwd"),
-                            timestamp_iso=h["timestamp_iso"],
-                            jsonl_path=h["jsonl_path"],
-                            line_number=h["line_number"],
-                            score=h["score"],
-                            source_kind=h["source_kind"],
-                            snippet=h["content"][:300],
-                        )
-                        for h in result.session_hits
-                    ],
-                    is_promotion_candidate=result.is_promotion_candidate,
-                    sources_queried=result.sources_queried,
-                ),
-                indent=2,
-            ))
-        else:
             click.echo(
-                _render_text(result, top_k, top_k, source, promote_candidates)
+                json_mod.dumps(
+                    dict(
+                        query=query_text,
+                        memory=[
+                            dict(
+                                file_path=h["file_path"],
+                                heading=h.get("heading"),
+                                line_start=h["line_start"],
+                                line_end=h["line_end"],
+                                score=h["score"],
+                                tags=h.get("tags", []),
+                                aliases=h.get("aliases", []),
+                                snippet=h["text"][:300],
+                            )
+                            for h in result.memory_hits
+                        ],
+                        sessions=[
+                            dict(
+                                session_id=h["session_id"],
+                                message_uuid=h["message_uuid"],
+                                role=h["role"],
+                                cwd=h.get("cwd"),
+                                timestamp_iso=h["timestamp_iso"],
+                                jsonl_path=h["jsonl_path"],
+                                line_number=h["line_number"],
+                                score=h["score"],
+                                source_kind=h["source_kind"],
+                                snippet=h["content"][:300],
+                            )
+                            for h in result.session_hits
+                        ],
+                        is_promotion_candidate=result.is_promotion_candidate,
+                        sources_queried=result.sources_queried,
+                    ),
+                    indent=2,
+                )
             )
+        else:
+            click.echo(_render_text(result, top_k, top_k, source, promote_candidates))
     finally:
         if memory_store is not None:
             memory_store.close()

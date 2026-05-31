@@ -1,35 +1,44 @@
 # memory-tools
 
-Layered, cross-indexed memory system with local vector search, for use with Claude Code.
+> Local-first, files-you-own memory for AI assistants. Structured markdown +
+> on-device vector search. No cloud, no API key, nothing leaves your machine.
 
-See the design spec at [`docs/persistent-memory-system-design.md`](./docs/persistent-memory-system-design.md) for the full rationale.
+**Status:** v0.1 (pre-release). macOS-first; Claude Code is the reference integration.
 
-## Install
+## Why
+- **100% local & private** — embeddings via `sentence-transformers`, vector
+  search via `sqlite-vec`. Your data never leaves the machine.
+- **Your memory is human-readable markdown** in a folder you own — browse it in
+  Obsidian or any editor. No bespoke UI to babysit.
+- **Structured, not a blob** — `always / when / topics / knowledge` layers with
+  retrieval triggers, plus dual-source search over curated memory *and* your
+  past session transcripts.
 
-This component is installed by `mac_setup`'s phase-3 script:
-
+## Install (macOS)
+```bash
+git clone https://github.com/leonkatz/memory-tools
+cd memory-tools
+export MEMORY_HOME="$HOME/memory"   # any folder you like
+./install.sh
 ```
-cd ~/mac_setup
-./setup.sh --profile work --phase 3       # or --profile personal
-```
-
-## Data model
-
-Memory files live under `$MEMORY_HOME` in four layers:
-
-- `always/` — permanent facts (identity, PRD codes, envs). Small (<8 KB total), always loaded.
-- `when/` — task-triggered rules (`when-touching-repos.md`, etc.).
-- `topics/` — canonical-source registry (`prometheus.md`, etc.).
-- `knowledge/` — long-form durable lessons.
-
-Each file has YAML frontmatter with `name`, `description`, `type`, `tags`, `aliases`, `see_also`, `created`, `updated`.
+`install.sh` sets up a venv, the CLIs, the Claude Code hooks + skill, seeds a
+starter memory from `template/`, and builds the vector index.
 
 ## CLIs
+- `memory-search "query" [--top N] [--json]` — semantic + keyword search.
+- `memory-index rebuild | update` — (re)build the vector index.
+- `memory-capture` — add a new memory.
+- `memory-docs-convert <dir>` — import an existing notes/docs tree into search.
 
-- `memory-index rebuild | update` — rebuild or incrementally update the vector index.
-- `memory-search "query" [--top N] [--json]` — semantic search over memory.
-- `memory-capture` — interactive capture of a new memory (layer, file, frontmatter, reindex).
+## Layout
+Memory lives under `$MEMORY_HOME`:
+- `always/` — permanent facts, always loaded.
+- `when/` — task-triggered rules.
+- `topics/` — canonical-source registry.
+- `knowledge/` — long-form durable lessons.
 
-## Data vs. code
+The markdown is the source of truth; `.index/` is a disposable, rebuildable
+SQLite vector index (never synced).
 
-Files in `$MEMORY_HOME` are the source of truth. `index.db` is a disposable, rebuildable SQLite+vec0 index. The markdown syncs via Dropbox; the index does not.
+## Contributing
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).

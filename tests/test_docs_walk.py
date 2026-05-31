@@ -1,4 +1,5 @@
 """Tests for docs_convert.walk — immediate-child grouping, recursive file collection."""
+
 from __future__ import annotations
 
 from pathlib import Path

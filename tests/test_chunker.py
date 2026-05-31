@@ -1,7 +1,8 @@
 """Tests for heading-aware markdown chunker."""
+
 from __future__ import annotations
 
-from memory_tools.chunker import Chunk, chunk_body
+from memory_tools.chunker import chunk_body
 
 
 def test_chunk_body_splits_on_headings() -> None:
@@ -31,8 +32,8 @@ def test_chunk_body_preamble_without_heading_becomes_its_own_chunk() -> None:
 
 
 def test_chunk_body_splits_oversized_section_by_paragraph() -> None:
-    para = "lorem ipsum " * 20   # ~240 bytes
-    body = "# Big\n\n" + "\n\n".join([para] * 10)   # ~2400+ bytes
+    para = "lorem ipsum " * 20  # ~240 bytes
+    body = "# Big\n\n" + "\n\n".join([para] * 10)  # ~2400+ bytes
     chunks = chunk_body(body, max_bytes=500)
     assert len(chunks) > 1
     assert all(len(c.text.encode("utf-8")) <= 500 + 200 for c in chunks), (
@@ -48,13 +49,12 @@ def test_chunk_body_empty_returns_empty_list() -> None:
 
 def test_chunk_body_heading_never_isolated_when_single_paragraph_is_oversized() -> None:
     """A heading line must not flush as its own chunk; it glues to the first paragraph."""
-    big_para = "x " * 400   # ~800 bytes
+    big_para = "x " * 400  # ~800 bytes
     body = f"# Section\n\n{big_para}\n"
     chunks = chunk_body(body, max_bytes=500)
     # The heading must appear with content, not as a standalone chunk
     assert all(
-        not (c.text.strip().startswith("# ") and len(c.text.splitlines()) == 1)
-        for c in chunks
+        not (c.text.strip().startswith("# ") and len(c.text.splitlines()) == 1) for c in chunks
     ), "No chunk may be a heading-only line"
     # First chunk carries the heading text AND has content after it
     assert chunks[0].heading == "Section"

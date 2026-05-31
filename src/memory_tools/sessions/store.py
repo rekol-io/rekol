@@ -8,13 +8,14 @@ Schema is intentionally separate from ``IndexStore`` (which holds curated
 memory) so the two lifecycles do not interfere — rebuilding one never
 risks the other, and the DBs are sized appropriately for their corpora.
 """
+
 from __future__ import annotations
 
 import re
 import sqlite3
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
 
 
-def build_fts_match(query: str) -> Optional[str]:
+def build_fts_match(query: str) -> str | None:
     """Turn a raw user query into a safe FTS5 ``MATCH`` expression.
 
     FTS5 ``MATCH`` has its own query grammar: a leading ``-`` means NOT, ``:``
@@ -44,7 +45,7 @@ def build_fts_match(query: str) -> Optional[str]:
     Returns ``None`` when nothing searchable remains, so callers can skip the
     query rather than issue an empty ``MATCH`` (which FTS5 rejects).
     """
-    phrases: List[str] = []
+    phrases: list[str] = []
     for token in query.split():
         if not _FTS_HAS_ALNUM.search(token):
             continue
@@ -160,6 +161,7 @@ class SessionStore:
             self._vec_loaded = False
 
     def init_schema(self) -> None:
+        """Create the messages, FTS, and files-seen tables, plus the vec table if loaded."""
         self.conn.executescript(
             SCHEMA_MESSAGES + SCHEMA_FTS + SCHEMA_FTS_TRIGGERS + SCHEMA_FILES_SEEN
         )
@@ -182,14 +184,12 @@ class SessionStore:
             )
         self.conn.commit()
 
-    def list_tables(self) -> List[str]:
+    def list_tables(self) -> list[str]:
         """Return all tables (including virtual tables) by name."""
-        rows = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
+        rows = self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         return [r["name"] for r in rows]
 
-    def insert_message(self, msg: dict) -> Optional[int]:
+    def insert_message(self, msg: dict) -> int | None:
         """Insert a single message. Returns rowid, or None if duplicate.
 
         Dedupe is via the UNIQUE(session_id, message_uuid) constraint —
@@ -219,7 +219,7 @@ class SessionStore:
         self.conn.commit()
         return cur.lastrowid
 
-    def insert_message_no_commit(self, msg: dict) -> Optional[int]:
+    def insert_message_no_commit(self, msg: dict) -> int | None:
         """Same as insert_message but caller controls the transaction.
 
         Used by ``ingest_file`` which wraps an entire file in one BEGIN/COMMIT
@@ -273,7 +273,7 @@ class SessionStore:
             )
         self.conn.commit()
 
-    def search_fts(self, query: str, top_k: int = 5) -> List[dict]:
+    def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.
 
         SQLite FTS5 ``bm25()`` returns **negative** values, where a stronger
@@ -300,7 +300,7 @@ class SessionStore:
             "ORDER BY bm25_score ASC LIMIT ?",
             (match_query, top_k),
         ).fetchall()
-        out: List[dict] = []
+        out: list[dict] = []
         for r in rows:
             d = dict(r)
             # Negate: more-negative bm25 (stronger match) becomes higher score.
@@ -309,7 +309,7 @@ class SessionStore:
             out.append(d)
         return out
 
-    def search_vec(self, query_vec: np.ndarray, top_k: int = 5) -> List[dict]:
+    def search_vec(self, query_vec: np.ndarray, top_k: int = 5) -> list[dict]:
         """Vector search via sqlite-vec when available; numpy cosine fallback otherwise."""
         import numpy as np
 
@@ -325,7 +325,7 @@ class SessionStore:
                 "ORDER BY v.distance",
                 (query_vec.tobytes(), top_k),
             ).fetchall()
-            out: List[dict] = []
+            out: list[dict] = []
             for r in rows:
                 d = dict(r)
                 # vec0 distance is cosine distance in [0, 2]; convert to similarity in [-1, 1]
@@ -350,7 +350,7 @@ class SessionStore:
         qnorm = float(np.linalg.norm(query_vec)) + 1e-12
         scores = (vecs @ query_vec) / (norms * qnorm)
         idx = np.argsort(-scores)[:top_k]
-        out: List[dict] = []
+        out = []
         for i in idx:
             r = rows[i]
             d = {k: r[k] for k in r.keys() if k != "embedding"}
@@ -384,13 +384,16 @@ class SessionStore:
         ).fetchone()
         if row is None:
             return False
-        return int(row["mtime_unix"]) == int(mtime_unix) and int(row["size_bytes"]) == int(size_bytes)
+        return int(row["mtime_unix"]) == int(mtime_unix) and int(row["size_bytes"]) == int(
+            size_bytes
+        )
 
-    def __enter__(self) -> "SessionStore":
+    def __enter__(self) -> SessionStore:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
     def close(self) -> None:
+        """Close the underlying database connection."""
         self.conn.close()

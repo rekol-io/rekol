@@ -1,9 +1,9 @@
 """Embedding backends: HashingEmbedder (test double) and SentenceTransformerEmbedder."""
+
 from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
-from typing import List
 
 import numpy as np
 
@@ -38,7 +38,7 @@ class BaseEmbedder(ABC):
         """
         ...
 
-    def embed_batch(self, texts: List[str]) -> np.ndarray:
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
         """Embed a list of strings into a 2-D float32 matrix.
 
         Args:
@@ -130,7 +130,12 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
         self._model = SentenceTransformer(model_name)
-        self._dim = int(self._model.get_sentence_embedding_dimension())
+        dim = self._model.get_sentence_embedding_dimension()
+        if dim is None:
+            raise ValueError(
+                f"sentence-transformers model {model_name!r} reported no embedding dimension"
+            )
+        self._dim = int(dim)
 
     @property
     def dim(self) -> int:
@@ -153,7 +158,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         vec = self._model.encode(text, normalize_embeddings=True)
         return np.asarray(vec, dtype=np.float32)
 
-    def embed_batch(self, texts: List[str]) -> np.ndarray:
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
         """Embed a list of strings with batched inference.
 
         Overrides the base class to use the model's native batching for
@@ -192,10 +197,6 @@ def get_embedder(name: str) -> BaseEmbedder:
     if name == "test-hashing":
         return HashingEmbedder(dim=384)
     if name.startswith("BAAI/") or name in ("default", "bge-small-en-v1.5"):
-        model = (
-            "BAAI/bge-small-en-v1.5"
-            if name in ("default", "bge-small-en-v1.5")
-            else name
-        )
+        model = "BAAI/bge-small-en-v1.5" if name in ("default", "bge-small-en-v1.5") else name
         return SentenceTransformerEmbedder(model_name=model)
     raise ValueError(f"Unknown embedder: {name!r}")

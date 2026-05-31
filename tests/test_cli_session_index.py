@@ -1,4 +1,5 @@
 """Smoke tests for claude-session-index CLI."""
+
 from __future__ import annotations
 
 import shutil
@@ -7,7 +8,6 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from memory_tools.cli_session_index import main as cli_main
-
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_session.jsonl"
 
@@ -21,8 +21,7 @@ def test_session_index_full_runs_against_directory(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setenv("MEMORY_HOME", str(home))
     (home / "memory.config.yaml").write_text(
-        f"claude_projects_dir: {projects.parent}\n"
-        "embedding_model: test-hashing\n"
+        f"claude_projects_dir: {projects.parent}\nembedding_model: test-hashing\n"
     )
 
     runner = CliRunner()
@@ -41,8 +40,7 @@ def test_session_index_incremental_is_idempotent(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setenv("MEMORY_HOME", str(home))
     (home / "memory.config.yaml").write_text(
-        f"claude_projects_dir: {projects.parent}\n"
-        "embedding_model: test-hashing\n"
+        f"claude_projects_dir: {projects.parent}\nembedding_model: test-hashing\n"
     )
 
     runner = CliRunner()

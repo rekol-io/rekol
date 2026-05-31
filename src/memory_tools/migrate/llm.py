@@ -9,14 +9,14 @@ We use Sonnet by default (Leon's preference).  The wrapper:
   :class:`LLMUnavailable`, so the caller can fall back to the knowledge-layer
   default without special-casing subprocess errors.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import shutil
 import subprocess
-from typing import Dict
-
+from typing import Any
 
 CLAUDE_BIN = "claude"
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -25,7 +25,7 @@ DEFAULT_TIMEOUT_SEC = 60
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
-class LLMUnavailable(RuntimeError):
+class LLMUnavailable(RuntimeError):  # noqa: N818  # public name kept stable for v0.1; rename tracked separately
     """Raised when the LLM call fails for any reason the caller can recover from."""
 
 
@@ -41,7 +41,7 @@ def call_claude_classifier(
     *,
     model: str = DEFAULT_MODEL,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
-) -> Dict[str, object]:
+) -> dict[str, Any]:
     """Run the classifier prompt through claude -p; return parsed JSON.
 
     The model is told to output a JSON object with keys: ``layer``,
@@ -64,9 +64,7 @@ def call_claude_classifier(
             cannot be parsed as JSON.
     """
     full_input = (
-        f"{prompt}\n\n"
-        f"## CURRENT INDEX\n{index_context}\n\n"
-        f"## FILE TO CLASSIFY\n{file_body}\n"
+        f"{prompt}\n\n## CURRENT INDEX\n{index_context}\n\n## FILE TO CLASSIFY\n{file_body}\n"
     )
     try:
         result = subprocess.run(
@@ -80,9 +78,7 @@ def call_claude_classifier(
         raise LLMUnavailable(f"claude -p timed out after {timeout_sec}s") from exc
 
     if result.returncode != 0:
-        raise LLMUnavailable(
-            f"claude -p exited {result.returncode}: {result.stderr.strip()[:200]}"
-        )
+        raise LLMUnavailable(f"claude -p exited {result.returncode}: {result.stderr.strip()[:200]}")
 
     text = result.stdout.strip()
     # Try fenced JSON first, fall back to raw.
@@ -91,9 +87,7 @@ def call_claude_classifier(
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise LLMUnavailable(
-            f"could not parse claude -p output as JSON: {exc}"
-        ) from exc
+        raise LLMUnavailable(f"could not parse claude -p output as JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise LLMUnavailable("claude -p returned JSON that was not an object")
     return data

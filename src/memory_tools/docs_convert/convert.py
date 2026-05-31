@@ -1,18 +1,20 @@
 """convert: orchestrates the full docs_convert pipeline for a source tree."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
 
-from .walk import group_sessions
 from .extract import extract_text, is_text_native
 from .transcript import build_rows
+from .walk import group_sessions
 from .writer import write_sessions
 
 
 @dataclass
 class ConvertStats:
+    """Tally of file dispositions accumulated during a convert_tree run."""
+
     folders_seen: int = 0
     jsonl_written: int = 0
     files_converted: int = 0
@@ -22,6 +24,7 @@ class ConvertStats:
     errors: int = 0
 
     def as_line(self) -> str:
+        """Render the stats as a single space-separated key=value log line."""
         return (
             f"folders_seen={self.folders_seen} "
             f"jsonl_written={self.jsonl_written} "
@@ -60,12 +63,12 @@ def convert_tree(
     # folders_seen = immediate child directories (the unit a session maps to).
     stats.folders_seen = sum(1 for c in source_dir.iterdir() if c.is_dir())
 
-    rows_by_session: Dict[str, List[dict]] = {}
+    rows_by_session: dict[str, list[dict]] = {}
     for group in groups:
-        texts: Dict[str, str] = {}
+        texts: dict[str, str] = {}
         for entry in group.files:
             try:
-                text: Optional[str] = extract_text(entry.path, max_bytes=max_bytes)
+                text: str | None = extract_text(entry.path, max_bytes=max_bytes)
                 if text is None:
                     # extract_text doesn't surface a reason; re-stat to classify
                     # too-large vs empty. Costs one extra syscall per skipped file

@@ -1,4 +1,5 @@
 """CLI + end-to-end round-trip: convert a fixture tree, then ingest it for real."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,8 +14,7 @@ FIXTURE_TREE = Path(__file__).parent / "fixtures" / "docs_tree"
 def _write_config(home: Path, projects: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
     (home / "memory.config.yaml").write_text(
-        f"claude_projects_dir: {projects}\n"
-        "embedding_model: test-hashing\n"
+        f"claude_projects_dir: {projects}\nembedding_model: test-hashing\n"
     )
 
 
@@ -58,8 +58,8 @@ def test_cli_missing_source_dir_exits_2(tmp_path: Path, monkeypatch) -> None:
 
 def test_roundtrip_converted_docs_are_searchable(tmp_path: Path, monkeypatch) -> None:
     """The load-bearing test: synthetic JSONL must satisfy the REAL ingester."""
-    from memory_tools.sessions.store import SessionStore
     from memory_tools.sessions.ingest import ingest_directory
+    from memory_tools.sessions.store import SessionStore
 
     home = tmp_path / "memhome"
     projects = tmp_path / "projects"
@@ -100,17 +100,24 @@ def test_cli_missing_shim_exits_3(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_cli_index_chains_incremental(tmp_path: Path, monkeypatch) -> None:
-    import subprocess as _sp
+
     home = tmp_path / "memhome"
     projects = tmp_path / "projects"
     _write_config(home, projects)
     monkeypatch.setenv("MEMORY_HOME", str(home))
-    monkeypatch.setattr("memory_tools.cli_docs_convert.shutil.which", lambda _: "/fake/claude-session-index")
+    monkeypatch.setattr(
+        "memory_tools.cli_docs_convert.shutil.which", lambda _: "/fake/claude-session-index"
+    )
     calls = {}
+
     def _fake_run(cmd, check=False):
         calls["cmd"] = cmd
-        class R: returncode = 0
+
+        class R:
+            returncode = 0
+
         return R()
+
     monkeypatch.setattr("memory_tools.cli_docs_convert.subprocess.run", _fake_run)
 
     runner = CliRunner()

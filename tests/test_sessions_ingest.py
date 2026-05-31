@@ -1,13 +1,11 @@
 """Tests for JSONL ingest of Claude Code transcripts."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from memory_tools.sessions.ingest import iter_messages_in_file, ingest_file
+from memory_tools.sessions.ingest import ingest_file, iter_messages_in_file
 from memory_tools.sessions.store import SessionStore
-
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_session.jsonl"
 

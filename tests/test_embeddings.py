@@ -67,6 +67,7 @@ def test_base_embedder_cannot_be_instantiated() -> None:
         @property
         def dim(self) -> int:
             return 8
+
         # Missing embed() — should fail
 
     with pytest.raises(TypeError):
