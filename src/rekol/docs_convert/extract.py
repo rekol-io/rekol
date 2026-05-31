@@ -11,9 +11,14 @@ from pathlib import Path
 from . import TEXT_EXTENSIONS
 
 
-def is_text_native(path: Path) -> bool:
-    """True when the file's extension is one we read as plain text."""
-    return path.suffix.lstrip(".").lower() in TEXT_EXTENSIONS
+def is_text_native(path: Path, text_extensions: frozenset[str] | None = None) -> bool:
+    """True when the file's extension is one we read as plain text.
+
+    ``text_extensions`` overrides the default :data:`TEXT_EXTENSIONS` allowlist
+    (the --include/--exclude basis). Extensions are lowercase, no leading dot.
+    """
+    exts = TEXT_EXTENSIONS if text_extensions is None else text_extensions
+    return path.suffix.lstrip(".").lower() in exts
 
 
 def extract_text(path: Path, max_bytes: int) -> str | None:
