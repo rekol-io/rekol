@@ -4,14 +4,13 @@ Each memory file is a markdown document with a YAML frontmatter block.  This
 module owns the canonical definition of what makes a memory file valid and
 provides the single entry-point ``parse_file`` used by every other module.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 import frontmatter
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,13 +57,13 @@ class MemoryFile:
     description: str
     type: str
     body: str
-    tags: List[str] = field(default_factory=list)
-    aliases: List[str] = field(default_factory=list)
-    see_also: List[str] = field(default_factory=list)
-    created: Optional[str] = None
-    updated: Optional[str] = None
-    valid_from: Optional[str] = None
-    invalidated_at: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    see_also: list[str] = field(default_factory=list)
+    created: str | None = None
+    updated: str | None = None
+    valid_from: str | None = None
+    invalidated_at: str | None = None
 
     @property
     def is_invalidated(self) -> bool:
@@ -109,8 +108,7 @@ def parse_file(path: Path) -> MemoryFile:
     # Validate the type value against the allowed set.
     if meta["type"] not in ALLOWED_TYPES:
         raise ValidationError(
-            f"{path}: invalid 'type' {meta['type']!r}"
-            f" (allowed: {sorted(ALLOWED_TYPES)})"
+            f"{path}: invalid 'type' {meta['type']!r} (allowed: {sorted(ALLOWED_TYPES)})"
         )
 
     return MemoryFile(
@@ -125,9 +123,7 @@ def parse_file(path: Path) -> MemoryFile:
         created=str(meta["created"]) if meta.get("created") else None,
         updated=str(meta["updated"]) if meta.get("updated") else None,
         valid_from=str(meta["valid_from"]) if meta.get("valid_from") else None,
-        invalidated_at=(
-            str(meta["invalidated_at"]) if meta.get("invalidated_at") else None
-        ),
+        invalidated_at=(str(meta["invalidated_at"]) if meta.get("invalidated_at") else None),
     )
 
 
@@ -136,7 +132,7 @@ def parse_file(path: Path) -> MemoryFile:
 # ---------------------------------------------------------------------------
 
 
-def _coerce_list(meta: dict, key: str, path: Path) -> List[str]:
+def _coerce_list(meta: dict, key: str, path: Path) -> list[str]:
     """Return the frontmatter value for *key* as a list of strings.
 
     Treats a missing key or ``None`` as an empty list.  Raises

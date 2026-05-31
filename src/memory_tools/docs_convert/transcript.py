@@ -9,11 +9,11 @@ different source trees converted under different prefixes can never collide on
 the ingester's UNIQUE(session_id, message_uuid) key (which would otherwise drop
 the second tree's files as dupes).
 """
+
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
-from typing import Dict, List
+from datetime import UTC, datetime
 
 from .walk import SessionGroup
 
@@ -21,20 +21,20 @@ _SALT_SEP = "\0"
 
 
 def _row_uuid(prefix: str, rel_to_source: str) -> str:
-    return hashlib.sha1(f"{prefix}{_SALT_SEP}{rel_to_source}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{prefix}{_SALT_SEP}{rel_to_source}".encode()).hexdigest()
 
 
 def _session_id(prefix: str, session_rel_to_source: str) -> str:
-    return hashlib.sha1(f"{prefix}{_SALT_SEP}{session_rel_to_source}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{prefix}{_SALT_SEP}{session_rel_to_source}".encode()).hexdigest()
 
 
 def _iso_z(mtime_unix: int) -> str:
     """Format a unix mtime as ISO-8601 UTC with a trailing Z (ingester-parseable)."""
-    dt = datetime.fromtimestamp(mtime_unix, tz=timezone.utc)
+    dt = datetime.fromtimestamp(mtime_unix, tz=UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_rows(group: SessionGroup, prefix: str, texts: Dict[str, str]) -> List[dict]:
+def build_rows(group: SessionGroup, prefix: str, texts: dict[str, str]) -> list[dict]:
     """Build one row per file whose extracted text is present in ``texts``.
 
     ``texts`` maps ``FileEntry.rel_to_session`` → extracted text. Files absent
@@ -43,19 +43,21 @@ def build_rows(group: SessionGroup, prefix: str, texts: Dict[str, str]) -> List[
     path-only ghost message is never emitted.
     """
     session_id = _session_id(prefix, group.rel_to_source)
-    rows: List[dict] = []
+    rows: list[dict] = []
     for entry in group.files:
         text = texts.get(entry.rel_to_session)
         if text is None:
             continue
         content = f"{entry.rel_to_session}\n\n{text}"
-        rows.append({
-            "type": "user",
-            "uuid": _row_uuid(prefix, entry.rel_to_source),
-            "parentUuid": None,
-            "sessionId": session_id,
-            "timestamp": _iso_z(entry.mtime_unix),
-            "cwd": group.folder_abs,
-            "message": {"role": "document", "content": content},
-        })
+        rows.append(
+            {
+                "type": "user",
+                "uuid": _row_uuid(prefix, entry.rel_to_source),
+                "parentUuid": None,
+                "sessionId": session_id,
+                "timestamp": _iso_z(entry.mtime_unix),
+                "cwd": group.folder_abs,
+                "message": {"role": "document", "content": content},
+            }
+        )
     return rows

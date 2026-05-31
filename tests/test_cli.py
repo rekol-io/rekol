@@ -8,7 +8,8 @@ from click.testing import CliRunner
 from memory_tools.cli_capture import main as capture_main
 from memory_tools.cli_index import main as index_main
 from memory_tools.cli_invalidate import main as invalidate_main
-from memory_tools.cli_propose import extract_candidates, main as propose_main
+from memory_tools.cli_propose import extract_candidates
+from memory_tools.cli_propose import main as propose_main
 from memory_tools.cli_search import main as search_main
 
 
@@ -24,9 +25,7 @@ def _seed_memory(root: Path) -> None:
         "---\n\n"
         "# Prometheus\n\nURL lives in the IaC repo.\n"
     )
-    (root / "memory.config.yaml").write_text(
-        "embedding_model: test-hashing\n"
-    )
+    (root / "memory.config.yaml").write_text("embedding_model: test-hashing\n")
 
 
 def test_memory_index_rebuild_cli(tmp_path: Path, monkeypatch) -> None:
@@ -71,14 +70,23 @@ def test_memory_capture_cli_handles_colon_in_name(tmp_path: Path, monkeypatch) -
     runner.invoke(index_main, ["rebuild"])
 
     # Capture a new topic file whose name has a colon
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "reaper.md",
-        "--name", "Reaper: canonical source",
-        "--description", "Where the repair schedules come from",
-        "--tags", "reaper,repair,urls",
-        "--aliases", "repair schedule",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "reaper.md",
+            "--name",
+            "Reaper: canonical source",
+            "--description",
+            "Where the repair schedules come from",
+            "--tags",
+            "reaper,repair,urls",
+            "--aliases",
+            "repair schedule",
+        ],
+    )
     assert result.exit_code == 0, result.output
 
     # File exists and parses cleanly (if YAML was invalid, reindex would have reported 0 updates)
@@ -88,8 +96,9 @@ def test_memory_capture_cli_handles_colon_in_name(tmp_path: Path, monkeypatch) -
     result = runner.invoke(search_main, ["reaper canonical source", "--top", "3", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert any("reaper" in hit["file_path"].lower() for hit in data["memory"]), \
+    assert any("reaper" in hit["file_path"].lower() for hit in data["memory"]), (
         f"reaper.md was not indexed after capture. Output: {result.output}"
+    )
 
 
 def test_memory_capture_rejects_near_duplicate(tmp_path: Path, monkeypatch) -> None:
@@ -101,46 +110,71 @@ def test_memory_capture_rejects_near_duplicate(tmp_path: Path, monkeypatch) -> N
     runner.invoke(index_main, ["rebuild"])
 
     # First capture establishes the canonical entry
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "alpha.md",
-        "--name", "Alpha service",
-        "--description", "API service for alpha data",
-        "--body", "Alpha service runs on port 9001 in cluster east-1.\n"
-                  "Owned by the platform team.  Restart via `kubectl rollout`.",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "alpha.md",
+            "--name",
+            "Alpha service",
+            "--description",
+            "API service for alpha data",
+            "--body",
+            "Alpha service runs on port 9001 in cluster east-1.\n"
+            "Owned by the platform team.  Restart via `kubectl rollout`.",
+        ],
+    )
     assert result.exit_code == 0, result.output
 
     # Second capture with the same body but different filename should be rejected
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "alpha-2.md",
-        "--name", "Alpha service",
-        "--description", "API service for alpha data",
-        "--body", "Alpha service runs on port 9001 in cluster east-1.\n"
-                  "Owned by the platform team.  Restart via `kubectl rollout`.",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "alpha-2.md",
+            "--name",
+            "Alpha service",
+            "--description",
+            "API service for alpha data",
+            "--body",
+            "Alpha service runs on port 9001 in cluster east-1.\n"
+            "Owned by the platform team.  Restart via `kubectl rollout`.",
+        ],
+    )
     assert result.exit_code != 0, result.output
     assert "near-duplicate" in result.output
     assert "alpha.md" in result.output
     assert not (tmp_path / "topics" / "alpha-2.md").exists()
 
     # --force bypasses the check and writes anyway
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "alpha-2.md",
-        "--name", "Alpha service v2",
-        "--description", "API service for alpha data",
-        "--body", "Alpha service runs on port 9001 in cluster east-1.\n"
-                  "Owned by the platform team.  Restart via `kubectl rollout`.",
-        "--force",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "alpha-2.md",
+            "--name",
+            "Alpha service v2",
+            "--description",
+            "API service for alpha data",
+            "--body",
+            "Alpha service runs on port 9001 in cluster east-1.\n"
+            "Owned by the platform team.  Restart via `kubectl rollout`.",
+            "--force",
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert (tmp_path / "topics" / "alpha-2.md").exists()
 
 
 def test_memory_capture_conflict_check_works_for_large_bodies(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Regression: the conflict check must chunk the candidate body the same
     way the indexer chunks stored content.  Embedding the full unsliced body
@@ -150,8 +184,7 @@ def test_memory_capture_conflict_check_works_for_large_bodies(
     # Use a deliberately small chunk size so it's easy to exceed.
     (tmp_path / "topics").mkdir(parents=True, exist_ok=True)
     (tmp_path / "memory.config.yaml").write_text(
-        "embedding_model: test-hashing\n"
-        "chunk_max_bytes: 200\n"
+        "embedding_model: test-hashing\nchunk_max_bytes: 200\n"
     )
     monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
     runner = CliRunner()
@@ -171,25 +204,41 @@ def test_memory_capture_conflict_check_works_for_large_bodies(
     )
     assert len(big_body) > 200, len(big_body)
 
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "alpha-big.md",
-        "--name", "Alpha service",
-        "--description", "Alpha deployment, logs, on-call",
-        "--body", big_body,
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "alpha-big.md",
+            "--name",
+            "Alpha service",
+            "--description",
+            "Alpha deployment, logs, on-call",
+            "--body",
+            big_body,
+        ],
+    )
     assert result.exit_code == 0, result.output
 
     # Now try to capture the same body with a different filename — should be
     # rejected as a near-duplicate even though the body is much larger than
     # chunk_max_bytes.
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "alpha-big-2.md",
-        "--name", "Alpha service",
-        "--description", "Alpha deployment, logs, on-call",
-        "--body", big_body,
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "alpha-big-2.md",
+            "--name",
+            "Alpha service",
+            "--description",
+            "Alpha deployment, logs, on-call",
+            "--body",
+            big_body,
+        ],
+    )
     assert result.exit_code != 0, result.output
     assert "near-duplicate" in result.output
     assert "alpha-big.md" in result.output
@@ -201,25 +250,42 @@ def test_memory_capture_emits_valid_from(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
     runner = CliRunner()
     runner.invoke(index_main, ["rebuild"])
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "with-valid-from.md",
-        "--name", "Service Z",
-        "--description", "Z service URL",
-        "--body", "Z service runs at https://z.internal:8443",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "with-valid-from.md",
+            "--name",
+            "Service Z",
+            "--description",
+            "Z service URL",
+            "--body",
+            "Z service runs at https://z.internal:8443",
+        ],
+    )
     assert result.exit_code == 0, result.output
     post = frontmatter.load(tmp_path / "topics" / "with-valid-from.md")
     assert post.metadata.get("valid_from"), post.metadata
     # And user-provided --valid-from is honored
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "back-dated.md",
-        "--name", "Y service",
-        "--description", "Y service legacy URL",
-        "--body", "Y was at port 7000 in the old cluster",
-        "--valid-from", "2024-06-01",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "back-dated.md",
+            "--name",
+            "Y service",
+            "--description",
+            "Y service legacy URL",
+            "--body",
+            "Y was at port 7000 in the old cluster",
+            "--valid-from",
+            "2024-06-01",
+        ],
+    )
     assert result.exit_code == 0, result.output
     post = frontmatter.load(tmp_path / "topics" / "back-dated.md")
     assert post.metadata["valid_from"] == "2024-06-01"
@@ -258,14 +324,23 @@ def test_memory_capture_project_scoping(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     runner.invoke(index_main, ["rebuild"])
 
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "phase2.md",
-        "--name", "Phase 2 architecture",
-        "--description", "Transformer agent details",
-        "--body", "Phase 2 uses a 4L x 256d x 4h transformer at ~3.16M params.",
-        "--project", "math-evolution-agent",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "phase2.md",
+            "--name",
+            "Phase 2 architecture",
+            "--description",
+            "Transformer agent details",
+            "--body",
+            "Phase 2 uses a 4L x 256d x 4h transformer at ~3.16M params.",
+            "--project",
+            "math-evolution-agent",
+        ],
+    )
     assert result.exit_code == 0, result.output
 
     expected = tmp_path / "projects" / "math-evolution-agent" / "topics" / "phase2.md"
@@ -284,20 +359,30 @@ def test_memory_capture_project_scoping(tmp_path: Path, monkeypatch) -> None:
     assert "phase2.md" in index_md
 
     # Bad slug rejected
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "x.md",
-        "--name", "x",
-        "--description", "x",
-        "--body", "x",
-        "--project", "../escape",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "x.md",
+            "--name",
+            "x",
+            "--description",
+            "x",
+            "--body",
+            "x",
+            "--project",
+            "../escape",
+        ],
+    )
     assert result.exit_code != 0
     assert "alphanumeric" in result.output
 
 
 def test_memory_invalidate_refuses_path_outside_memory_home(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _seed_memory(tmp_path)
     monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
@@ -370,21 +455,28 @@ def test_memory_capture_timestamps_are_datetime(tmp_path: Path, monkeypatch) -> 
     runner = CliRunner()
     runner.invoke(index_main, ["rebuild"])
 
-    result = runner.invoke(capture_main, [
-        "--layer", "topic",
-        "--file", "timestamped.md",
-        "--name", "Time-stamped capture",
-        "--description", "Tests that captures include datetime + offset",
-        "--body", "A small body so the conflict check has something to compare.",
-    ])
+    result = runner.invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "timestamped.md",
+            "--name",
+            "Time-stamped capture",
+            "--description",
+            "Tests that captures include datetime + offset",
+            "--body",
+            "A small body so the conflict check has something to compare.",
+        ],
+    )
     assert result.exit_code == 0, result.output
 
     post = frontmatter.load(tmp_path / "topics" / "timestamped.md")
     for field in ("created", "updated"):
         value = post.metadata[field]
         assert "T" in value, (
-            f"expected ISO-8601 datetime with T separator for {field}, "
-            f"got {value!r}"
+            f"expected ISO-8601 datetime with T separator for {field}, got {value!r}"
         )
         parsed = datetime.fromisoformat(value)
         assert parsed.tzinfo is not None, (
@@ -393,9 +485,7 @@ def test_memory_capture_timestamps_are_datetime(tmp_path: Path, monkeypatch) -> 
 
     # valid_from stays date-only — different semantics from created/updated.
     valid_from = post.metadata["valid_from"]
-    assert "T" not in valid_from, (
-        f"expected date-only valid_from, got {valid_from!r}"
-    )
+    assert "T" not in valid_from, f"expected date-only valid_from, got {valid_from!r}"
 
 
 def test_memory_invalidate_writes_datetime(tmp_path: Path, monkeypatch) -> None:
@@ -414,8 +504,7 @@ def test_memory_invalidate_writes_datetime(tmp_path: Path, monkeypatch) -> None:
     for field in ("invalidated_at", "updated"):
         value = post.metadata[field]
         assert "T" in value, (
-            f"expected ISO-8601 datetime with T separator for {field}, "
-            f"got {value!r}"
+            f"expected ISO-8601 datetime with T separator for {field}, got {value!r}"
         )
         parsed = datetime.fromisoformat(value)
         assert parsed.tzinfo is not None, (
@@ -429,8 +518,7 @@ def test_memory_search_source_memory_skips_sessions(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("MEMORY_HOME", str(home))
     (home / "memory.config.yaml").write_text(
-        "embedding_model: test-hashing\n"
-        f"claude_projects_dir: {tmp_path}/no-projects-here\n"
+        f"embedding_model: test-hashing\nclaude_projects_dir: {tmp_path}/no-projects-here\n"
     )
     (home / "topics").mkdir()
     (home / "topics" / "litellm.md").write_text(
@@ -455,17 +543,18 @@ def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
     fake_projects = tmp_path / "projects" / "proj"
     fake_projects.mkdir(parents=True)
     import shutil
+
     shutil.copy(
         Path(__file__).parent / "fixtures" / "sample_session.jsonl",
         fake_projects / "session.jsonl",
     )
     monkeypatch.setenv("MEMORY_HOME", str(home))
     (home / "memory.config.yaml").write_text(
-        "embedding_model: test-hashing\n"
-        f"claude_projects_dir: {fake_projects.parent}\n"
+        f"embedding_model: test-hashing\nclaude_projects_dir: {fake_projects.parent}\n"
     )
 
     from memory_tools.cli_session_index import main as session_idx_main
+
     runner = CliRunner()
     setup_result = runner.invoke(session_idx_main, ["--full"])
     assert setup_result.exit_code == 0, setup_result.output

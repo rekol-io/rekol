@@ -1,14 +1,13 @@
 """Tests for memory-migrate CLI subcommands."""
+
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from memory_tools.cli_migrate import main
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-project" / "memory"
 
@@ -28,9 +27,15 @@ def test_cli_repo_dry_run(tmp_path: Path, monkeypatch) -> None:
     src_parent, memory_home = _setup(tmp_path)
     monkeypatch.setenv("MEMORY_HOME", str(memory_home))
     runner = CliRunner()
-    result = runner.invoke(main, [
-        "repo", str(src_parent), "--dry-run", "--no-llm",
-    ])
+    result = runner.invoke(
+        main,
+        [
+            "repo",
+            str(src_parent),
+            "--dry-run",
+            "--no-llm",
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert "would migrate" in result.output.lower()
     # No files actually written
@@ -41,9 +46,15 @@ def test_cli_repo_commit(tmp_path: Path, monkeypatch) -> None:
     src_parent, memory_home = _setup(tmp_path)
     monkeypatch.setenv("MEMORY_HOME", str(memory_home))
     runner = CliRunner()
-    result = runner.invoke(main, [
-        "repo", str(src_parent), "--commit", "--no-llm",
-    ])
+    result = runner.invoke(
+        main,
+        [
+            "repo",
+            str(src_parent),
+            "--commit",
+            "--no-llm",
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert (memory_home / "topics" / "proj-alpha.md").is_file()
     assert (memory_home / "when" / "when-proj-foo.md").is_file()

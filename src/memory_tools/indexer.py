@@ -1,10 +1,11 @@
 """Indexer: walk $MEMORY_HOME, embed changed files, write .index/INDEX.md."""
+
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .chunker import chunk_body
 from .embeddings import BaseEmbedder
@@ -14,6 +15,8 @@ from .store import IndexStore
 
 @dataclass
 class IndexStats:
+    """Tally of file and chunk outcomes from an indexing run."""
+
     files_indexed: int = 0
     files_skipped: int = 0
     files_removed: int = 0
@@ -56,6 +59,8 @@ def _hash_file(path: Path) -> str:
 
 
 class Indexer:
+    """Indexes memory .md files into the store, embedding their chunks."""
+
     def __init__(
         self,
         memory_root: Path,
@@ -191,7 +196,7 @@ class Indexer:
         self._write_index_md()
         return stats
 
-    def _write_index_md(self) -> None:
+    def _write_index_md(self) -> None:  # noqa: C901  # complex but stable; refactor tracked separately
         """Regenerate ``.index/INDEX.md``: tag → files, alias → file, per-layer listing.
 
         Groups files by their top-level directory name (``always``, ``when``,

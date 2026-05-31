@@ -7,12 +7,11 @@ units without silently truncating content.
 
 No I/O is performed here; the module is a pure transformation on strings.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -41,7 +40,7 @@ class Chunk:
         line_end: 1-based line number of the last line of this chunk.
     """
 
-    heading: Optional[str]
+    heading: str | None
     text: str
     line_start: int
     line_end: int
@@ -52,7 +51,7 @@ class Chunk:
 # ---------------------------------------------------------------------------
 
 
-def chunk_body(body: str, max_bytes: int = 4_000) -> List[Chunk]:
+def chunk_body(body: str, max_bytes: int = 4_000) -> list[Chunk]:
     """Split a markdown body into heading-scoped chunks, splitting oversized ones.
 
     Primary splitting boundary is markdown headings (any level ``#``–``######``).
@@ -73,7 +72,7 @@ def chunk_body(body: str, max_bytes: int = 4_000) -> List[Chunk]:
         return []
 
     sections = _split_into_sections(body)
-    result: List[Chunk] = []
+    result: list[Chunk] = []
     for section in sections:
         result.extend(_split_oversized(section, max_bytes))
     return result
@@ -84,7 +83,7 @@ def chunk_body(body: str, max_bytes: int = 4_000) -> List[Chunk]:
 # ---------------------------------------------------------------------------
 
 
-def _split_into_sections(body: str) -> List[Chunk]:
+def _split_into_sections(body: str) -> list[Chunk]:
     """Split the body on heading lines, keeping each heading with its content.
 
     Content that appears before the first heading is collected as a single
@@ -98,11 +97,11 @@ def _split_into_sections(body: str) -> List[Chunk]:
         optional preamble chunk at index 0).
     """
     lines = body.splitlines()
-    sections: List[Chunk] = []
+    sections: list[Chunk] = []
 
-    current_heading: Optional[str] = None
+    current_heading: str | None = None
     current_start: int = 1
-    current_lines: List[str] = []
+    current_lines: list[str] = []
 
     def _flush(end_line: int) -> None:
         """Emit the accumulated lines as a chunk if they contain non-blank text."""
@@ -132,7 +131,7 @@ def _split_into_sections(body: str) -> List[Chunk]:
     return sections
 
 
-def _split_oversized(chunk: Chunk, max_bytes: int) -> List[Chunk]:
+def _split_oversized(chunk: Chunk, max_bytes: int) -> list[Chunk]:
     """Split *chunk* along paragraph boundaries if it exceeds *max_bytes*.
 
     Paragraphs are runs of text separated by blank lines.  The algorithm
@@ -167,8 +166,8 @@ def _split_oversized(chunk: Chunk, max_bytes: int) -> List[Chunk]:
         paragraphs = remaining
     else:
         paragraphs = raw_paragraphs
-    output: List[Chunk] = []
-    buffer: List[str] = []
+    output: list[Chunk] = []
+    buffer: list[str] = []
     buffer_bytes: int = 0
 
     # Line tracking is approximate: we advance line_start based on newline

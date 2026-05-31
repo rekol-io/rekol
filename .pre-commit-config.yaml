@@ -1,0 +1,17 @@
+# Install once per clone:  pre-commit install
+# Requires the project dev env on PATH for the mypy hook (pip install -e ".[dev]").
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (project env)
+        entry: mypy src/memory_tools
+        language: system
+        pass_filenames: false
+        types: [python]

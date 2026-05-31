@@ -1,9 +1,9 @@
 """Tests for the claude -p subprocess wrapper used by the classifier."""
+
 from __future__ import annotations
 
-import json
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -58,7 +58,10 @@ def test_call_claude_classifier_accepts_plain_json() -> None:
 
 def test_call_claude_classifier_raises_on_nonzero_exit() -> None:
     fake_result = subprocess.CompletedProcess(
-        args=["claude"], returncode=1, stdout="", stderr="bedrock denied",
+        args=["claude"],
+        returncode=1,
+        stdout="",
+        stderr="bedrock denied",
     )
     with patch("subprocess.run", return_value=fake_result):
         with pytest.raises(LLMUnavailable, match="claude -p exited 1"):
@@ -67,7 +70,10 @@ def test_call_claude_classifier_raises_on_nonzero_exit() -> None:
 
 def test_call_claude_classifier_raises_on_unparseable() -> None:
     fake_result = subprocess.CompletedProcess(
-        args=["claude"], returncode=0, stdout="I'm sorry, I can't.", stderr="",
+        args=["claude"],
+        returncode=0,
+        stdout="I'm sorry, I can't.",
+        stderr="",
     )
     with patch("subprocess.run", return_value=fake_result):
         with pytest.raises(LLMUnavailable, match="could not parse"):
@@ -77,6 +83,7 @@ def test_call_claude_classifier_raises_on_unparseable() -> None:
 def test_call_claude_classifier_timeout_maps_to_LLMUnavailable() -> None:
     def _raise(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=60)
+
     with patch("subprocess.run", side_effect=_raise):
         with pytest.raises(LLMUnavailable, match="timed out"):
             call_claude_classifier("p", "i", "b")
