@@ -1,4 +1,4 @@
-# memory-tools
+# REKOL
 
 > Local-first, files-you-own memory for AI assistants. Structured markdown +
 > on-device vector search. No cloud, no API key, nothing leaves your machine.
@@ -16,22 +16,23 @@
 
 ## Install (macOS)
 ```bash
-git clone https://github.com/leonkatz/memory-tools
-cd memory-tools
-export MEMORY_HOME="$HOME/memory"   # any folder you like
+git clone https://github.com/leonkatz/rekol
+cd rekol
+export REKOL_HOME="$HOME/memory"   # any folder you like
 ./install.sh
 ```
-`install.sh` sets up a venv, the CLIs, the Claude Code hooks + skill, seeds a
-starter memory from `template/`, and builds the vector index.
+`install.sh` sets up a venv, the `rekol` CLI, the Claude Code hooks + skill,
+seeds a starter memory from `template/`, and builds the vector index.
 
-## CLIs
-- `memory-search "query" [--top N] [--json]` — semantic + keyword search.
-- `memory-index rebuild | update` — (re)build the vector index.
-- `memory-capture` — add a new memory.
-- `memory-docs-convert <dir>` — import an existing notes/docs tree into search.
+## CLI
+A single `rekol` command with subcommands:
+- `rekol search "query" [--top N] [--json]` — semantic + keyword search.
+- `rekol index rebuild | update` — (re)build the vector index.
+- `rekol capture` — add a new memory.
+- `rekol import <dir>` — import an existing notes/docs tree into search.
 
 ## Layout
-Memory lives under `$MEMORY_HOME`:
+Memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback):
 - `always/` — permanent facts, always loaded.
 - `when/` — task-triggered rules.
 - `topics/` — canonical-source registry.

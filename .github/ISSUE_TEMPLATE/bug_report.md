@@ -10,4 +10,4 @@ labels: bug
 
 **Expected**
 
-**Environment** (OS, Python version, memory-tools version/commit)
+**Environment** (OS, Python version, REKOL version/commit)

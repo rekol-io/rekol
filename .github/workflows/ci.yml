@@ -19,7 +19,7 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
       - name: mypy
-        run: mypy src/memory_tools
+        run: mypy src/rekol
       - name: pytest
         run: pytest -q
       - name: bats install-script test
