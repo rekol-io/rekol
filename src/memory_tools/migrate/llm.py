@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 import subprocess
+from typing import Any
 
 CLAUDE_BIN = "claude"
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -40,7 +41,7 @@ def call_claude_classifier(
     *,
     model: str = DEFAULT_MODEL,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Run the classifier prompt through claude -p; return parsed JSON.
 
     The model is told to output a JSON object with keys: ``layer``,

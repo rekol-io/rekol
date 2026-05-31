@@ -350,7 +350,7 @@ class SessionStore:
         qnorm = float(np.linalg.norm(query_vec)) + 1e-12
         scores = (vecs @ query_vec) / (norms * qnorm)
         idx = np.argsort(-scores)[:top_k]
-        out: list[dict] = []
+        out = []
         for i in idx:
             r = rows[i]
             d = {k: r[k] for k in r.keys() if k != "embedding"}
