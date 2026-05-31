@@ -1,15 +1,21 @@
 #!/usr/bin/env bats
-# Installer smoke-tests for memory-tools/install.sh.
+# Installer smoke-tests for rekol/install.sh.
 #
-# Run with:   bats memory-tools/tests/test_install.bats
+# Run with:   bats rekol/tests/test_install.bats
 # Requires:   bats-core (brew install bats-core) and internet access for the
 #             first real-install test (downloads sentence-transformers model).
 #
 # On a machine without bats, this file documents manual test steps.
+#
+# These tests deliberately export MEMORY_HOME (not REKOL_HOME) so the installer's
+# MEMORY_HOME-fallback path stays exercised — that path guards existing installs.
 
 setup() {
     TESTROOT="$(mktemp -d)"
+    # Export MEMORY_HOME (the fallback) and unset REKOL_HOME so the resolver
+    # exercises the fallback path; the missing-home test unsets both.
     export MEMORY_HOME="${TESTROOT}/mem"
+    unset REKOL_HOME || true
     TOOLS_HOME="${TESTROOT}/tools"
     BIN_DIR="${TESTROOT}/bin"
     # Resolve component dir relative to this test file
@@ -99,44 +105,44 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 4 — shims error clearly when venv is absent
+# Test 4 — the rekol shim errors clearly when the venv is absent
 # ---------------------------------------------------------------------------
 @test "shim exits 2 with helpful message when venv is missing" {
-    run env MEMORY_TOOLS_HOME="${TOOLS_HOME}" \
-        "${COMPONENT_DIR}/bin/memory-search" identity --top 1
+    run env REKOL_TOOLS_HOME="${TOOLS_HOME}" \
+        "${COMPONENT_DIR}/bin/rekol" search identity --top 1
 
     [ "$status" -eq 2 ]
     [[ "$output" == *"run installer"* ]]
 }
 
 # ---------------------------------------------------------------------------
-# Test 5 — shims work after install
+# Test 5 — the rekol shim works after install
 # ---------------------------------------------------------------------------
-@test "memory-search returns at least one result after install" {
+@test "rekol search returns at least one result after install" {
     "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
         --test-mode
 
-    run env MEMORY_TOOLS_HOME="${TOOLS_HOME}" \
-        "${BIN_DIR}/memory-search" identity --top 2
+    run env REKOL_TOOLS_HOME="${TOOLS_HOME}" \
+        "${BIN_DIR}/rekol" search identity --top 2
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"identity"* ]]
 }
 
 # ---------------------------------------------------------------------------
-# Test 6 — missing MEMORY_HOME fails with helpful error
+# Test 6 — missing home (neither REKOL_HOME nor MEMORY_HOME) fails with error
 # ---------------------------------------------------------------------------
-@test "missing MEMORY_HOME exits 2 with error message" {
-    run env -u MEMORY_HOME \
+@test "missing REKOL_HOME and MEMORY_HOME exits 2 with error message" {
+    run env -u REKOL_HOME -u MEMORY_HOME \
         "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
         --test-mode
 
     [ "$status" -eq 2 ]
-    [[ "$output" == *"MEMORY_HOME"* ]]
+    [[ "$output" == *"REKOL_HOME"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -150,13 +156,13 @@ teardown() {
     [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }
 
-@test "install runs memory-migrate auto and succeeds when no legacy" {
+@test "install runs rekol migrate auto and succeeds when no legacy" {
   # DEFERRED to Plan 2 (genericization): this is the only test that runs the
   # full, non-test-mode install path — exercising the Claude Code hooks/skill
-  # and the legacy `memory-migrate auto` step. Plan 2 makes migration opt-in
+  # and the legacy `rekol migrate auto` step. Plan 2 makes migration opt-in
   # (--migrate, default off) and genericizes the hook/skill install, at which
   # point this test is rewritten/removed. The generic install path (venv, seed,
-  # index, memory-search) is fully covered by tests 1-7, which pass in CI.
+  # index, rekol search) is fully covered by tests 1-7, which pass in CI.
   skip "deferred to Plan 2: full-install/auto-migration path is being genericized"
   # TEST_MODE skips the migrator hook, so disable it here
   unset TEST_MODE || true

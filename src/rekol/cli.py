@@ -35,3 +35,9 @@ main.add_command(propose_cmd, name="propose")
 main.add_command(migrate_grp, name="migrate")
 main.add_command(session_index_cmd, name="session-index")
 main.add_command(import_cmd, name="import")
+
+
+# Enables `python -m rekol.cli` (used by the bin/rekol shim). The installed
+# console-script entrypoint does not need this guard, but the `-m` invocation does.
+if __name__ == "__main__":
+    main()
