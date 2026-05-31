@@ -502,7 +502,12 @@ CONFIG_YAML="${RESOLVED_HOME}/rekol.config.yaml"
 # disabled with no diagnostic.
 GIT_TRACK="$(
   if [[ -f "${CONFIG_YAML}" ]]; then
-    grep -E '^git_track:' "${CONFIG_YAML}" \
+    # `|| true`: a config with no git_track line makes grep exit 1, which under
+    # `set -o pipefail` would fail the substitution and abort the whole install
+    # at this step. Swallow only the no-match so an absent key yields an empty
+    # value — which the `== "true"` test below treats as git-tracking-off (the
+    # safe default). A real sed/head error still surfaces.
+    { grep -E '^git_track:' "${CONFIG_YAML}" || true; } \
       | sed -E 's/^git_track:[[:space:]]*//' \
       | sed -E 's/[[:space:]]*#.*$//' \
       | sed -E 's/[[:space:]]*$//' \
