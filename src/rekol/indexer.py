@@ -205,7 +205,7 @@ class Indexer:
         the type field value is singular (``topic``).
 
         Lives under ``.index/`` so Claude does not speculatively read it as
-        memory content.  ``MEMORY.md`` (always-on, hand-curated) is the only
+        memory content.  ``REKOL.md`` (always-on, hand-curated) is the only
         index file at the memory_root level.
         """
         tag_to_files: dict[str, list[str]] = {}

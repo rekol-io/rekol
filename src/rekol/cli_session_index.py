@@ -63,7 +63,7 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
     if not cfg.session_search_enabled:
         click.echo(
             "session_search_enabled=false in config; nothing to do. "
-            "Set session_search_enabled: true in memory.config.yaml to enable."
+            "Set session_search_enabled: true in rekol.config.yaml to enable."
         )
         sys.exit(0)
     projects_root = cfg.claude_projects_dir
