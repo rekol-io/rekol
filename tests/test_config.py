@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.config import load_config
+from rekol.config import load_config, resolve_memory_home
 
 
 def test_load_config_from_memory_home(tmp_path: Path, monkeypatch) -> None:
@@ -45,3 +45,48 @@ def test_config_exposes_sessions_db_path(tmp_path: Path, monkeypatch) -> None:
     assert cfg.sessions_db_path == tmp_path / ".index" / "sessions.db"
     assert cfg.claude_projects_dir.name == "projects"
     assert cfg.session_search_enabled is True
+
+
+def test_rekol_home_takes_precedence(monkeypatch) -> None:
+    # REKOL_HOME is the primary data-dir variable; when both are set it wins.
+    monkeypatch.setenv("REKOL_HOME", "/a")
+    monkeypatch.setenv("MEMORY_HOME", "/b")
+    cfg = load_config()
+    assert cfg.memory_home == Path("/a")
+
+
+def test_memory_home_used_when_rekol_home_unset(monkeypatch) -> None:
+    # Guards Leon's live setup: a shell that only exports MEMORY_HOME must
+    # still resolve via the fallback path.
+    monkeypatch.delenv("REKOL_HOME", raising=False)
+    monkeypatch.setenv("MEMORY_HOME", "/b")
+    cfg = load_config()
+    assert cfg.memory_home == Path("/b")
+
+
+def test_raises_when_neither_home_set(monkeypatch) -> None:
+    monkeypatch.delenv("REKOL_HOME", raising=False)
+    monkeypatch.delenv("MEMORY_HOME", raising=False)
+    with pytest.raises(RuntimeError) as excinfo:
+        load_config()
+    message = str(excinfo.value)
+    assert "REKOL_HOME" in message
+    assert "MEMORY_HOME" in message
+
+
+def test_resolve_memory_home_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("REKOL_HOME", "/a")
+    monkeypatch.setenv("MEMORY_HOME", "/b")
+    assert resolve_memory_home() == "/a"
+
+
+def test_resolve_memory_home_falls_back_to_memory_home(monkeypatch) -> None:
+    monkeypatch.delenv("REKOL_HOME", raising=False)
+    monkeypatch.setenv("MEMORY_HOME", "/b")
+    assert resolve_memory_home() == "/b"
+
+
+def test_resolve_memory_home_returns_none_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("REKOL_HOME", raising=False)
+    monkeypatch.delenv("MEMORY_HOME", raising=False)
+    assert resolve_memory_home() is None

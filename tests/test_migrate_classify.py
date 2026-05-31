@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from memory_tools.migrate.classify import (
+from rekol.migrate.classify import (
     build_classifier_prompt,
     classify_file,
     heuristic_classify,
     target_filename_for,
 )
-from memory_tools.migrate.discover import LegacyFile
-from memory_tools.migrate.llm import LLMUnavailable
+from rekol.migrate.discover import LegacyFile
+from rekol.migrate.llm import LLMUnavailable
 
 
 def _mk_file(tmp_path: Path, name: str, body: str) -> LegacyFile:
@@ -103,7 +103,7 @@ def test_target_filename_no_known_prefix(tmp_path: Path) -> None:
 def test_classify_file_uses_heuristic_when_possible(tmp_path: Path) -> None:
     body = "---\nname: F\ndescription: d\ntype: feedback\n---\n\nbody"
     lf = _mk_file(tmp_path, "feedback_f.md", body)
-    with patch("memory_tools.migrate.classify.call_claude_classifier") as llm:
+    with patch("rekol.migrate.classify.call_claude_classifier") as llm:
         c = classify_file(lf, index_context="", allow_llm=True)
     assert c.layer == "when"
     assert c.method == "heuristic"
@@ -112,7 +112,7 @@ def test_classify_file_uses_heuristic_when_possible(tmp_path: Path) -> None:
 
 def test_classify_file_falls_back_to_llm(tmp_path: Path) -> None:
     lf = _mk_file(tmp_path, "x.md", "# just body, no frontmatter")
-    with patch("memory_tools.migrate.classify.call_claude_classifier") as llm:
+    with patch("rekol.migrate.classify.call_claude_classifier") as llm:
         llm.return_value = {
             "layer": "topic",
             "filename": "topic-proj-x.md",
@@ -138,7 +138,7 @@ def test_classify_file_defaults_to_knowledge_when_llm_disabled(tmp_path: Path) -
 def test_classify_file_defaults_to_knowledge_when_llm_unavailable(tmp_path: Path) -> None:
     lf = _mk_file(tmp_path, "x.md", "# just body")
     with patch(
-        "memory_tools.migrate.classify.call_claude_classifier",
+        "rekol.migrate.classify.call_claude_classifier",
         side_effect=LLMUnavailable("no claude"),
     ):
         c = classify_file(lf, index_context="", allow_llm=True)

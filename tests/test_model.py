@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.model import MemoryFile, ValidationError, parse_file
+from rekol.model import MemoryFile, ValidationError, parse_file
 
 
 def test_parse_file_reads_frontmatter_and_body(tmp_path: Path) -> None:

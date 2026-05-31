@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.embeddings import HashingEmbedder
-from memory_tools.indexer import Indexer
-from memory_tools.store import IndexStore
+from rekol.embeddings import HashingEmbedder
+from rekol.indexer import Indexer
+from rekol.store import IndexStore
 
 
 def _write(

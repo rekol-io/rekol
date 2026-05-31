@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# memory-tools installer — idempotent; safe to rerun on an already-bootstrapped machine.
+# rekol installer — idempotent; safe to rerun on an already-bootstrapped machine.
 #
 # Required environment variable:
-#   MEMORY_HOME — path to the memory root directory (Dropbox-backed recommended)
+#   REKOL_HOME — path to the memory root directory (Dropbox-backed recommended)
+#                (MEMORY_HOME is accepted as a fallback for existing installs)
 #
 # Optional flags:
 #   --dry-run       print actions without executing them
 #   --no-hook       skip SessionStart hook installation (settings.json only)
 #   --no-skill      skip Claude skill installation
-#   --no-shellrc    skip ~/.zshrc edits (PATH + MEMORY_HOME export)
+#   --no-shellrc    skip ~/.zshrc edits (PATH + REKOL_HOME export)
 #   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
-#   --tools-home P  override default ~/.local/share/memory-tools
+#   --tools-home P  override default ~/.local/share/rekol
 #   --bin-dir P     override default ~/bin
 #
 # Per Bash standard: using [[ ]] for conditionals, printf instead of echo -e,
@@ -22,8 +23,10 @@ set -euo pipefail
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 readonly COMPONENT_DIR
 
-# Defaults — overridable via flags
-TOOLS_HOME_DEFAULT="$HOME/.local/share/memory-tools"
+# Defaults — overridable via flags.
+# Install location reads REKOL_TOOLS_HOME first, then MEMORY_TOOLS_HOME as a
+# fallback so an existing install dir is still found, else the rekol default.
+TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/rekol}}"
 BIN_DIR_DEFAULT="$HOME/bin"
 readonly SETTINGS_JSON="$HOME/.claude/settings.json"
 readonly SKILL_DIR="$HOME/.claude/skills/memory"
@@ -79,28 +82,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Pre-flight: MEMORY_HOME must be set ---
+# --- Pre-flight: REKOL_HOME (or MEMORY_HOME fallback) must be set ---
 
-if [[ -z "${MEMORY_HOME:-}" ]]; then
-  printf 'error: MEMORY_HOME is not set. Point it at a Dropbox-backed directory.\n' >&2
+if [[ -z "${REKOL_HOME:-}" && -z "${MEMORY_HOME:-}" ]]; then
+  printf 'error: neither REKOL_HOME nor MEMORY_HOME is set. Point REKOL_HOME at a Dropbox-backed directory (MEMORY_HOME is accepted as a fallback).\n' >&2
   exit 2
 fi
 
+# REKOL_HOME is the primary data-directory variable; MEMORY_HOME is kept as a
+# fallback so existing installs (which export MEMORY_HOME) keep working. All
+# mkdir/journal/seed/index logic below operates on this resolved path.
+RESOLVED_HOME="${REKOL_HOME:-$MEMORY_HOME}"
+readonly RESOLVED_HOME
+
 # --- Journal setup ---
 # Journal records every mutation for post-install auditing.
-# The journal lives in MEMORY_HOME/.install-logs/ so it does not pollute the
+# The journal lives in RESOLVED_HOME/.install-logs/ so it does not pollute the
 # root and does not interfere with the is_empty check for template seeding.
 
 TS="$(date +%Y%m%d-%H%M%S)"
 readonly TS
-JOURNAL_DIR="${MEMORY_HOME}/.install-logs"
+JOURNAL_DIR="${RESOLVED_HOME}/.install-logs"
 JOURNAL="${JOURNAL_DIR}/.install-journal-${TS}.log"
 
-run "mkdir -p '${MEMORY_HOME}'"
+run "mkdir -p '${RESOLVED_HOME}'"
 run "mkdir -p '${JOURNAL_DIR}'"
 if [[ "$DRY_RUN" == "0" ]]; then
   : > "$JOURNAL"
-  printf 'memory-tools install %s\n' "$TS" >> "$JOURNAL"
+  printf 'rekol install %s\n' "$TS" >> "$JOURNAL"
 fi
 
 # =============================================================================
@@ -141,31 +150,31 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   log_journal "CREATED venv ${TOOLS_HOME}/.venv interpreter=${PY3}"
 fi
 
-say "installing/upgrading memory-tools into venv"
+say "installing/upgrading rekol into venv"
 run "'${TOOLS_HOME}/.venv/bin/pip' install -U pip"
 run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
 
 # =============================================================================
-# Step 2 — ~/bin shims
+# Step 2 — ~/bin shim
 # =============================================================================
+# The eight legacy per-command shims are collapsed into a single `rekol` shim
+# that delegates to the unified Click group (rekol.cli) in the venv.
 
 run "mkdir -p '${BIN_DIR}'"
 
-for cmd in memory-index memory-search memory-capture memory-invalidate memory-propose memory-migrate claude-session-index memory-docs-convert; do
-  local_src="${COMPONENT_DIR}/bin/${cmd}"
-  local_dst="${BIN_DIR}/${cmd}"
+rekol_shim_src="${COMPONENT_DIR}/bin/rekol"
+rekol_shim_dst="${BIN_DIR}/rekol"
 
-  # Back up any existing non-symlink file to avoid silently overwriting it
-  if [[ -e "$local_dst" ]] && [[ ! -L "$local_dst" ]]; then
-    local_backup="${local_dst}.bak-${TS}"
-    say "backing up existing ${local_dst} → ${local_backup}"
-    run "mv '${local_dst}' '${local_backup}'"
-    log_journal "BACKED-UP ${local_dst} -> ${local_backup}"
-  fi
+# Back up any existing non-symlink file to avoid silently overwriting it
+if [[ -e "$rekol_shim_dst" ]] && [[ ! -L "$rekol_shim_dst" ]]; then
+  rekol_shim_backup="${rekol_shim_dst}.bak-${TS}"
+  say "backing up existing ${rekol_shim_dst} → ${rekol_shim_backup}"
+  run "mv '${rekol_shim_dst}' '${rekol_shim_backup}'"
+  log_journal "BACKED-UP ${rekol_shim_dst} -> ${rekol_shim_backup}"
+fi
 
-  run "ln -sf '${local_src}' '${local_dst}'"
-  log_journal "SYMLINK ${local_dst} -> ${local_src}"
-done
+run "ln -sf '${rekol_shim_src}' '${rekol_shim_dst}'"
+log_journal "SYMLINK ${rekol_shim_dst} -> ${rekol_shim_src}"
 
 # =============================================================================
 # Step 3 — PATH in ~/.zshrc
@@ -177,32 +186,34 @@ if [[ "$DO_SHELLRC" == "1" ]]; then
   # Only appends when BIN_DIR is not already referenced — avoids duplicate entries
   if ! grep -qs "${BIN_DIR}" "${ZSHRC}" 2>/dev/null; then
     say "adding ${BIN_DIR} to PATH in ${ZSHRC}"
-    run "printf '\n# memory-tools\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${ZSHRC}'"
+    run "printf '\n# rekol\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${ZSHRC}'"
     log_journal "APPENDED-PATH ${ZSHRC}"
   fi
 fi
 
 # =============================================================================
-# Step 4 — MEMORY_HOME export in ~/.zshrc
+# Step 4 — REKOL_HOME export in ~/.zshrc
 # =============================================================================
 
 # Skipped when --no-shellrc or --test-mode is in effect.
+# Exports REKOL_HOME (the primary data-directory variable); guarded so it is not
+# re-added on reruns.
 if [[ "$DO_SHELLRC" == "1" ]]; then
-  if ! grep -qs "^export MEMORY_HOME=" "${ZSHRC}" 2>/dev/null; then
-    say "adding MEMORY_HOME export to ${ZSHRC}"
-    run "printf 'export MEMORY_HOME=\"%s\"\n' '${MEMORY_HOME}' >> '${ZSHRC}'"
-    log_journal "APPENDED-MEMORY_HOME ${ZSHRC}"
+  if ! grep -qs "^export REKOL_HOME=" "${ZSHRC}" 2>/dev/null; then
+    say "adding REKOL_HOME export to ${ZSHRC}"
+    run "printf 'export REKOL_HOME=\"%s\"\n' '${RESOLVED_HOME}' >> '${ZSHRC}'"
+    log_journal "APPENDED-REKOL_HOME ${ZSHRC}"
   fi
 fi
 
 # =============================================================================
-# Step 5 — Seed $MEMORY_HOME from template/ if empty
+# Step 5 — Seed $REKOL_HOME from template/ if empty
 # =============================================================================
 # Uses -A to include hidden files; the is_empty check covers newly created dirs.
 
 is_empty_memory_home() {
   local dir_path="$1"
-  # Returns true (0) when MEMORY_HOME contains no user content.
+  # Returns true (0) when the memory home contains no user content.
   # Excludes .install-logs/ which is created by the installer itself before
   # this check runs, so its presence does not indicate a prior user install.
   local file_count
@@ -215,15 +226,15 @@ is_empty_memory_home() {
   [[ "$file_count" -eq 0 ]]
 }
 
-if is_empty_memory_home "${MEMORY_HOME}"; then
-  say "${MEMORY_HOME} is empty — seeding from template/"
-  run "cp -R '${COMPONENT_DIR}/template/'* '${MEMORY_HOME}/'"
+if is_empty_memory_home "${RESOLVED_HOME}"; then
+  say "${RESOLVED_HOME} is empty — seeding from template/"
+  run "cp -R '${COMPONENT_DIR}/template/'* '${RESOLVED_HOME}/'"
   # Rename every *.example file to its real name (strips the .example suffix)
-  run "find '${MEMORY_HOME}' -name '*.example' -print0 \
+  run "find '${RESOLVED_HOME}' -name '*.example' -print0 \
     | xargs -0 -I {} sh -c 'mv \"\$1\" \"\${1%.example}\"' _ {}"
-  log_journal "SEEDED ${MEMORY_HOME} from template"
+  log_journal "SEEDED ${RESOLVED_HOME} from template"
 else
-  say "${MEMORY_HOME} is non-empty — skipping template seeding (safe)"
+  say "${RESOLVED_HOME} is non-empty — skipping template seeding (safe)"
 fi
 
 # =============================================================================
@@ -293,28 +304,28 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
-# Step 7.5 — MEMORY_HOME into ~/.claude/settings.json env block
+# Step 7.5 — REKOL_HOME into ~/.claude/settings.json env block
 # =============================================================================
-# Claude Code sessions do NOT source ~/.zshrc, so the shell-level MEMORY_HOME
+# Claude Code sessions do NOT source ~/.zshrc, so the shell-level REKOL_HOME
 # export from Step 4 isn't visible to the SessionStart hook subshell or to the
 # Bash tool.  Empirically verified: only settings.json's `env` block propagates
 # to subprocess shells — settings.local.json's `env` block does NOT.  Without
-# this step the SessionStart hook prints "$MEMORY_HOME not configured" and the
+# this step the SessionStart hook prints "$REKOL_HOME not configured" and the
 # entire memory system is dark.  Idempotent: if the key is already set to the
 # current value, no-op.
 
 if [[ "$DO_HOOK" == "1" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
-    say "jq not found; skipping Claude settings.json env update — add env.MEMORY_HOME manually"
+    say "jq not found; skipping Claude settings.json env update — add env.REKOL_HOME manually"
   else
-    HAS_MEMORY_HOME="$(
-      jq --arg want "${MEMORY_HOME}" \
-        '(.env.MEMORY_HOME // "") == $want' \
+    HAS_REKOL_HOME="$(
+      jq --arg want "${RESOLVED_HOME}" \
+        '(.env.REKOL_HOME // "") == $want' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
-    if [[ "$HAS_MEMORY_HOME" == "true" ]]; then
-      say "MEMORY_HOME already in ${SETTINGS_JSON} env — no-op"
+    if [[ "$HAS_REKOL_HOME" == "true" ]]; then
+      say "REKOL_HOME already in ${SETTINGS_JSON} env — no-op"
     else
       # Independent backup before this step's mutation.  Step 7's earlier
       # backup of ${SETTINGS_JSON} reflects the file BEFORE the hook merge,
@@ -324,11 +335,11 @@ if [[ "$DO_HOOK" == "1" ]]; then
       log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_env_backup}"
 
       local_tmp="${SETTINGS_JSON}.tmp.$$"
-      run "jq --arg val '${MEMORY_HOME}' \
-        '.env = ((.env // {}) + {MEMORY_HOME: \$val})' \
+      run "jq --arg val '${RESOLVED_HOME}' \
+        '.env = ((.env // {}) + {REKOL_HOME: \$val})' \
         '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "SET env.MEMORY_HOME in ${SETTINGS_JSON}"
-      say "added MEMORY_HOME to ${SETTINGS_JSON} env"
+      log_journal "SET env.REKOL_HOME in ${SETTINGS_JSON}"
+      say "added REKOL_HOME to ${SETTINGS_JSON} env"
     fi
   fi
 fi
@@ -362,7 +373,7 @@ log_journal "SYMLINK ${local_autoreindex_dst} -> ${local_autoreindex_src}"
 # =============================================================================
 # Wires the auto-reindex script (Step 7B) into Claude Code's PostToolUse event
 # with matcher "Write|Edit".  Every time the agent edits a file under
-# $MEMORY_HOME, the script fires `memory-index update` asynchronously so the
+# $REKOL_HOME, the script fires `rekol index update` asynchronously so the
 # vector DB stays in sync without per-edit latency.
 #
 # Idempotency: skips the merge if the exact command is already present in any
@@ -407,22 +418,22 @@ fi
 # Prevents the local vector index and write-lock from being synced to Dropbox,
 # which would cause conflicts across machines.
 
-if [[ ! -f "${MEMORY_HOME}/.dropboxignore" ]]; then
-  say "writing ${MEMORY_HOME}/.dropboxignore to keep .index/ out of Dropbox"
-  run "printf '.index/\n.writing.lock\n' > '${MEMORY_HOME}/.dropboxignore'"
-  log_journal "CREATED ${MEMORY_HOME}/.dropboxignore"
+if [[ ! -f "${RESOLVED_HOME}/.dropboxignore" ]]; then
+  say "writing ${RESOLVED_HOME}/.dropboxignore to keep .index/ out of Dropbox"
+  run "printf '.index/\n.writing.lock\n' > '${RESOLVED_HOME}/.dropboxignore'"
+  log_journal "CREATED ${RESOLVED_HOME}/.dropboxignore"
 fi
 
 # =============================================================================
 # Step 8.5 — Local git repo for audit trail (opt-in via memory.config.yaml)
 # =============================================================================
 # When memory.config.yaml has `git_track: true`, init a local git repo in
-# $MEMORY_HOME so memory captures and edits get a real commit history.  This
+# $REKOL_HOME so memory captures and edits get a real commit history.  This
 # is the only meaningful recovery path from Dropbox conflict copies (which
 # silently overwrite without auditable diffs).  No remote is configured — the
 # git repo is local-only by design.
 
-CONFIG_YAML="${MEMORY_HOME}/memory.config.yaml"
+CONFIG_YAML="${RESOLVED_HOME}/memory.config.yaml"
 # Strip the key, leading whitespace, any trailing inline comment, and any
 # trailing whitespace.  Without the comment-stripping pass, a config like
 # `git_track: true  # for audit` would parse to "true # for audit" and the
@@ -438,34 +449,34 @@ GIT_TRACK="$(
   fi
 )"
 if [[ "${GIT_TRACK}" == "true" ]]; then
-  if [[ ! -d "${MEMORY_HOME}/.git" ]]; then
-    say "initializing local git repo at ${MEMORY_HOME}"
-    run "git -C '${MEMORY_HOME}' init -q -b main"
-    log_journal "GIT-INIT ${MEMORY_HOME}"
+  if [[ ! -d "${RESOLVED_HOME}/.git" ]]; then
+    say "initializing local git repo at ${RESOLVED_HOME}"
+    run "git -C '${RESOLVED_HOME}' init -q -b main"
+    log_journal "GIT-INIT ${RESOLVED_HOME}"
   fi
-  if [[ ! -f "${MEMORY_HOME}/.gitignore" ]]; then
-    say "writing ${MEMORY_HOME}/.gitignore"
-    run "printf '.index/\n.writing.lock\n.install-logs/\n' > '${MEMORY_HOME}/.gitignore'"
-    log_journal "CREATED ${MEMORY_HOME}/.gitignore"
+  if [[ ! -f "${RESOLVED_HOME}/.gitignore" ]]; then
+    say "writing ${RESOLVED_HOME}/.gitignore"
+    run "printf '.index/\n.writing.lock\n.install-logs/\n' > '${RESOLVED_HOME}/.gitignore'"
+    log_journal "CREATED ${RESOLVED_HOME}/.gitignore"
   fi
   # Initial commit if the repo has no commits yet.  Set local user.email/name
   # so the commit succeeds without requiring a global git config.  Use direct
   # `git` calls (not `run "..."`) so a non-zero exit propagates: `run()` uses
   # `eval` and silently swallows failures, which would otherwise make the
   # install journal misreport a failed commit as successful.
-  if ! git -C "${MEMORY_HOME}" rev-parse --verify HEAD >/dev/null 2>&1; then
-    say "creating initial git commit in ${MEMORY_HOME}"
+  if ! git -C "${RESOLVED_HOME}" rev-parse --verify HEAD >/dev/null 2>&1; then
+    say "creating initial git commit in ${RESOLVED_HOME}"
     if [[ "$DRY_RUN" == "1" ]]; then
-      say "DRY-RUN: git -C '${MEMORY_HOME}' add -A && git ... commit -m 'memory: initial commit'"
-    elif git -C "${MEMORY_HOME}" add -A \
-        && git -C "${MEMORY_HOME}" \
-            -c user.email='memory-tools@localhost' \
-            -c user.name='memory-tools installer' \
+      say "DRY-RUN: git -C '${RESOLVED_HOME}' add -A && git ... commit -m 'memory: initial commit'"
+    elif git -C "${RESOLVED_HOME}" add -A \
+        && git -C "${RESOLVED_HOME}" \
+            -c user.email='rekol@localhost' \
+            -c user.name='rekol installer' \
             commit -q -m 'memory: initial commit'; then
-      log_journal "GIT-INITIAL-COMMIT ${MEMORY_HOME}"
+      log_journal "GIT-INITIAL-COMMIT ${RESOLVED_HOME}"
     else
-      say "WARNING: git initial commit failed — check 'git status' in ${MEMORY_HOME}"
-      log_journal "WARN-GIT-INITIAL-COMMIT-FAILED ${MEMORY_HOME}"
+      say "WARNING: git initial commit failed — check 'git status' in ${RESOLVED_HOME}"
+      log_journal "WARN-GIT-INITIAL-COMMIT-FAILED ${RESOLVED_HOME}"
     fi
   fi
 fi
@@ -475,33 +486,33 @@ fi
 # =============================================================================
 # Run rebuild on first install; update on subsequent runs.
 
-if [[ -f "${MEMORY_HOME}/.index/index.db" ]]; then
-  say "existing index found — running memory-index update"
-  # Pass MEMORY_TOOLS_HOME so the shim resolves the correct venv when
-  # --tools-home overrides the default ~/.local/share/memory-tools path.
-  run "MEMORY_TOOLS_HOME='${TOOLS_HOME}' '${BIN_DIR}/memory-index' update"
+if [[ -f "${RESOLVED_HOME}/.index/index.db" ]]; then
+  say "existing index found — running rekol index update"
+  # Invoke the single venv entrypoint directly so the correct venv is used even
+  # when --tools-home overrides the default ~/.local/share/rekol path.
+  run "'${TOOLS_HOME}/.venv/bin/rekol' index update"
 else
-  say "no index found — running memory-index rebuild"
-  run "MEMORY_TOOLS_HOME='${TOOLS_HOME}' '${BIN_DIR}/memory-index' rebuild"
+  say "no index found — running rekol index rebuild"
+  run "'${TOOLS_HOME}/.venv/bin/rekol' index rebuild"
 fi
 
 # =============================================================================
 # Step 10 — Migrate legacy memory (no-op when none found)
 # =============================================================================
-# Runs memory-migrate auto after seeding to bring any legacy ~/.claude/projects/*/memory/
-# content into $MEMORY_HOME.  Idempotent — dirs with a retirement pointer are skipped.
+# Runs `rekol migrate auto` after seeding to bring any legacy ~/.claude/projects/*/memory/
+# content into $REKOL_HOME.  Idempotent — dirs with a retirement pointer are skipped.
 # Uses --no-llm because Bedrock creds may not be available at install time; users
-# who want LLM classification can rerun `memory-migrate auto --commit` manually.
+# who want LLM classification can rerun `rekol migrate auto --commit` manually.
 
 say "checking for legacy memory to migrate"
 if [[ "${TEST_MODE}" == "1" ]]; then
-  say "test-mode: skipping memory-migrate"
+  say "test-mode: skipping rekol migrate"
 else
-  # Use the just-installed memory-migrate CLI; idempotent, silent on no-op.
-  if "${TOOLS_HOME}/.venv/bin/memory-migrate" auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
+  # Use the just-installed unified rekol CLI; idempotent, silent on no-op.
+  if "${TOOLS_HOME}/.venv/bin/rekol" migrate auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
     log_journal "MIGRATED legacy memory (auto)"
   else
-    say "memory-migrate auto failed (non-fatal)"
+    say "rekol migrate auto failed (non-fatal)"
   fi
 fi
 
@@ -515,5 +526,5 @@ say "journal: ${JOURNAL}"
 say ""
 say "next steps:"
 say "  1. source ${ZSHRC}   (or open a new terminal)"
-say "  2. edit ${MEMORY_HOME}/always/identity.md   to tell Claude who you are"
-say "  3. memory-search \"identity\"   to verify"
+say "  2. edit ${RESOLVED_HOME}/always/identity.md   to tell Claude who you are"
+say "  3. rekol search \"identity\"   to verify"

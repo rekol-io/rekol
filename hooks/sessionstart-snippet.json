@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -n \"$MEMORY_HOME\" ] && [ -f \"$MEMORY_HOME/MEMORY.md\" ]; then echo '[memory] $MEMORY_HOME loaded — consult MEMORY.md, when/*.md, topics/*.md, or run memory-search'; cat \"$MEMORY_HOME/MEMORY.md\"; else echo '[memory] $MEMORY_HOME not configured'; fi"
+            "command": "HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; if [ -n \"$HOME_DIR\" ] && [ -f \"$HOME_DIR/MEMORY.md\" ]; then echo \"[rekol] $HOME_DIR loaded — consult MEMORY.md, when/*.md, topics/*.md, or run rekol search\"; cat \"$HOME_DIR/MEMORY.md\"; else echo '[rekol] memory home not configured (set REKOL_HOME)'; fi"
           }
         ]
       }

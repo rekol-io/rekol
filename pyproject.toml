@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memory-tools"
+name = "rekol"
 version = "0.1.0"
 description = "Layered, cross-indexed memory system with local vector search for Claude Code"
 license = "Apache-2.0"
@@ -29,14 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-memory-index = "memory_tools.cli_index:main"
-memory-search = "memory_tools.cli_search:main"
-memory-capture = "memory_tools.cli_capture:main"
-memory-invalidate = "memory_tools.cli_invalidate:main"
-memory-propose = "memory_tools.cli_propose:main"
-memory-migrate = "memory_tools.cli_migrate:main"
-claude-session-index = "memory_tools.cli_session_index:main"
-memory-docs-convert = "memory_tools.cli_docs_convert:main"
+rekol = "rekol.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -61,7 +54,7 @@ max-complexity = 12
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src/memory_tools"]
+files = ["src/rekol"]
 warn_unused_configs = true
 warn_redundant_casts = true
 check_untyped_defs = true

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from memory_tools.sessions.store import SessionStore
+from rekol.sessions.store import SessionStore
 
 
 def test_init_schema_creates_expected_tables(tmp_path: Path) -> None:

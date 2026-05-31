@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.embeddings import HashingEmbedder
-from memory_tools.search_combined import CombinedSearchResult, search_all
-from memory_tools.sessions.store import SessionStore
-from memory_tools.store import IndexStore
+from rekol.embeddings import HashingEmbedder
+from rekol.search_combined import CombinedSearchResult, search_all
+from rekol.sessions.store import SessionStore
+from rekol.store import IndexStore
 
 
 def _seed_memory(tmp_path: Path) -> IndexStore:

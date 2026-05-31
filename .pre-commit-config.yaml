@@ -11,7 +11,7 @@ repos:
     hooks:
       - id: mypy
         name: mypy (project env)
-        entry: mypy src/memory_tools
+        entry: mypy src/rekol
         language: system
         pass_filenames: false
         types: [python]

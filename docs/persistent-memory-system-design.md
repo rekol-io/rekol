@@ -1,6 +1,6 @@
 # Persistent Memory System — Design
 
-> **Living document.** Captures the current intent and behavior of the memory-tools subsystem. Update in place as the system evolves; record dated entries in [Revision history](#revision-history) at the bottom.
+> **Living document.** Captures the current intent and behavior of the REKOL memory subsystem. Update in place as the system evolves; record dated entries in [Revision history](#revision-history) at the bottom.
 
 ## Purpose
 
@@ -18,7 +18,7 @@ Covers:
 - Frontmatter schema
 - Vector index over memory markdown (sqlite-vec0)
 - Session-search layer over Claude Code conversation transcripts (hybrid FTS5 + vec0)
-- CLI surface (`memory-*`, plus session indexing/search folded into `memory-search`)
+- CLI surface (the unified `rekol` command, with session indexing/search folded into `rekol search`)
 - Claude Code hooks that drive auto-injection, auto-reindex, and proactive capture
 - Capture and autonomy policy
 - Install model (deploys via `mac_setup` phase 3)
@@ -29,9 +29,9 @@ Out of scope: cross-machine memory sharing (per-machine memory plus an optional 
 
 ### Storage root
 
-All memory lives under `$MEMORY_HOME`, a Dropbox-synced directory. Default: `~/Dropbox/memory/`.
+All memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback), a Dropbox-synced directory. Default: `~/Dropbox/memory/`.
 
-Index files (SQLite + vec0) live under `$MEMORY_HOME/.index/` and are explicitly **not** synced — they are disposable and per-machine. The markdown is the source of truth; the index is rebuildable from it at any time.
+Index files (SQLite + vec0) live under `$REKOL_HOME/.index/` and are explicitly **not** synced — they are disposable and per-machine. The markdown is the source of truth; the index is rebuildable from it at any time.
 
 ### Four layers
 
@@ -72,7 +72,7 @@ valid_from: 2026-04-27
 
 ### Engine
 
-SQLite with the `sqlite-vec` extension (`vec0` virtual table) for vector storage and ANN search. Single-file database at `$MEMORY_HOME/.index/memory.db`. WAL mode for safe concurrent reads.
+SQLite with the `sqlite-vec` extension (`vec0` virtual table) for vector storage and ANN search. Single-file database at `$REKOL_HOME/.index/memory.db`. WAL mode for safe concurrent reads.
 
 ### Embedding model
 
@@ -80,13 +80,13 @@ Local embedding (no API calls). Default: a sentence-transformers model installed
 
 ### Chunking
 
-Files are chunked by Markdown heading. Each chunk gets a vector plus metadata: `file_path`, `heading`, `line_start`, `line_end`, frontmatter `tags`, `aliases`. This makes `memory-search` results citable to a specific heading and line range, so the caller can read the precise chunk instead of the whole file.
+Files are chunked by Markdown heading. Each chunk gets a vector plus metadata: `file_path`, `heading`, `line_start`, `line_end`, frontmatter `tags`, `aliases`. This makes `rekol search` results citable to a specific heading and line range, so the caller can read the precise chunk instead of the whole file.
 
 ### Lifecycle
 
-- `memory-index rebuild` — full rebuild from disk
-- `memory-index update` — incremental, hashes-per-file change detection
-- Auto-run by the PostToolUse hook after Edit/Write on any `$MEMORY_HOME` file
+- `rekol index rebuild` — full rebuild from disk
+- `rekol index update` — incremental, hashes-per-file change detection
+- Auto-run by the PostToolUse hook after Edit/Write on any `$REKOL_HOME` file
 - Auto-run by the SessionEnd hook as a safety net
 
 The index is disposable. Blowing it away and rebuilding takes seconds to a minute depending on corpus size. Never check it into git.
@@ -101,7 +101,7 @@ Session search adds a parallel layer of recall over `~/.claude/projects/*/*.json
 
 ### Storage
 
-Sibling SQLite database at `$MEMORY_HOME/.index/sessions.db`. Separate from the memory index because:
+Sibling SQLite database at `$REKOL_HOME/.index/sessions.db`. Separate from the memory index because:
 - Session content is per-machine and never synced (confidentiality between work and personal)
 - Schema lifecycles are independent — rebuilding sessions doesn't risk the curated index
 - Sessions data dwarfs memory data by 2–3 orders of magnitude; keeping them separate makes the memory index cheap to rebuild
@@ -112,13 +112,13 @@ Both FTS5 (keyword) and vec0 (semantic) tables, populated together. Queries fan 
 
 ### Ingest
 
-`claude-session-index --incremental` reads `~/.claude/projects/*/*.jsonl`, normalizes each message (role, content, tool calls, timestamp), dedupes against the existing index by `(session_id, message_id)`, and inserts new rows. Run by the SessionEnd hook after each Claude Code session terminates. Cost: ~0.1–2 sec per session-end.
+`rekol session-index --incremental` reads `~/.claude/projects/*/*.jsonl`, normalizes each message (role, content, tool calls, timestamp), dedupes against the existing index by `(session_id, message_id)`, and inserts new rows. Run by the SessionEnd hook after each Claude Code session terminates. Cost: ~0.1–2 sec per session-end.
 
 Initial backfill happens during phase 3 install. Estimated 5–15 min depending on transcript history depth. No `--skip-backfill` flag — the common path is the correct path.
 
 ### Search surface — unified, layered presentation
 
-`memory-search "query"` searches **both** curated memory and session transcripts in one call, but presents the results in two visually separated tiers:
+`rekol search "query"` searches **both** curated memory and session transcripts in one call, but presents the results in two visually separated tiers:
 
 ```
 ━━ FROM MEMORY (curated) ━━━━━━━━━━━━━━━━━━━━
@@ -135,32 +135,34 @@ Memory hits are listed first because they are curated truth. Session hits are ca
 
 ### Promotion-candidate workflow
 
-When a query returns **zero memory hits but multiple session hits**, that is a promotion signal: the concept has come up repeatedly in conversations but lives nowhere durable. `memory-search --promote-candidates` enumerates topics that match this pattern (high session-hit count, no memory hit), giving the user a queue of things worth capturing with `memory-capture`.
+When a query returns **zero memory hits but multiple session hits**, that is a promotion signal: the concept has come up repeatedly in conversations but lives nowhere durable. `rekol search --promote-candidates` enumerates topics that match this pattern (high session-hit count, no memory hit), giving the user a queue of things worth capturing with `rekol capture`.
 
 This is the only new workflow the session layer unlocks beyond improved recall.
 
 ## CLI surface
 
+A single `rekol` command with subcommands:
+
 | Command | Purpose |
 |---|---|
-| `memory-search "query" [--top N] [--source memory\|sessions\|all] [--json] [--promote-candidates]` | Hybrid search over memory + sessions. Layered output. |
-| `memory-index rebuild \| update` | Manage the curated-memory vector index |
-| `memory-capture --layer L --file F --name N --description D [--tags ...] [--aliases ...]` | Interactive capture flow (stdin = body) |
-| `memory-invalidate` | Mark entries stale without deletion |
-| `memory-propose` | Suggest captures based on observed conversation patterns |
-| `claude-session-index [--incremental \| --rebuild]` | Manage the session-transcript index |
+| `rekol search "query" [--top N] [--source memory\|sessions\|all] [--json] [--promote-candidates]` | Hybrid search over memory + sessions. Layered output. |
+| `rekol index rebuild \| update` | Manage the curated-memory vector index |
+| `rekol capture --layer L --file F --name N --description D [--tags ...] [--aliases ...]` | Interactive capture flow (stdin = body) |
+| `rekol invalidate` | Mark entries stale without deletion |
+| `rekol propose` | Suggest captures based on observed conversation patterns |
+| `rekol session-index [--incremental \| --rebuild]` | Manage the session-transcript index |
 
-All CLIs install to `$MEMORY_HOME/../bin` (added to `$PATH` by `mac_setup`).
+The `rekol` command installs to `$REKOL_HOME/../bin` (added to `$PATH` by `mac_setup`).
 
 ## Hooks
 
-Registered in `~/.claude/settings.json` by `phase3_memory.sh`. Snippets live at `memory-tools/hooks/*.json`.
+Registered in `~/.claude/settings.json` by `phase3_memory.sh`. Snippets live at `rekol/hooks/*.json`.
 
 | Hook | Event | Purpose |
 |---|---|---|
-| `auto-reindex.sh` | PostToolUse (filter on Edit/Write to `$MEMORY_HOME/**`) | Incremental reindex after manual memory edits |
+| `auto-reindex.sh` | PostToolUse (filter on Edit/Write to `$REKOL_HOME/**`) | Incremental reindex after manual memory edits |
 | `sessionstart-snippet.json` | SessionStart | Re-inject `MEMORY.md` into the session context |
-| `sessionend-snippet.json` | SessionEnd | Reindex memory (safety net) + run `claude-session-index --incremental` |
+| `sessionend-snippet.json` | SessionEnd | Reindex memory (safety net) + run `rekol session-index --incremental` |
 | `posttooluse-snippet.json` | PostToolUse | Wraps `auto-reindex.sh` for the harness |
 
 ## Capture & autonomy policy
@@ -198,13 +200,13 @@ cd ~/mac_setup
 ```
 
 The phase script:
-1. Creates `$MEMORY_HOME` if absent (default `~/Dropbox/memory`)
-2. Installs the Python package (`pip install -e .` against `memory-tools/`)
-3. Installs CLIs into the user's `$PATH`
+1. Creates `$REKOL_HOME` if absent (default `~/Dropbox/memory`)
+2. Installs the Python package (`pip install -e .` against `rekol/`)
+3. Installs the `rekol` CLI into the user's `$PATH`
 4. Merges the three hook snippets into `~/.claude/settings.json` (with timestamped backup)
 5. Runs initial vector index build over existing memory markdown
 6. Runs initial session-search backfill over `~/.claude/projects/*/*.jsonl`
-7. Writes an install journal to `$MEMORY_HOME/.install-journal-<timestamp>.log`
+7. Writes an install journal to `$REKOL_HOME/.install-journal-<timestamp>.log`
 
 The install is **idempotent**. Existing memory files are never modified. `~/.claude/settings.json` is backed up before any edit.
 
@@ -212,9 +214,9 @@ The install is **idempotent**. Existing memory files are never modified. `~/.cla
 
 | Artifact | Synced? | Why |
 |---|---|---|
-| `$MEMORY_HOME/{always,when,topics,knowledge}/*.md` | Yes (Dropbox) | Source of truth, hand-editable, shared across machines |
-| `$MEMORY_HOME/.index/memory.db` | No | Disposable, per-machine, rebuildable |
-| `$MEMORY_HOME/.index/sessions.db` | No | Per-machine confidentiality (work transcripts stay on work Mac) |
+| `$REKOL_HOME/{always,when,topics,knowledge}/*.md` | Yes (Dropbox) | Source of truth, hand-editable, shared across machines |
+| `$REKOL_HOME/.index/memory.db` | No | Disposable, per-machine, rebuildable |
+| `$REKOL_HOME/.index/sessions.db` | No | Per-machine confidentiality (work transcripts stay on work Mac) |
 | `~/.claude/projects/*/*.jsonl` | No (Claude Code-owned) | Per-machine session log |
 | Install journals | No | Per-machine artifact |
 
@@ -230,3 +232,4 @@ If the user later wants cross-machine session search, the resolution is **not** 
 
 - **2026-04-27** — Initial design drafted in `cassandra-team-workspace/docs/superpowers/specs/2026-04-27-persistent-memory-system-design.md`. Four-layer model, vector index, `memory-*` CLI surface, phase 3 install via mac_setup.
 - **2026-05-28** — Spec moved out of cassandra-team-workspace (retired) to live with the code in `memory-tools/docs/`. Filename de-dated per [`when-writing-specs`](../../../memory/when/when-writing-specs.md). Added session-search layer: hybrid FTS5+vec0 over `~/.claude/projects/*/*.jsonl`, layered presentation in `memory-search`, sibling `sessions.db`, incremental on SessionEnd, promotion-candidate workflow. Established per-machine vs synced state policy explicitly.
+- **2026-05-30** — Rebranded `memory-tools` → **REKOL**. Python package renamed `memory_tools` → `rekol`; the eight `memory-*` console scripts unified under a single `rekol` command (`rekol search`, `rekol index`, `rekol capture`, `rekol session-index`, `rekol import`, etc.). Data-directory env var is now `REKOL_HOME`, with `MEMORY_HOME` retained as a fallback. Data-level filenames (`MEMORY.md`, `memory.config.yaml`, the `skill/memory/` dir) are held stable for safety and deferred to a later genericization pass.

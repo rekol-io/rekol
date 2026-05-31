@@ -1,4 +1,4 @@
-"""memory-migrate CLI — migrate legacy memory into $MEMORY_HOME.
+"""rekol migrate CLI — migrate legacy memory into $REKOL_HOME (or $MEMORY_HOME).
 
 Subcommands:
   auto           Scan ~/.claude/projects/*/memory/ for legacy files (default).
@@ -22,14 +22,16 @@ from typing import Any
 
 import click
 
-from memory_tools.migrate.discover import discover_auto_memory_sources
-from memory_tools.migrate.migrator import MigrationReport, migrate_dir
+from rekol.config import resolve_memory_home
+from rekol.migrate.discover import discover_auto_memory_sources
+from rekol.migrate.migrator import MigrationReport, migrate_dir
 
 
 def _memory_home() -> Path:
-    env = os.environ.get("MEMORY_HOME")
+    # Same precedence as load_config(): REKOL_HOME primary, MEMORY_HOME fallback.
+    env = resolve_memory_home()
     if not env:
-        click.echo("error: MEMORY_HOME is not set.", err=True)
+        click.echo("error: neither REKOL_HOME nor MEMORY_HOME is set.", err=True)
         sys.exit(2)
     return Path(os.path.expanduser(env))
 
@@ -58,7 +60,7 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
 
 @click.group()
 def main() -> None:
-    """Migrate legacy Claude memory files into $MEMORY_HOME."""
+    """Migrate legacy Claude memory files into $REKOL_HOME (or $MEMORY_HOME)."""
 
 
 def _mode_flags() -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
