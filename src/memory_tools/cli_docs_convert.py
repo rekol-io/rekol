@@ -9,6 +9,7 @@ ingester surfaces the content in memory-search. By default it then chains
     memory-docs-convert ~/path/to/sessions --no-index      # write only
     memory-docs-convert ~/path/to/sessions --dry-run        # report, write nothing
 """
+
 from __future__ import annotations
 
 import shutil
@@ -21,7 +22,6 @@ import click
 from memory_tools.config import load_config
 from memory_tools.docs_convert import convert_tree
 
-
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
 
 
@@ -31,24 +31,32 @@ _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB; backstop against one huge file
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
 )
 @click.option(
-    "--prefix", default="backstage-ai-archive", show_default=True,
+    "--prefix",
+    default="backstage-ai-archive",
+    show_default=True,
     help="Subdirectory under claude_projects_dir to write the synthetic "
-         "transcripts into. Also salts the uuid/sessionId hashes so different "
-         "archives never collide.",
+    "transcripts into. Also salts the uuid/sessionId hashes so different "
+    "archives never collide.",
 )
 @click.option(
-    "--max-bytes", default=_DEFAULT_MAX_BYTES, show_default=True, type=int,
+    "--max-bytes",
+    default=_DEFAULT_MAX_BYTES,
+    show_default=True,
+    type=int,
     help="Skip any single file larger than this (backstop against one huge file "
-         "becoming one giant low-precision search hit).",
+    "becoming one giant low-precision search hit).",
 )
 @click.option(
-    "--index/--no-index", default=True, show_default=True,
+    "--index/--no-index",
+    default=True,
+    show_default=True,
     help="After writing, chain `claude-session-index --incremental` to ingest. "
-         "--incremental (not --full) so the existing ~1000 transcripts are not "
-         "needlessly re-walked.",
+    "--incremental (not --full) so the existing ~1000 transcripts are not "
+    "needlessly re-walked.",
 )
 @click.option(
-    "--dry-run", is_flag=True,
+    "--dry-run",
+    is_flag=True,
     help="Report what would be written without writing anything.",
 )
 def main(source_dir: Path, prefix: str, max_bytes: int, index: bool, dry_run: bool) -> None:

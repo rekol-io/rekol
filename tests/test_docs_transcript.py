@@ -1,10 +1,11 @@
 """Tests for docs_convert.transcript — prefix-salted uuids, mtime timestamps, schema."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
+from memory_tools.docs_convert.transcript import _row_uuid, _session_id, build_rows
 from memory_tools.docs_convert.walk import FileEntry, SessionGroup
-from memory_tools.docs_convert.transcript import build_rows, _row_uuid, _session_id
 
 
 def _group() -> SessionGroup:
@@ -12,12 +13,14 @@ def _group() -> SessionGroup:
         session_name="Topic A",
         folder_abs="/src/Topic A",
         rel_to_source="Topic A",
-        files=[FileEntry(
-            path=Path("/src/Topic A/note.md"),
-            rel_to_source="Topic A/note.md",
-            rel_to_session="note.md",
-            mtime_unix=1745835000,  # 2025-04-28T10:10:00Z
-        )],
+        files=[
+            FileEntry(
+                path=Path("/src/Topic A/note.md"),
+                rel_to_source="Topic A/note.md",
+                rel_to_session="note.md",
+                mtime_unix=1745835000,  # 2025-04-28T10:10:00Z
+            )
+        ],
     )
 
 
@@ -25,7 +28,7 @@ def test_build_rows_emits_valid_ingester_schema() -> None:
     rows = build_rows(_group(), prefix="arc", texts={"note.md": "hello body"})
     assert len(rows) == 1
     r = rows[0]
-    assert r["type"] == "user"                 # passes _MESSAGE_TYPES filter
+    assert r["type"] == "user"  # passes _MESSAGE_TYPES filter
     assert r["message"]["role"] == "document"  # stored role tag
     assert r["parentUuid"] is None
     assert r["cwd"] == "/src/Topic A"
@@ -69,8 +72,8 @@ def test_two_files_same_session_same_session_id_different_uuid() -> None:
     )
     rows = build_rows(group, prefix="arc", texts={"a.md": "body a", "b.md": "body b"})
     assert len(rows) == 2
-    assert rows[0]["sessionId"] == rows[1]["sessionId"]   # same session
-    assert rows[0]["uuid"] != rows[1]["uuid"]             # distinct messages
+    assert rows[0]["sessionId"] == rows[1]["sessionId"]  # same session
+    assert rows[0]["uuid"] != rows[1]["uuid"]  # distinct messages
 
 
 def test_build_rows_skips_files_with_no_extracted_text() -> None:

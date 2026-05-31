@@ -3,10 +3,10 @@
 This is the only module aware of file types. Best-effort: never raises on a
 single bad file — callers count the None/exception and continue.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from . import TEXT_EXTENSIONS
 
@@ -16,7 +16,7 @@ def is_text_native(path: Path) -> bool:
     return path.suffix.lstrip(".").lower() in TEXT_EXTENSIONS
 
 
-def extract_text(path: Path, max_bytes: int) -> Optional[str]:
+def extract_text(path: Path, max_bytes: int) -> str | None:
     """Return the file's text, or None if it should be skipped.
 
     Returns None when:

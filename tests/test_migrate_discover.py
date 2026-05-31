@@ -1,16 +1,14 @@
 """Tests for legacy memory discovery."""
+
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from memory_tools.migrate.discover import (
     discover_auto_memory_sources,
     discover_files_in_dir,
     is_retirement_pointer,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 LEGACY_DIR = FIXTURES / "legacy-project" / "memory"
@@ -19,6 +17,7 @@ LEGACY_DIR = FIXTURES / "legacy-project" / "memory"
 def test_discover_files_returns_all_md_except_memory_md(tmp_path: Path) -> None:
     # Copy fixture to a writable temp dir so test can mutate later
     import shutil
+
     src = tmp_path / "memory"
     shutil.copytree(LEGACY_DIR, src)
 
@@ -30,6 +29,7 @@ def test_discover_files_returns_all_md_except_memory_md(tmp_path: Path) -> None:
 
 def test_discover_files_project_slug_is_parent_name(tmp_path: Path) -> None:
     import shutil
+
     src = tmp_path / "my-project" / "memory"
     shutil.copytree(LEGACY_DIR, src)
 
@@ -39,6 +39,7 @@ def test_discover_files_project_slug_is_parent_name(tmp_path: Path) -> None:
 
 def test_discover_files_skips_archive_subdir(tmp_path: Path) -> None:
     import shutil
+
     src = tmp_path / "memory"
     shutil.copytree(LEGACY_DIR, src)
     archive = src / "old-memory-archive"
@@ -81,7 +82,9 @@ def test_discover_auto_memory_sources_finds_project_dirs(tmp_path: Path, monkeyp
     (projects_root / "-Users-foo-proj-a" / "memory" / "MEMORY.md").write_text("# real\n")
     (projects_root / "-Users-foo-proj-a" / "memory" / "x.md").write_text("# x\n")
     (projects_root / "-Users-foo-proj-b" / "memory").mkdir(parents=True)
-    (projects_root / "-Users-foo-proj-b" / "memory" / "MEMORY.md").write_text("# RETIRED — migrated to memory-tools\n")  # Retirement marker is the exact phrase discover.RETIREMENT_MARKER looks for.
+    (projects_root / "-Users-foo-proj-b" / "memory" / "MEMORY.md").write_text(
+        "# RETIRED — migrated to memory-tools\n"
+    )  # Retirement marker is the exact phrase discover.RETIREMENT_MARKER looks for.
     # proj-b is retired and should be skipped
 
     monkeypatch.setenv("HOME", str(fake_home))

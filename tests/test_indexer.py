@@ -7,8 +7,9 @@ from memory_tools.indexer import Indexer
 from memory_tools.store import IndexStore
 
 
-def _write(path: Path, name: str, type_: str, body: str,
-           tags: list[str] = (), aliases: list[str] = ()) -> None:
+def _write(
+    path: Path, name: str, type_: str, body: str, tags: list[str] = (), aliases: list[str] = ()
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fm = (
         "---\n"
@@ -25,21 +26,35 @@ def _write(path: Path, name: str, type_: str, body: str,
 @pytest.fixture()
 def memory_root(tmp_path: Path) -> Path:
     root = tmp_path / "mem"
-    _write(root / "always" / "identity.md", "Identity", "always",
-           "# Identity\n\nLeon is a senior manager.\n",
-           tags=["identity"], aliases=["me"])
-    _write(root / "topics" / "prometheus.md", "Prometheus", "topic",
-           "# Prometheus\n\nURL lives in the IaC repo.\n",
-           tags=["prometheus", "urls"], aliases=["prom"])
-    _write(root / "when" / "when-touching-repos.md", "Repos", "when",
-           "# Repos\n\nAlways check the local symlink folder first.\n",
-           tags=["repos"], aliases=["repo lookup"])
+    _write(
+        root / "always" / "identity.md",
+        "Identity",
+        "always",
+        "# Identity\n\nLeon is a senior manager.\n",
+        tags=["identity"],
+        aliases=["me"],
+    )
+    _write(
+        root / "topics" / "prometheus.md",
+        "Prometheus",
+        "topic",
+        "# Prometheus\n\nURL lives in the IaC repo.\n",
+        tags=["prometheus", "urls"],
+        aliases=["prom"],
+    )
+    _write(
+        root / "when" / "when-touching-repos.md",
+        "Repos",
+        "when",
+        "# Repos\n\nAlways check the local symlink folder first.\n",
+        tags=["repos"],
+        aliases=["repo lookup"],
+    )
     return root
 
 
 def _make_indexer(memory_root: Path) -> Indexer:
-    store = IndexStore(db_path=memory_root / ".index" / "index.db",
-                       dim=384, use_sqlite_vec=False)
+    store = IndexStore(db_path=memory_root / ".index" / "index.db", dim=384, use_sqlite_vec=False)
     store.init_schema()
     emb = HashingEmbedder(dim=384)
     return Indexer(memory_root=memory_root, store=store, embedder=emb)
@@ -121,13 +136,12 @@ def test_rebuild_rolls_back_file_on_embed_failure(memory_root: Path) -> None:
 
         def embed_batch(self, texts):
             # Raise when embedding the Prometheus file's chunks
-            import numpy as np
+
             if any(self._fail_on_name in t for t in texts):
                 raise RuntimeError("simulated embedder failure")
             return super().embed_batch(texts)
 
-    store = IndexStore(db_path=memory_root / ".index" / "index.db",
-                       dim=384, use_sqlite_vec=False)
+    store = IndexStore(db_path=memory_root / ".index" / "index.db", dim=384, use_sqlite_vec=False)
     store.init_schema()
     emb = FlakyEmbedder(fail_on_name="Prometheus")
     idx = Indexer(memory_root=memory_root, store=store, embedder=emb)

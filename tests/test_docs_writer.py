@@ -1,4 +1,5 @@
 """Tests for docs_convert.writer — one .jsonl per session, clean overwrite."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.docs_convert.writer import write_sessions, _safe_filename
+from memory_tools.docs_convert.writer import _safe_filename, write_sessions
 
 
 def test_write_sessions_writes_one_jsonl_per_session(tmp_path: Path) -> None:
@@ -22,10 +23,12 @@ def test_write_sessions_writes_one_jsonl_per_session(tmp_path: Path) -> None:
 
 
 def test_write_sessions_rows_are_valid_jsonl(tmp_path: Path) -> None:
-    rows_by_session = {"T": [
-        {"type": "user", "uuid": "u1", "message": {"content": "a"}},
-        {"type": "user", "uuid": "u2", "message": {"content": "b"}},
-    ]}
+    rows_by_session = {
+        "T": [
+            {"type": "user", "uuid": "u1", "message": {"content": "a"}},
+            {"type": "user", "uuid": "u2", "message": {"content": "b"}},
+        ]
+    }
     write_sessions(tmp_path, prefix="arc", rows_by_session=rows_by_session)
     lines = (tmp_path / "arc" / "T.jsonl").read_text().splitlines()
     assert len(lines) == 2
@@ -38,9 +41,12 @@ def test_write_sessions_overwrites_prefix_dir_cleanly(tmp_path: Path) -> None:
     target.mkdir()
     stale = target / "OldTopic.jsonl"
     stale.write_text('{"stale": true}\n')
-    write_sessions(tmp_path, prefix="arc",
-                   rows_by_session={"New": [{"type": "user", "uuid": "u", "message": {"content": "c"}}]})
-    assert not stale.exists()           # stale file removed
+    write_sessions(
+        tmp_path,
+        prefix="arc",
+        rows_by_session={"New": [{"type": "user", "uuid": "u", "message": {"content": "c"}}]},
+    )
+    assert not stale.exists()  # stale file removed
     assert (target / "New.jsonl").exists()
 
 
@@ -58,8 +64,10 @@ def test_write_sessions_skips_empty_session(tmp_path: Path) -> None:
 
 def test_write_sessions_raises_on_filename_collision(tmp_path: Path) -> None:
     # "Topic A" and "Topic  A" (double space) both sanitise to "Topic-A"
-    rows = {"Topic A": [{"type": "user", "uuid": "u1", "message": {"content": "x"}}],
-            "Topic  A": [{"type": "user", "uuid": "u2", "message": {"content": "y"}}]}
+    rows = {
+        "Topic A": [{"type": "user", "uuid": "u1", "message": {"content": "x"}}],
+        "Topic  A": [{"type": "user", "uuid": "u2", "message": {"content": "y"}}],
+    }
     with pytest.raises(ValueError, match="collision"):
         write_sessions(tmp_path, prefix="arc", rows_by_session=rows)
 

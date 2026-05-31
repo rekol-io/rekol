@@ -1,18 +1,14 @@
 """End-to-end tests for the migrator orchestrator."""
+
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from memory_tools.migrate.archive import MIGRATION_MARKER_NAME
 from memory_tools.migrate.migrator import (
-    MigrationReport,
     migrate_dir,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-project" / "memory"
 
@@ -74,11 +70,13 @@ def test_migrate_dir_dry_run_writes_nothing(tmp_path: Path) -> None:
 
 def test_migrate_dir_idempotent_skips_retired(tmp_path: Path) -> None:
     src_parent, memory_home = _setup_fixture(tmp_path)
-    migrate_dir(source_dir=src_parent / "memory", memory_home=memory_home,
-                dry_run=False, allow_llm=False)
+    migrate_dir(
+        source_dir=src_parent / "memory", memory_home=memory_home, dry_run=False, allow_llm=False
+    )
     # Second run — should be a no-op (pointer already set, no files to migrate)
-    report = migrate_dir(source_dir=src_parent / "memory", memory_home=memory_home,
-                          dry_run=False, allow_llm=False)
+    report = migrate_dir(
+        source_dir=src_parent / "memory", memory_home=memory_home, dry_run=False, allow_llm=False
+    )
     assert report.migrated == 0
     assert report.skipped_retired == 1
 
@@ -87,11 +85,12 @@ def test_migrate_dir_collision_appends_suffix(tmp_path: Path) -> None:
     src_parent, memory_home = _setup_fixture(tmp_path)
     # Pre-create a target file that would collide
     (memory_home / "topics" / "proj-alpha.md").write_text("pre-existing")
-    report = migrate_dir(source_dir=src_parent / "memory", memory_home=memory_home,
-                          dry_run=False, allow_llm=False)
+    report = migrate_dir(
+        source_dir=src_parent / "memory", memory_home=memory_home, dry_run=False, allow_llm=False
+    )
     assert report.migrated == 2
     # Migrated file landed at proj-alpha-2.md (suffix-1 reserved for actual collision)
-    collided = (memory_home / "topics" / "proj-alpha-2.md")
+    collided = memory_home / "topics" / "proj-alpha-2.md"
     assert collided.is_file()
     # Original pre-existing file untouched
     assert (memory_home / "topics" / "proj-alpha.md").read_text() == "pre-existing"
@@ -99,8 +98,9 @@ def test_migrate_dir_collision_appends_suffix(tmp_path: Path) -> None:
 
 def test_migrate_dir_writes_frontmatter_and_body(tmp_path: Path) -> None:
     src_parent, memory_home = _setup_fixture(tmp_path)
-    migrate_dir(source_dir=src_parent / "memory", memory_home=memory_home,
-                dry_run=False, allow_llm=False)
+    migrate_dir(
+        source_dir=src_parent / "memory", memory_home=memory_home, dry_run=False, allow_llm=False
+    )
     out = (memory_home / "when" / "when-proj-foo.md").read_text()
     assert out.startswith("---\n")
     assert "type: when" in out
@@ -140,6 +140,7 @@ def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> N
     (src / "y.md").write_text("---\n@@@@\n---\nbody\n")
 
     from memory_tools.migrate import classify
+
     original = classify.classify_file
 
     def failing_classify(*args, **kwargs):
@@ -148,10 +149,12 @@ def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> N
     classify.classify_file = failing_classify
     # The migrator imports classify_file by name at module load — patch it there too.
     from memory_tools.migrate import migrator
+
     migrator.classify_file = failing_classify
     try:
-        report = migrate_dir(source_dir=src, memory_home=memory_home,
-                            dry_run=False, allow_llm=False)
+        report = migrate_dir(
+            source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False
+        )
     finally:
         classify.classify_file = original
         migrator.classify_file = original
@@ -184,10 +187,8 @@ def test_migrate_dir_dedupes_byte_identical_bodies(tmp_path: Path) -> None:
     (src_a / "feedback_x.md").write_text(body)
     (src_b / "feedback_x.md").write_text(body)
 
-    rep_a = migrate_dir(source_dir=src_a, memory_home=memory_home,
-                        dry_run=False, allow_llm=False)
-    rep_b = migrate_dir(source_dir=src_b, memory_home=memory_home,
-                        dry_run=False, allow_llm=False)
+    rep_a = migrate_dir(source_dir=src_a, memory_home=memory_home, dry_run=False, allow_llm=False)
+    rep_b = migrate_dir(source_dir=src_b, memory_home=memory_home, dry_run=False, allow_llm=False)
 
     assert rep_a.migrated == 1 and rep_a.skipped_duplicate == 0
     assert rep_b.migrated == 0 and rep_b.skipped_duplicate == 1

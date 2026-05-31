@@ -4,13 +4,13 @@ Output layout: ``<target_dir>/<prefix>/<safe-session-name>.jsonl``. The whole
 ``<prefix>`` dir is recreated on each run (clean overwrite) so a removed source
 folder does not leave a stale .jsonl behind that the ingester would keep.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, List
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -21,8 +21,8 @@ def _safe_filename(session_name: str) -> str:
 
 
 def write_sessions(
-    target_dir: Path, prefix: str, rows_by_session: Dict[str, List[dict]]
-) -> List[Path]:
+    target_dir: Path, prefix: str, rows_by_session: dict[str, list[dict]]
+) -> list[Path]:
     """Write one .jsonl per non-empty session under target_dir/prefix.
 
     Returns the list of written file paths. The prefix dir is removed and
@@ -36,8 +36,8 @@ def write_sessions(
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    written: List[Path] = []
-    seen_stems: Dict[str, str] = {}   # stem -> originating session_name
+    written: list[Path] = []
+    seen_stems: dict[str, str] = {}  # stem -> originating session_name
     for session_name, rows in sorted(rows_by_session.items()):
         if not rows:
             continue

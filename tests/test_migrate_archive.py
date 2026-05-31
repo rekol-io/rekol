@@ -1,10 +1,8 @@
 """Tests for archiver: move originals, write migration marker."""
+
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
-
-import pytest
 
 from memory_tools.migrate.archive import (
     MIGRATION_MARKER_NAME,

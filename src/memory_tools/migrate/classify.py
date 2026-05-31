@@ -12,24 +12,23 @@ Two-stage pipeline:
    On LLM failure or when ``allow_llm=False``, default to the ``knowledge``
    layer so content is searchable without claiming always-on budget.
 """
+
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Literal
 
 import frontmatter
 
 from memory_tools.migrate.discover import LegacyFile
 from memory_tools.migrate.llm import LLMUnavailable, call_claude_classifier
 
-
 Layer = Literal["always", "when", "topic", "knowledge"]
 
 
 # Map legacy frontmatter `type:` values to target layer.
-LEGACY_TYPE_TO_LAYER: Dict[str, Layer] = {
+LEGACY_TYPE_TO_LAYER: dict[str, Layer] = {
     "feedback": "when",
     "project": "topic",
     "reference": "topic",
@@ -47,12 +46,13 @@ _LEGACY_FILENAME_PREFIXES = ("feedback_", "project_", "reference_")
 @dataclass
 class Classification:
     """Where and how to write a legacy file into $MEMORY_HOME."""
+
     layer: Layer
     target_filename: str
     frontmatter: dict
     body: str
     method: Literal["heuristic", "llm"]
-    original_type: Optional[str] = None
+    original_type: str | None = None
 
 
 def target_filename_for(lf: LegacyFile, *, layer: Layer) -> str:
@@ -67,7 +67,7 @@ def target_filename_for(lf: LegacyFile, *, layer: Layer) -> str:
     stem = name[:-3] if name.endswith(".md") else name
     for prefix in _LEGACY_FILENAME_PREFIXES:
         if stem.startswith(prefix):
-            stem = stem[len(prefix):]
+            stem = stem[len(prefix) :]
             break
     slug = lf.project_slug
     if layer == "when":
@@ -75,7 +75,7 @@ def target_filename_for(lf: LegacyFile, *, layer: Layer) -> str:
     return f"{slug}-{stem}.md"
 
 
-def heuristic_classify(lf: LegacyFile) -> Optional[Classification]:
+def heuristic_classify(lf: LegacyFile) -> Classification | None:
     """Classify by frontmatter ``type:`` only.  Returns None when unable."""
     try:
         post = frontmatter.load(lf.source_path)
@@ -118,7 +118,7 @@ def build_classifier_prompt() -> str:
         "layered memory system.\n\n"
         "Return ONLY a JSON object (no prose, no code fence required) with "
         "these keys:\n"
-        "  - layer: one of \"always\", \"when\", \"topic\", \"knowledge\"\n"
+        '  - layer: one of "always", "when", "topic", "knowledge"\n'
         "  - filename: kebab-case filename ending in .md\n"
         "  - tags: list of short lowercase keyword strings (max ~8)\n"
         "  - aliases: list of alternate phrasings users might search for (max ~8)\n"
@@ -126,8 +126,8 @@ def build_classifier_prompt() -> str:
         "LAYER GUIDE:\n"
         "  - always: tiny identity-like facts loaded in EVERY session (<1KB). "
         "Rare — don't default here.\n"
-        "  - when: activity-triggered rules (\"before committing\", "
-        "\"before scoping\", \"when preparing 1:1\"). Filename starts with when-.\n"
+        '  - when: activity-triggered rules ("before committing", '
+        '"before scoping", "when preparing 1:1"). Filename starts with when-.\n'
         "  - topic: canonical noun-referenced sources (services, repos, schemas, "
         "URLs, people/team structures).\n"
         "  - knowledge: general durable facts that don't fit the above; "
@@ -160,12 +160,14 @@ def classify_file(
             if layer not in ("always", "when", "topic", "knowledge"):
                 raise LLMUnavailable(f"bad layer from LLM: {layer!r}")
             filename = data.get("filename") or target_filename_for(
-                lf, layer=layer  # type: ignore[arg-type]
+                lf,
+                layer=layer,  # type: ignore[arg-type]
             )
             today = dt.date.today().isoformat()
             new_meta: dict = {
                 "name": data.get("rationale", lf.source_path.stem)[:80]
-                if not data.get("name") else data["name"],
+                if not data.get("name")
+                else data["name"],
                 "description": data.get("description", data.get("rationale", ""))[:200],
                 "type": layer,
                 "tags": list(data.get("tags") or []),
