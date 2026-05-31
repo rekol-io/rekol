@@ -11,6 +11,7 @@ Modes:
   --no-llm       Disable the Sonnet fallback; unknown files default to knowledge/.
   --quiet        Suppress per-file output; still prints the summary line.
 """
+
 from __future__ import annotations
 
 import os
@@ -61,12 +62,19 @@ def main() -> None:
 def _mode_flags() -> tuple[click.Option, click.Option, click.Option, click.Option]:
     """Shared option set for commit/dry-run mode."""
     return (
-        click.option("--dry-run/--commit", default=True, show_default=True,
-                     help="Dry-run prints a plan; --commit writes files."),
-        click.option("--no-llm", is_flag=True, default=False,
-                     help="Disable Sonnet classifier fallback; default unknown files to knowledge/."),
-        click.option("--quiet", is_flag=True, default=False,
-                     help="Suppress per-file output."),
+        click.option(
+            "--dry-run/--commit",
+            default=True,
+            show_default=True,
+            help="Dry-run prints a plan; --commit writes files.",
+        ),
+        click.option(
+            "--no-llm",
+            is_flag=True,
+            default=False,
+            help="Disable Sonnet classifier fallback; default unknown files to knowledge/.",
+        ),
+        click.option("--quiet", is_flag=True, default=False, help="Suppress per-file output."),
     )
 
 
@@ -79,10 +87,18 @@ def _add_mode_flags(cmd):
 
 
 @main.command()
-@click.option("--dry-run/--commit", default=True, show_default=True,
-              help="Dry-run prints a plan; --commit writes files.")
-@click.option("--no-llm", is_flag=True, default=False,
-              help="Disable Sonnet fallback; default unknown files to knowledge/.")
+@click.option(
+    "--dry-run/--commit",
+    default=True,
+    show_default=True,
+    help="Dry-run prints a plan; --commit writes files.",
+)
+@click.option(
+    "--no-llm",
+    is_flag=True,
+    default=False,
+    help="Disable Sonnet fallback; default unknown files to knowledge/.",
+)
 @click.option("--quiet", is_flag=True, default=False, help="Suppress per-file output.")
 def auto(dry_run: bool, no_llm: bool, quiet: bool) -> None:
     """Scan ~/.claude/projects/*/memory/ and migrate each unmigrated dir."""
@@ -106,10 +122,18 @@ def auto(dry_run: bool, no_llm: bool, quiet: bool) -> None:
 
 @main.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=True, dir_okay=True))
-@click.option("--dry-run/--commit", default=True, show_default=True,
-              help="Dry-run prints a plan; --commit writes files.")
-@click.option("--no-llm", is_flag=True, default=False,
-              help="Disable Sonnet fallback; default unknown files to knowledge/.")
+@click.option(
+    "--dry-run/--commit",
+    default=True,
+    show_default=True,
+    help="Dry-run prints a plan; --commit writes files.",
+)
+@click.option(
+    "--no-llm",
+    is_flag=True,
+    default=False,
+    help="Disable Sonnet fallback; default unknown files to knowledge/.",
+)
 @click.option("--quiet", is_flag=True, default=False, help="Suppress per-file output.")
 def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool) -> None:
     """Scan a user-supplied path for legacy memory files.

@@ -1,4 +1,5 @@
 """memory-index CLI: rebuild or incrementally update the vector index."""
+
 from __future__ import annotations
 
 import sys

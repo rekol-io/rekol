@@ -1,13 +1,13 @@
 """SQLite-backed index store. Uses sqlite-vec when available; falls back to numpy cosine."""
+
 from __future__ import annotations
 
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
-
 
 SCHEMA_FILES = """
 CREATE TABLE IF NOT EXISTS files (
@@ -70,16 +70,17 @@ class IndexStore:
             self._vec_loaded = False
 
     def init_schema(self) -> None:
+        """Create the files and chunks tables if they do not yet exist."""
         self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS)
         self.conn.commit()
 
-    def list_tables(self) -> List[str]:
-        rows = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+    def list_tables(self) -> list[str]:
+        """Return the names of all tables in the database."""
+        rows = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return [r["name"] for r in rows]
 
     def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
+        """Insert or update a file's mtime, content hash, and indexed timestamp."""
         self.conn.execute(
             "INSERT INTO files(path, mtime, content_hash) VALUES(?,?,?) "
             "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime, "
@@ -89,20 +90,21 @@ class IndexStore:
         )
         self.conn.commit()
 
-    def get_file(self, path: str) -> Optional[Dict[str, Any]]:
+    def get_file(self, path: str) -> dict[str, Any] | None:
+        """Return the file row for ``path``, or None if it is not indexed."""
         row = self.conn.execute(
             "SELECT path, mtime, content_hash, indexed_at FROM files WHERE path=?",
             (path,),
         ).fetchone()
         return dict(row) if row else None
 
-    def all_files(self) -> List[Dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT path, mtime, content_hash FROM files"
-        ).fetchall()
+    def all_files(self) -> list[dict[str, Any]]:
+        """Return every indexed file's path, mtime, and content hash."""
+        rows = self.conn.execute("SELECT path, mtime, content_hash FROM files").fetchall()
         return [dict(r) for r in rows]
 
     def delete_file(self, path: str) -> None:
+        """Delete a file row; its chunks are removed via ON DELETE CASCADE."""
         # ON DELETE CASCADE (enforced via PRAGMA foreign_keys=ON) removes associated chunks
         self.conn.execute("DELETE FROM files WHERE path=?", (path,))
         self.conn.commit()
@@ -110,8 +112,9 @@ class IndexStore:
     def replace_chunks_for_file(
         self,
         file_path: str,
-        chunks: List[Dict[str, Any]],
+        chunks: list[dict[str, Any]],
     ) -> None:
+        """Replace all chunks for a file with ``chunks``, storing their embeddings."""
         cur = self.conn.cursor()
         cur.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
         for c in chunks:
@@ -134,7 +137,8 @@ class IndexStore:
             )
         self.conn.commit()
 
-    def all_chunks_for_file(self, file_path: str) -> List[Dict[str, Any]]:
+    def all_chunks_for_file(self, file_path: str) -> list[dict[str, Any]]:
+        """Return all chunks for a file, with tags and aliases decoded from JSON."""
         rows = self.conn.execute(
             "SELECT id, heading, line_start, line_end, text, tags_json, aliases_json "
             "FROM chunks WHERE file_path=?",
@@ -153,7 +157,8 @@ class IndexStore:
             for r in rows
         ]
 
-    def search(self, query_vec: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query_vec: np.ndarray, top_k: int = 5) -> list[dict[str, Any]]:
+        """Return the ``top_k`` chunks most similar to ``query_vec`` by cosine similarity."""
         if query_vec.dtype != np.float32:
             query_vec = query_vec.astype(np.float32)
         rows = self.conn.execute(
@@ -168,7 +173,7 @@ class IndexStore:
         qnorm = float(np.linalg.norm(query_vec)) + 1e-12
         scores = (vecs @ query_vec) / (norms * qnorm)
         idx = np.argsort(-scores)[:top_k]
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for i in idx:
             r = rows[i]
             out.append(
@@ -186,7 +191,7 @@ class IndexStore:
             )
         return out
 
-    def __enter__(self) -> "IndexStore":
+    def __enter__(self) -> IndexStore:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

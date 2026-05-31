@@ -13,13 +13,12 @@ that Claude could not resolve).  We now use a hidden marker instead, and treat
 the legacy ``MEMORY.md`` retirement string as "also already migrated" for
 backward compatibility on machines installed under the old version.
 """
+
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
-
 
 # Hidden marker file the migrator writes after successfully migrating a dir.
 # Hidden so Claude Code's autoMemory does not inject it as context.
@@ -33,9 +32,10 @@ LEGACY_RETIREMENT_MARKER = "RETIRED — migrated to memory-tools"
 @dataclass
 class LegacyFile:
     """A discovered legacy memory file."""
-    source_path: Path       # absolute path to the .md file
-    source_root: Path       # the memory/ dir it belongs to
-    project_slug: str       # parent dir name of source_root (for archive/rename)
+
+    source_path: Path  # absolute path to the .md file
+    source_root: Path  # the memory/ dir it belongs to
+    project_slug: str  # parent dir name of source_root (for archive/rename)
 
 
 def is_retirement_pointer(memory_md: Path) -> bool:
@@ -62,7 +62,7 @@ def has_migration_marker(memory_dir: Path) -> bool:
     return is_retirement_pointer(memory_dir / "MEMORY.md")
 
 
-def discover_files_in_dir(source_root: Path) -> List[LegacyFile]:
+def discover_files_in_dir(source_root: Path) -> list[LegacyFile]:
     """Return every .md file directly under ``source_root`` except MEMORY.md.
 
     Does NOT recurse into subdirs — the ``old-memory-archive/`` dir (and any
@@ -74,7 +74,7 @@ def discover_files_in_dir(source_root: Path) -> List[LegacyFile]:
     # For auto-memory: ~/.claude/projects/<slug>/memory/ → slug is parent.name.
     # For a repo subdir: /repo/docs/memory/ → slug is parent.name ("docs").
     project_slug = source_root.parent.name
-    files: List[LegacyFile] = []
+    files: list[LegacyFile] = []
     for entry in sorted(source_root.iterdir()):
         if not entry.is_file():
             continue
@@ -82,15 +82,17 @@ def discover_files_in_dir(source_root: Path) -> List[LegacyFile]:
             continue
         if entry.name == "MEMORY.md":
             continue
-        files.append(LegacyFile(
-            source_path=entry,
-            source_root=source_root,
-            project_slug=project_slug,
-        ))
+        files.append(
+            LegacyFile(
+                source_path=entry,
+                source_root=source_root,
+                project_slug=project_slug,
+            )
+        )
     return files
 
 
-def discover_auto_memory_sources() -> List[Path]:
+def discover_auto_memory_sources() -> list[Path]:
     """Find all ~/.claude/projects/*/memory/ dirs that have not been migrated.
 
     Returns the list of <slug> dirs (parent of the memory/ subdir), since the
@@ -101,7 +103,7 @@ def discover_auto_memory_sources() -> List[Path]:
     projects_root = home / ".claude" / "projects"
     if not projects_root.is_dir():
         return []
-    out: List[Path] = []
+    out: list[Path] = []
     for slug_dir in sorted(projects_root.iterdir()):
         memory_dir = slug_dir / "memory"
         if not memory_dir.is_dir():

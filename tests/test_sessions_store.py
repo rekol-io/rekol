@@ -1,10 +1,10 @@
 """Tests for SessionStore — schema init, insert, FTS5 + vec search, dedupe."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from memory_tools.sessions.store import SessionStore
 
@@ -88,8 +88,12 @@ def test_insert_message_dedupes_on_uuid(tmp_path: Path) -> None:
 def test_search_fts_matches_keyword(tmp_path: Path) -> None:
     store = SessionStore(db_path=tmp_path / "s.db", dim=384)
     store.init_schema()
-    store.insert_message(_make_msg(uuid="a", session="s1") | {"content": "the litellm base_url is configured"})
-    store.insert_message(_make_msg(uuid="b", session="s1", line=2) | {"content": "unrelated message about cats"})
+    store.insert_message(
+        _make_msg(uuid="a", session="s1") | {"content": "the litellm base_url is configured"}
+    )
+    store.insert_message(
+        _make_msg(uuid="b", session="s1", line=2) | {"content": "unrelated message about cats"}
+    )
     hits = store.search_fts("litellm", top_k=5)
     assert len(hits) == 1
     assert hits[0]["message_uuid"] == "a"
@@ -116,8 +120,13 @@ def test_search_fts_score_is_positive_higher_is_better(tmp_path: Path) -> None:
     """
     store = SessionStore(db_path=tmp_path / "s.db", dim=384)
     store.init_schema()
-    store.insert_message(_make_msg(uuid="strong", session="s1") | {"content": "litellm litellm litellm proxy"})
-    store.insert_message(_make_msg(uuid="weak", session="s1", line=2) | {"content": "litellm appears once buried in unrelated text about cats and dogs"})
+    store.insert_message(
+        _make_msg(uuid="strong", session="s1") | {"content": "litellm litellm litellm proxy"}
+    )
+    store.insert_message(
+        _make_msg(uuid="weak", session="s1", line=2)
+        | {"content": "litellm appears once buried in unrelated text about cats and dogs"}
+    )
     hits = store.search_fts("litellm", top_k=5)
     assert len(hits) == 2
     # Both scores must be >= 0 (negative scores indicate the formula bug)

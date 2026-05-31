@@ -3,12 +3,12 @@
 Operates on ONE source dir at a time (``migrate_dir``).  The CLI layer wraps
 multiple calls for ``auto`` mode.
 """
+
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Set
 
 import frontmatter
 import yaml
@@ -16,11 +16,9 @@ import yaml
 from memory_tools.migrate.archive import archive_file, write_retirement_pointer
 from memory_tools.migrate.classify import Classification, classify_file
 from memory_tools.migrate.discover import (
-    LegacyFile,
     discover_files_in_dir,
     has_migration_marker,
 )
-
 
 # Map singular layer name (in Classification.layer) to on-disk dir name.
 LAYER_DIR_MAP = {
@@ -33,15 +31,17 @@ LAYER_DIR_MAP = {
 
 @dataclass
 class MigrationReport:
+    """Tally of migration outcomes, including per-reason skip counts and errors."""
+
     migrated: int = 0
-    would_migrate: int = 0           # dry-run only
+    would_migrate: int = 0  # dry-run only
     by_heuristic: int = 0
     by_llm: int = 0
     archived: int = 0
     skipped_retired: int = 0
     skipped_missing: int = 0
-    skipped_duplicate: int = 0       # body-hash matched an already-migrated file
-    errors: List[str] = field(default_factory=list)
+    skipped_duplicate: int = 0  # body-hash matched an already-migrated file
+    errors: list[str] = field(default_factory=list)
 
 
 def _body_hash(body: str) -> str:
@@ -56,9 +56,9 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _existing_body_hashes(memory_home: Path) -> Set[str]:
+def _existing_body_hashes(memory_home: Path) -> set[str]:
     """Return the set of body hashes for every file already in ``memory_home``."""
-    hashes: Set[str] = set()
+    hashes: set[str] = set()
     for layer in LAYER_DIR_MAP.values():
         layer_dir = memory_home / layer
         if not layer_dir.is_dir():
@@ -101,7 +101,7 @@ def _resolve_target_path(
     return candidate
 
 
-def migrate_dir(
+def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separately
     source_dir: Path,
     *,
     memory_home: Path,
@@ -162,9 +162,7 @@ def migrate_dir(
                     archive_file(lf)
                     report.archived += 1
                 except Exception as exc:  # noqa: BLE001
-                    report.errors.append(
-                        f"archive failed for duplicate {lf.source_path}: {exc}"
-                    )
+                    report.errors.append(f"archive failed for duplicate {lf.source_path}: {exc}")
             continue
 
         if dry_run:
@@ -199,11 +197,7 @@ def migrate_dir(
     # surfaced in the install output.  The dir is NOT marked when zero files
     # were even attempted (handled by the earlier early-return when files == [])
     # or when dry-running.
-    progressed = (
-        report.migrated > 0
-        or report.skipped_duplicate > 0
-        or len(report.errors) > 0
-    )
+    progressed = report.migrated > 0 or report.skipped_duplicate > 0 or len(report.errors) > 0
     if not dry_run and progressed:
         write_retirement_pointer(source_dir, memory_home=memory_home)
 

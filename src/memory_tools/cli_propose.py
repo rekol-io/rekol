@@ -11,6 +11,7 @@ implications of running an LLM over session transcripts are out of scope for
 v1.  The output is a checklist the user can act on manually with
 ``memory-capture``.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -24,7 +25,6 @@ from memory_tools.config import load_config
 from memory_tools.embeddings import get_embedder
 from memory_tools.store import IndexStore
 
-
 # Common leading whitespace + optional bullet marker, applied uniformly.
 _LEAD = r"^\s*(?:[-*]\s+)?"
 
@@ -32,8 +32,7 @@ _LEAD = r"^\s*(?:[-*]\s+)?"
 # typically signals a durable fact worth remembering across sessions.
 _CANDIDATE_PATTERNS = [
     # Imperative reminders
-    re.compile(_LEAD + r"(?:remember|don't forget|note|todo|fyi)[:\s]\s*(.+)$",
-               re.IGNORECASE),
+    re.compile(_LEAD + r"(?:remember|don't forget|note|todo|fyi)[:\s]\s*(.+)$", re.IGNORECASE),
     # Decisions
     re.compile(_LEAD + r"(?:decision|chose|going with)[:\s]\s*(.+)$", re.IGNORECASE),
     # Preferences and corrections
@@ -64,8 +63,12 @@ def extract_candidates(text: str) -> list[str]:
 
 
 @click.command()
-@click.option("--input-file", "-i", type=click.Path(exists=True, dir_okay=False),
-              help="Read notes from a file. If omitted, reads stdin.")
+@click.option(
+    "--input-file",
+    "-i",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read notes from a file. If omitted, reads stdin.",
+)
 @click.option("--quiet", is_flag=True, help="Suppress the summary line.")
 def main(input_file: str | None, quiet: bool) -> None:
     """Scan notes for candidate memories; write a proposal for review.
@@ -76,11 +79,7 @@ def main(input_file: str | None, quiet: bool) -> None:
     memory, or drop the candidate.
     """
     cfg = load_config()
-    text = (
-        Path(input_file).read_text(encoding="utf-8")
-        if input_file
-        else sys.stdin.read()
-    )
+    text = Path(input_file).read_text(encoding="utf-8") if input_file else sys.stdin.read()
 
     candidates = extract_candidates(text)
     if not candidates:
@@ -112,8 +111,10 @@ def main(input_file: str | None, quiet: bool) -> None:
         hits = store.search(vec, top_k=1)
         if hits and hits[0]["score"] >= DUPLICATE_THRESHOLD:
             dup_count += 1
-            lines.append(f"- ~~{cand}~~ — already captured "
-                         f"({hits[0]['score']:.2f}: `{hits[0]['file_path']}`)")
+            lines.append(
+                f"- ~~{cand}~~ — already captured "
+                f"({hits[0]['score']:.2f}: `{hits[0]['file_path']}`)"
+            )
         else:
             new_count += 1
             lines.append(f"- [ ] {cand}")
@@ -122,9 +123,7 @@ def main(input_file: str | None, quiet: bool) -> None:
     proposal.write_text("\n".join(lines))
 
     if not quiet:
-        click.echo(
-            f"wrote {proposal} ({new_count} new, {dup_count} already-captured)"
-        )
+        click.echo(f"wrote {proposal} ({new_count} new, {dup_count} already-captured)")
 
 
 if __name__ == "__main__":

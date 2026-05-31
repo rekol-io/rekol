@@ -4,38 +4,41 @@ Filters non-message rows (queue-operation, etc.) and normalises content that
 may be a string or a list of content blocks into a single text payload. Dedupe
 relies on the UNIQUE(session_id, message_uuid) constraint in the store.
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Iterator, Optional
 
 from .store import SessionStore
 
 
 @dataclass
 class IngestStats:
+    """Tally of file and message outcomes from a session ingest run."""
+
     files_seen: int = 0
     files_ingested: int = 0
     files_skipped_unchanged: int = 0  # mtime+size match — already ingested
     messages_inserted: int = 0
     messages_skipped_dupe: int = 0
     messages_skipped_malformed: int = 0  # parse error or missing required field
-    messages_skipped_no_text: int = 0    # row IS a message but has no indexable text
-                                          # (assistant tool_use only, thinking only,
-                                          #  user tool_result only). This is the dominant
-                                          #  bucket on real transcripts; tracked separately
-                                          #  so the user can see the real drop rate vs
-                                          #  parse errors.
+    messages_skipped_no_text: int = 0  # row IS a message but has no indexable text
+    # (assistant tool_use only, thinking only,
+    #  user tool_result only). This is the dominant
+    #  bucket on real transcripts; tracked separately
+    #  so the user can see the real drop rate vs
+    #  parse errors.
 
 
 # Row types in the JSONL stream we treat as messages.
 _MESSAGE_TYPES = ("user", "assistant")
 
 
-def _flatten_content(content) -> Optional[str]:
+def _flatten_content(content) -> str | None:
     """Convert message.content to plain text. Returns None if there's nothing usable."""
     if isinstance(content, str):
         text = content.strip()
@@ -62,22 +65,25 @@ def _parse_timestamp(ts: str) -> tuple[str, int]:
     parseable = ts.rstrip("Z") + "+00:00" if ts.endswith("Z") else ts
     dt = datetime.fromisoformat(parseable)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return iso, int(dt.timestamp())
 
 
 @dataclass
 class _RawIterResult:
-    """Internal carrier so iter_messages_in_file can report both yielded messages
-    and rows skipped for "no indexable text" without forcing the caller to
-    consume two iterators. The stats are mutated by the iterator; the caller
-    reads them after the iteration completes.
+    """Internal carrier for iter_messages_in_file's skip counts.
+
+    Lets the iterator report rows skipped for "no indexable text" (and
+    malformed rows) without forcing the caller to consume two iterators.
+    The stats are mutated by the iterator; the caller reads them after the
+    iteration completes.
     """
+
     no_text_count: int = 0
     malformed_count: int = 0
 
 
-def iter_messages_in_file(jsonl_path: Path, stats: Optional[_RawIterResult] = None) -> Iterator[dict]:
+def iter_messages_in_file(jsonl_path: Path, stats: _RawIterResult | None = None) -> Iterator[dict]:
     """Yield normalised message dicts ready for SessionStore.insert_message.
 
     Skips non-message rows (queue-operation, attachment, etc.) entirely.
@@ -192,7 +198,7 @@ def ingest_directory(
     store: SessionStore,
     *,
     force: bool = False,
-    progress_cb: Optional[Callable[[int, int], None]] = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> IngestStats:
     """Ingest every .jsonl under root (typically ``~/.claude/projects``).
 

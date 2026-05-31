@@ -7,6 +7,7 @@ query.  Invalidation sets ``invalidated_at`` in the frontmatter and bumps
 ``updated``.  The file stays on disk and remains searchable, but downstream
 retrieval can de-prioritize invalidated memories.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -24,12 +25,17 @@ from memory_tools.store import IndexStore
 
 @click.command()
 @click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
-@click.option("--reason", default="",
-              help="Optional one-line note describing why the memory is being "
-                   "invalidated.  Appended as a body comment.")
-@click.option("--at", "invalidated_at",
-              help="ISO-8601 datetime (or date) the memory's facts stopped "
-                   "being true. Defaults to now.")
+@click.option(
+    "--reason",
+    default="",
+    help="Optional one-line note describing why the memory is being "
+    "invalidated.  Appended as a body comment.",
+)
+@click.option(
+    "--at",
+    "invalidated_at",
+    help="ISO-8601 datetime (or date) the memory's facts stopped being true. Defaults to now.",
+)
 def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
     """Mark FILE_PATH as invalidated (set ``invalidated_at`` in frontmatter).
 
@@ -64,10 +70,7 @@ def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
     post.metadata["updated"] = now_iso
 
     if reason:
-        post.content = (
-            post.content.rstrip()
-            + f"\n\n<!-- invalidated {today_date}: {reason} -->\n"
-        )
+        post.content = post.content.rstrip() + f"\n\n<!-- invalidated {today_date}: {reason} -->\n"
 
     target.write_text(frontmatter.dumps(post) + "\n")
     click.echo(f"invalidated {target} (at={post.metadata['invalidated_at']})")

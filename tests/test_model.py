@@ -1,11 +1,12 @@
 """Tests for memory file model parsing."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from memory_tools.model import MemoryFile, parse_file, ValidationError
+from memory_tools.model import MemoryFile, ValidationError, parse_file
 
 
 def test_parse_file_reads_frontmatter_and_body(tmp_path: Path) -> None:
@@ -36,14 +37,7 @@ def test_parse_file_reads_frontmatter_and_body(tmp_path: Path) -> None:
 
 def test_parse_file_accepts_missing_optional_fields(tmp_path: Path) -> None:
     path = tmp_path / "minimal.md"
-    path.write_text(
-        "---\n"
-        "name: Minimal\n"
-        "description: bare minimum\n"
-        "type: always\n"
-        "---\n\n"
-        "body\n"
-    )
+    path.write_text("---\nname: Minimal\ndescription: bare minimum\ntype: always\n---\n\nbody\n")
     f = parse_file(path)
     assert f.tags == []
     assert f.aliases == []
@@ -60,13 +54,7 @@ def test_parse_file_rejects_missing_required_fields(tmp_path: Path) -> None:
 
 def test_parse_file_rejects_invalid_type(tmp_path: Path) -> None:
     path = tmp_path / "bad.md"
-    path.write_text(
-        "---\n"
-        "name: x\n"
-        "description: y\n"
-        "type: invalid_layer\n"
-        "---\n\nbody\n"
-    )
+    path.write_text("---\nname: x\ndescription: y\ntype: invalid_layer\n---\n\nbody\n")
     with pytest.raises(ValidationError) as ei:
         parse_file(path)
     assert "type" in str(ei.value)
@@ -81,14 +69,7 @@ def test_parse_file_rejects_missing_frontmatter(tmp_path: Path) -> None:
 
 def test_parse_file_rejects_non_list_scalar_for_list_field(tmp_path: Path) -> None:
     path = tmp_path / "bad.md"
-    path.write_text(
-        "---\n"
-        "name: x\n"
-        "description: y\n"
-        "type: topic\n"
-        "tags: not-a-list\n"
-        "---\n\nbody\n"
-    )
+    path.write_text("---\nname: x\ndescription: y\ntype: topic\ntags: not-a-list\n---\n\nbody\n")
     with pytest.raises(ValidationError) as ei:
         parse_file(path)
     assert "tags" in str(ei.value)

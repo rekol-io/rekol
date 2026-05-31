@@ -78,13 +78,20 @@ def test_replace_chunks_removes_old_chunks(store: IndexStore, tmp_path: Path) ->
     p = tmp_path / "x.md"
     p.write_text("dummy")
     store.upsert_file(path=str(p), mtime=1, content_hash="h")
-    v = np.zeros(8, dtype=np.float32); v[0] = 1.0
-    store.replace_chunks_for_file(str(p), [
-        dict(heading="A", line_start=1, line_end=2, text="a", tags=[], aliases=[], embedding=v),
-    ])
-    store.replace_chunks_for_file(str(p), [
-        dict(heading="B", line_start=1, line_end=2, text="b", tags=[], aliases=[], embedding=v),
-    ])
+    v = np.zeros(8, dtype=np.float32)
+    v[0] = 1.0
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(heading="A", line_start=1, line_end=2, text="a", tags=[], aliases=[], embedding=v),
+        ],
+    )
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(heading="B", line_start=1, line_end=2, text="b", tags=[], aliases=[], embedding=v),
+        ],
+    )
     all_chunks = store.all_chunks_for_file(str(p))
     assert len(all_chunks) == 1
     assert all_chunks[0]["heading"] == "B"
@@ -94,10 +101,14 @@ def test_delete_file_removes_chunks(store: IndexStore, tmp_path: Path) -> None:
     p = tmp_path / "x.md"
     p.write_text("dummy")
     store.upsert_file(path=str(p), mtime=1, content_hash="h")
-    v = np.zeros(8, dtype=np.float32); v[0] = 1.0
-    store.replace_chunks_for_file(str(p), [
-        dict(heading="A", line_start=1, line_end=2, text="a", tags=[], aliases=[], embedding=v),
-    ])
+    v = np.zeros(8, dtype=np.float32)
+    v[0] = 1.0
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(heading="A", line_start=1, line_end=2, text="a", tags=[], aliases=[], embedding=v),
+        ],
+    )
     store.delete_file(str(p))
     assert store.get_file(str(p)) is None
     assert store.all_chunks_for_file(str(p)) == []

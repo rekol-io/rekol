@@ -1,4 +1,5 @@
 """Tests for docs_convert.extract — text passthrough, empty/oversize/bad-encoding guards."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,7 +9,7 @@ from memory_tools.docs_convert.extract import extract_text, is_text_native
 
 def test_is_text_native_recognises_text_extensions() -> None:
     assert is_text_native(Path("a.md"))
-    assert is_text_native(Path("a.JSON"))   # case-insensitive
+    assert is_text_native(Path("a.JSON"))  # case-insensitive
     assert is_text_native(Path("a.csv"))
 
 

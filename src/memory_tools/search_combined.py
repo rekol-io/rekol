@@ -10,25 +10,27 @@ A query that returns zero memory hits but non-trivial session hits is a
 ``promotion candidate`` — the topic has come up in conversation but lives
 nowhere durable. The caller can surface this via memory-capture.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Literal
 
 from .embeddings import BaseEmbedder
 from .sessions.store import SessionStore
 from .store import IndexStore
-
 
 Source = Literal["memory", "sessions", "all"]
 
 
 @dataclass
 class CombinedSearchResult:
+    """Hits from a combined memory and session search for one query."""
+
     query: str
-    memory_hits: List[dict] = field(default_factory=list)
-    session_hits: List[dict] = field(default_factory=list)
-    sources_queried: List[str] = field(default_factory=list)
+    memory_hits: list[dict] = field(default_factory=list)
+    session_hits: list[dict] = field(default_factory=list)
+    sources_queried: list[str] = field(default_factory=list)
 
     @property
     def is_promotion_candidate(self) -> bool:
@@ -47,10 +49,10 @@ class CombinedSearchResult:
 
 
 def _merge_session_hits(
-    fts_hits: List[dict],
-    vec_hits: List[dict],
+    fts_hits: list[dict],
+    vec_hits: list[dict],
     top_k: int,
-) -> List[dict]:
+) -> list[dict]:
     """Combine FTS and vector hits, dedupe on (session_id, message_uuid), keep top_k by score.
 
     When both FTS5 and vec0 return the same message, we keep the higher-score
@@ -76,8 +78,8 @@ def _merge_session_hits(
 def search_all(
     query: str,
     embedder: BaseEmbedder,
-    memory_store: Optional[IndexStore] = None,
-    session_store: Optional[SessionStore] = None,
+    memory_store: IndexStore | None = None,
+    session_store: SessionStore | None = None,
     source: Source = "all",
     memory_top_k: int = 5,
     sessions_top_k: int = 5,

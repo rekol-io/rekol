@@ -1,13 +1,11 @@
 """Tests for classifier: deterministic mapping + LLM fallback."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from memory_tools.migrate.classify import (
-    Classification,
     build_classifier_prompt,
     classify_file,
     heuristic_classify,
@@ -26,10 +24,7 @@ def _mk_file(tmp_path: Path, name: str, body: str) -> LegacyFile:
 
 
 def test_heuristic_feedback_routes_to_when(tmp_path: Path) -> None:
-    body = (
-        "---\nname: Foo feedback\ndescription: d\ntype: feedback\n---\n\n"
-        "Foo rule body."
-    )
+    body = "---\nname: Foo feedback\ndescription: d\ntype: feedback\n---\n\nFoo rule body."
     lf = _mk_file(tmp_path, "feedback_foo.md", body)
     c = heuristic_classify(lf)
     assert c is not None
@@ -37,7 +32,7 @@ def test_heuristic_feedback_routes_to_when(tmp_path: Path) -> None:
     assert c.method == "heuristic"
     assert c.frontmatter["name"] == "Foo feedback"
     assert c.frontmatter["description"] == "d"
-    assert c.frontmatter["type"] == "when"   # rewritten — feedback→when
+    assert c.frontmatter["type"] == "when"  # rewritten — feedback→when
     assert "Foo rule body" in c.body
 
 
@@ -142,8 +137,10 @@ def test_classify_file_defaults_to_knowledge_when_llm_disabled(tmp_path: Path) -
 
 def test_classify_file_defaults_to_knowledge_when_llm_unavailable(tmp_path: Path) -> None:
     lf = _mk_file(tmp_path, "x.md", "# just body")
-    with patch("memory_tools.migrate.classify.call_claude_classifier",
-               side_effect=LLMUnavailable("no claude")):
+    with patch(
+        "memory_tools.migrate.classify.call_claude_classifier",
+        side_effect=LLMUnavailable("no claude"),
+    ):
         c = classify_file(lf, index_context="", allow_llm=True)
     assert c.layer == "knowledge"
     assert c.method == "heuristic"
