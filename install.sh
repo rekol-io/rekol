@@ -13,6 +13,7 @@
 #   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
 #   --tools-home P  override default ~/.local/share/rekol
 #   --bin-dir P     override default ~/bin
+#   --migrate       opt in to importing legacy ~/.claude/projects/*/memory/ content
 #
 # Per Bash standard: using [[ ]] for conditionals, printf instead of echo -e,
 # local for function-scoped vars, SCREAMING_SNAKE_CASE for constants.
@@ -37,6 +38,7 @@ DRY_RUN=0
 DO_HOOK=1
 DO_SKILL=1
 DO_SHELLRC=1
+DO_MIGRATE=0
 TEST_MODE=0
 TOOLS_HOME="$TOOLS_HOME_DEFAULT"
 BIN_DIR="$BIN_DIR_DEFAULT"
@@ -72,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --no-hook)    DO_HOOK=0;                            shift ;;
     --no-skill)   DO_SKILL=0;                           shift ;;
     --no-shellrc) DO_SHELLRC=0;                         shift ;;
+    --migrate)    DO_MIGRATE=1;                         shift ;;
     --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
     --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
     --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
@@ -506,16 +509,19 @@ else
 fi
 
 # =============================================================================
-# Step 10 — Migrate legacy memory (no-op when none found)
+# Step 10 — Migrate legacy memory (opt-in via --migrate)
 # =============================================================================
 # Runs `rekol migrate auto` after seeding to bring any legacy ~/.claude/projects/*/memory/
 # content into $REKOL_HOME.  Idempotent — dirs with a retirement pointer are skipped.
 # Uses --no-llm because Bedrock creds may not be available at install time; users
 # who want LLM classification can rerun `rekol migrate auto --commit` manually.
+# Pass --migrate to opt in; new installs skip this path by default.
 
 say "checking for legacy memory to migrate"
 if [[ "${TEST_MODE}" == "1" ]]; then
   say "test-mode: skipping rekol migrate"
+elif [[ "${DO_MIGRATE}" != "1" ]]; then
+  say "skipping legacy migration (pass --migrate to import ~/.claude/projects/*/memory/ content)"
 else
   # Use the just-installed unified rekol CLI; idempotent, silent on no-op.
   if "${TOOLS_HOME}/.venv/bin/rekol" migrate auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
