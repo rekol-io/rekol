@@ -6,7 +6,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from memory_tools.cli_docs_convert import main as cli_main
+from rekol.cli_docs_convert import main as cli_main
 
 FIXTURE_TREE = Path(__file__).parent / "fixtures" / "docs_tree"
 
@@ -58,8 +58,8 @@ def test_cli_missing_source_dir_exits_2(tmp_path: Path, monkeypatch) -> None:
 
 def test_roundtrip_converted_docs_are_searchable(tmp_path: Path, monkeypatch) -> None:
     """The load-bearing test: synthetic JSONL must satisfy the REAL ingester."""
-    from memory_tools.sessions.ingest import ingest_directory
-    from memory_tools.sessions.store import SessionStore
+    from rekol.sessions.ingest import ingest_directory
+    from rekol.sessions.store import SessionStore
 
     home = tmp_path / "memhome"
     projects = tmp_path / "projects"
@@ -90,7 +90,7 @@ def test_cli_missing_shim_exits_3(tmp_path: Path, monkeypatch) -> None:
     _write_config(home, projects)
     monkeypatch.setenv("MEMORY_HOME", str(home))
     # Force the shim to appear absent so the --index path hits the exit-3 guard.
-    monkeypatch.setattr("memory_tools.cli_docs_convert.shutil.which", lambda _: None)
+    monkeypatch.setattr("rekol.cli_docs_convert.shutil.which", lambda _: None)
 
     runner = CliRunner()
     result = runner.invoke(cli_main, [str(FIXTURE_TREE), "--prefix", "arc", "--index"])
@@ -106,7 +106,7 @@ def test_cli_index_chains_incremental(tmp_path: Path, monkeypatch) -> None:
     _write_config(home, projects)
     monkeypatch.setenv("MEMORY_HOME", str(home))
     monkeypatch.setattr(
-        "memory_tools.cli_docs_convert.shutil.which", lambda _: "/fake/claude-session-index"
+        "rekol.cli_docs_convert.shutil.which", lambda _: "/fake/claude-session-index"
     )
     calls = {}
 
@@ -118,7 +118,7 @@ def test_cli_index_chains_incremental(tmp_path: Path, monkeypatch) -> None:
 
         return R()
 
-    monkeypatch.setattr("memory_tools.cli_docs_convert.subprocess.run", _fake_run)
+    monkeypatch.setattr("rekol.cli_docs_convert.subprocess.run", _fake_run)
 
     runner = CliRunner()
     result = runner.invoke(cli_main, [str(FIXTURE_TREE), "--prefix", "arc", "--index"])

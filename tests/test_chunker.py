@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from memory_tools.chunker import chunk_body
+from rekol.chunker import chunk_body
 
 
 def test_chunk_body_splits_on_headings() -> None:

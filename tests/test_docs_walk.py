@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.docs_convert.walk import group_sessions
+from rekol.docs_convert.walk import group_sessions
 
 
 def _make_tree(root: Path) -> None:

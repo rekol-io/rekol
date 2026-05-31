@@ -21,9 +21,9 @@ from pathlib import Path
 
 import click
 
-from memory_tools.config import load_config
-from memory_tools.embeddings import get_embedder
-from memory_tools.store import IndexStore
+from rekol.config import load_config
+from rekol.embeddings import get_embedder
+from rekol.store import IndexStore
 
 # Common leading whitespace + optional bullet marker, applied uniformly.
 _LEAD = r"^\s*(?:[-*]\s+)?"

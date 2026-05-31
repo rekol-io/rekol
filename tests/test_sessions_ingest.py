@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.sessions.ingest import ingest_file, iter_messages_in_file
-from memory_tools.sessions.store import SessionStore
+from rekol.sessions.ingest import ingest_file, iter_messages_in_file
+from rekol.sessions.store import SessionStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_session.jsonl"
 

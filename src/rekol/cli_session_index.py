@@ -19,9 +19,9 @@ import sys
 
 import click
 
-from memory_tools.config import load_config
-from memory_tools.sessions.ingest import ingest_directory
-from memory_tools.sessions.store import SessionStore
+from rekol.config import load_config
+from rekol.sessions.ingest import ingest_directory
+from rekol.sessions.store import SessionStore
 
 
 @click.command()

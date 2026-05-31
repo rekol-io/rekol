@@ -7,7 +7,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from memory_tools.cli_migrate import main
+from rekol.cli_migrate import main
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-project" / "memory"
 

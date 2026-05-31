@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memory_tools.migrate.archive import (
+from rekol.migrate.archive import (
     MIGRATION_MARKER_NAME,
     archive_file,
     write_retirement_pointer,
 )
-from memory_tools.migrate.discover import (
+from rekol.migrate.discover import (
     LegacyFile,
     has_migration_marker,
     is_retirement_pointer,

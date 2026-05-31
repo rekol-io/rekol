@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_tools.docs_convert.writer import _safe_filename, write_sessions
+from rekol.docs_convert.writer import _safe_filename, write_sessions
 
 
 def test_write_sessions_writes_one_jsonl_per_session(tmp_path: Path) -> None:
