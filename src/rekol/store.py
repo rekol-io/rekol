@@ -134,8 +134,13 @@ class IndexStore:
         self,
         file_path: str,
         chunks: list[dict[str, Any]],
+        *,
+        created: str | None = None,
+        updated: str | None = None,
+        valid_from: str | None = None,
+        invalidated_at: str | None = None,
     ) -> None:
-        """Replace all chunks for a file with ``chunks``, storing their embeddings."""
+        """Replace a file's chunks; the four file-level timestamps go on each row."""
         cur = self.conn.cursor()
         cur.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
         for c in chunks:
@@ -144,7 +149,8 @@ class IndexStore:
                 emb = emb.astype(np.float32)
             cur.execute(
                 "INSERT INTO chunks(file_path, heading, line_start, line_end, "
-                "text, tags_json, aliases_json, embedding) VALUES(?,?,?,?,?,?,?,?)",
+                "text, tags_json, aliases_json, created, updated, valid_from, "
+                "invalidated_at, embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     file_path,
                     c.get("heading"),
@@ -153,6 +159,10 @@ class IndexStore:
                     c["text"],
                     json.dumps(c.get("tags", [])),
                     json.dumps(c.get("aliases", [])),
+                    created,
+                    updated,
+                    valid_from,
+                    invalidated_at,
                     emb.tobytes(),
                 ),
             )

@@ -146,3 +146,38 @@ def test_legacy_schema_needs_migration(tmp_path: Path) -> None:
     s.conn.commit()
     assert s.needs_schema_migration() is True
     s.close()
+
+
+def test_replace_chunks_persists_file_timestamps(store: IndexStore, tmp_path: Path) -> None:
+    p = tmp_path / "topics" / "x.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("dummy")
+    store.upsert_file(path=str(p), mtime=1, content_hash="h")
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(
+                heading=None,
+                line_start=1,
+                line_end=2,
+                text="t",
+                tags=[],
+                aliases=[],
+                embedding=np.ones(8, dtype=np.float32),
+            )
+        ],
+        created="2026-01-01",
+        updated="2026-02-01",
+        valid_from="2026-01-01",
+        invalidated_at=None,
+    )
+    row = store.conn.execute(
+        "SELECT created, updated, valid_from, invalidated_at FROM chunks WHERE file_path=?",
+        (str(p),),
+    ).fetchone()
+    assert (row["created"], row["updated"], row["valid_from"], row["invalidated_at"]) == (
+        "2026-01-01",
+        "2026-02-01",
+        "2026-01-01",
+        None,
+    )
