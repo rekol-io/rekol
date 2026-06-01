@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pytest
 
-from rekol.model import MemoryFile, ValidationError, parse_file
+from rekol.model import MemoryFile, ValidationError, _normalize_ts, parse_file
 
 
 def test_parse_file_reads_frontmatter_and_body(tmp_path: Path) -> None:
@@ -74,3 +75,32 @@ def test_parse_file_rejects_non_list_scalar_for_list_field(tmp_path: Path) -> No
         parse_file(path)
     assert "tags" in str(ei.value)
     assert "must be a list" in str(ei.value)
+
+
+def test_normalize_ts_date_object_date_only():
+    assert _normalize_ts(dt.date(2026, 5, 31), date_only=True) == "2026-05-31"
+
+
+def test_normalize_ts_datetime_object_date_only():
+    val = dt.datetime(2026, 5, 31, 10, 0, 0)
+    assert _normalize_ts(val, date_only=True) == "2026-05-31"
+
+
+def test_normalize_ts_datetime_full_uses_T_separator():
+    val = dt.datetime(2026, 5, 31, 10, 0, 0)
+    assert _normalize_ts(val, date_only=False) == "2026-05-31T10:00:00"
+
+
+def test_normalize_ts_space_separated_string_canonicalizes_to_T():
+    assert (
+        _normalize_ts("2026-05-31 10:00:00+00:00", date_only=False) == "2026-05-31T10:00:00+00:00"
+    )
+
+
+def test_normalize_ts_string_date_only_truncates():
+    assert _normalize_ts("2026-05-31T10:00:00-07:00", date_only=True) == "2026-05-31"
+
+
+def test_normalize_ts_none_and_empty():
+    assert _normalize_ts(None, date_only=True) is None
+    assert _normalize_ts("", date_only=False) is None

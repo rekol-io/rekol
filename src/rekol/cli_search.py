@@ -19,23 +19,54 @@ from __future__ import annotations
 
 import json as json_mod
 import sys
-from datetime import UTC, datetime
+from datetime import date, datetime
+from pathlib import Path
 
 import click
 
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
+from rekol.ranking import _as_date, _layer_of
 from rekol.search_combined import Source, search_all
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 from rekol.store import IndexStore
 
 
 def _format_session_timestamp(ts_unix: int) -> str:
-    """Format a unix timestamp as YYYY-MM-DD for the text-output session line."""
+    """Format a unix timestamp as YYYY-MM-DD in local time for the session line."""
     try:
-        return datetime.fromtimestamp(ts_unix, tz=UTC).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts_unix).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return "unknown"
+
+
+def _review_tag(
+    hit: dict,
+    *,
+    memory_home: Path,
+    exempt_layers: list[str],
+    interval_days: int,
+    today: date,
+) -> str:
+    """Return ' [review?]' for an overdue durable (exempt-layer) hit, else ''."""
+    if _layer_of(hit["file_path"], memory_home) not in set(exempt_layers):
+        return ""
+    ref = _as_date(hit.get("updated") or hit.get("created"))
+    if ref is None or (today - ref).days > interval_days:
+        return " [review?]"
+    return ""
+
+
+def _relative_age(day: date, *, today: date) -> str:
+    """Phrase the age of ``day`` relative to ``today`` (e.g. '3 weeks ago')."""
+    days = (today - day).days
+    if days <= 0:
+        return "today"
+    for unit, span in (("year", 365), ("month", 30), ("week", 7), ("day", 1)):
+        if days >= span:
+            value = days // span
+            return f"{value} {unit}{'s' if value > 1 else ''} ago"
+    return "today"
 
 
 def _render_text(
@@ -57,8 +88,13 @@ def _render_text(
         lines.append(f"━━ FROM MEMORY (curated, {len(result.memory_hits)} hits) ━━━━━━━━━━━━━━")
         for h in result.memory_hits:
             heading = f" #{h['heading']}" if h.get("heading") else ""
+            rel = f" ({h['updated_rel']})" if h.get("updated_rel") else ""
+            ts = f" · updated {h['updated']}{rel}" if h.get("updated") else ""
+            inv = " [INVALIDATED]" if h.get("invalidated_at") else ""
             lines.append(
-                f"{h['score']:.3f}  {h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']})"
+                f"{h.get('final_score', h['cosine_score']):.3f}  "
+                f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']}){ts}{inv}"
+                f"{h.get('review_tag', '')}"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
@@ -69,7 +105,8 @@ def _render_text(
             date_str = _format_session_timestamp(h["timestamp_unix"])
             cwd = h.get("cwd") or "?"
             session_id_short = h["session_id"][:8]
-            lines.append(f"{h['score']:.3f}  {date_str} — {cwd} — session {session_id_short}")
+            srel = f" ({h['ts_rel']})" if h.get("ts_rel") else ""
+            lines.append(f"{h['score']:.3f}  {date_str}{srel} — {cwd} — session {session_id_short}")
             lines.append(f"    [{h['role']}] {h['content'][:200]}")
             lines.append("")
     if promote_candidates and result.is_promotion_candidate:
@@ -109,12 +146,19 @@ def _render_text(
     is_flag=True,
     help="Output results as a single JSON object.",
 )
+@click.option(
+    "--include-invalidated",
+    is_flag=True,
+    default=False,
+    help="Include invalidated memories (tagged; ranked below live hits).",
+)
 def main(
     query: tuple[str, ...],
     top_k: int,
     source: Source,
     promote_candidates: bool,
     as_json: bool,
+    include_invalidated: bool,
 ) -> None:
     r"""Search memory and conversation transcripts. Layered output by default.
 
@@ -135,6 +179,13 @@ def main(
         # init_schema() so a missing DB doesn't crash the CLI on first run
         memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
         memory_store.init_schema()
+        if memory_store.needs_schema_migration():
+            memory_store.close()
+            click.echo(
+                "curated index schema is out of date — run `rekol index rebuild`",
+                err=True,
+            )
+            sys.exit(1)
     if source in ("sessions", "all") and cfg.session_search_enabled:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
@@ -158,7 +209,28 @@ def main(
             source=source,
             memory_top_k=top_k,
             sessions_top_k=top_k,
+            config=cfg,
+            include_invalidated=include_invalidated,
         )
+        review_today = date.today()
+        for hit in result.memory_hits:
+            hit["review_tag"] = _review_tag(
+                hit,
+                memory_home=cfg.memory_home,
+                exempt_layers=cfg.temporal_recency_exempt_layers,
+                interval_days=cfg.temporal_confirm_interval_days,
+                today=review_today,
+            )
+            updated_date = _as_date(hit.get("updated"))
+            hit["updated_rel"] = (
+                _relative_age(updated_date, today=review_today) if updated_date else ""
+            )
+        for hit in result.session_hits:
+            try:
+                session_date = datetime.fromtimestamp(hit["timestamp_unix"]).date()
+                hit["ts_rel"] = _relative_age(session_date, today=review_today)
+            except (OverflowError, OSError, ValueError, KeyError):
+                hit["ts_rel"] = ""
         if as_json:
             click.echo(
                 json_mod.dumps(
@@ -170,7 +242,12 @@ def main(
                                 heading=h.get("heading"),
                                 line_start=h["line_start"],
                                 line_end=h["line_end"],
-                                score=h["score"],
+                                created=h.get("created"),
+                                updated=h.get("updated"),
+                                valid_from=h.get("valid_from"),
+                                invalidated_at=h.get("invalidated_at"),
+                                cosine_score=h["cosine_score"],
+                                final_score=h.get("final_score", h["cosine_score"]),
                                 tags=h.get("tags", []),
                                 aliases=h.get("aliases", []),
                                 snippet=h["text"][:300],

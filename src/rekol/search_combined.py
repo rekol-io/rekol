@@ -13,10 +13,13 @@ nowhere durable. The caller can surface this via memory-capture.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .config import Config
 from .embeddings import BaseEmbedder
+from .ranking import apply_temporal_ranking
 from .sessions.store import SessionStore
 from .store import IndexStore
 
@@ -31,6 +34,7 @@ class CombinedSearchResult:
     memory_hits: list[dict] = field(default_factory=list)
     session_hits: list[dict] = field(default_factory=list)
     sources_queried: list[str] = field(default_factory=list)
+    memory_filtered_count: int = 0
 
     @property
     def is_promotion_candidate(self) -> bool:
@@ -44,6 +48,7 @@ class CombinedSearchResult:
         return (
             "memory" in self.sources_queried
             and len(self.memory_hits) == 0
+            and self.memory_filtered_count == 0
             and len(self.session_hits) > 0
         )
 
@@ -83,6 +88,9 @@ def search_all(
     source: Source = "all",
     memory_top_k: int = 5,
     sessions_top_k: int = 5,
+    *,
+    config: Config | None = None,
+    include_invalidated: bool = False,
 ) -> CombinedSearchResult:
     """Run the query against one or both stores and return layered results.
 
@@ -96,7 +104,25 @@ def search_all(
     query_vec = embedder.embed(query)
 
     if source in ("memory", "all") and memory_store is not None:
-        result.memory_hits = memory_store.search(query_vec, top_k=memory_top_k)
+        # Over-fetch then temporally rank, so the final top-k is by final_score
+        # and isn't starved when the cosine top-k contains invalidated hits.
+        raw = memory_store.search(query_vec, top_k=max(memory_top_k * 5, 25))
+        if config is not None:
+            ranked, filtered = apply_temporal_ranking(
+                raw,
+                memory_home=config.memory_home,
+                today=dt.date.today(),
+                recency_weight=config.temporal_recency_weight,
+                recency_halflife_days=config.temporal_recency_halflife_days,
+                exempt_layers=config.temporal_recency_exempt_layers,
+                exclude_invalidated=config.temporal_exclude_invalidated,
+                respect_valid_from=config.temporal_respect_valid_from,
+                include_invalidated=include_invalidated,
+            )
+            result.memory_hits = ranked[:memory_top_k]
+            result.memory_filtered_count = filtered
+        else:
+            result.memory_hits = raw[:memory_top_k]
         result.sources_queried.append("memory")
 
     if source in ("sessions", "all") and session_store is not None:

@@ -117,3 +117,57 @@ def test_search_all_source_sessions_alone_does_not_flag_promotion(tmp_path: Path
     assert "sessions" in result.sources_queried
     assert "memory" not in result.sources_queried
     assert result.is_promotion_candidate is False
+
+
+def test_filtered_count_suppresses_promotion_candidate() -> None:
+    r = CombinedSearchResult(
+        query="q",
+        memory_hits=[],
+        session_hits=[{"x": 1}],
+        sources_queried=["memory", "sessions"],
+        memory_filtered_count=2,
+    )
+    assert r.is_promotion_candidate is False  # matches exist but were filtered
+
+
+def test_promotion_candidate_when_truly_empty() -> None:
+    r = CombinedSearchResult(
+        query="q",
+        memory_hits=[],
+        session_hits=[{"x": 1}],
+        sources_queried=["memory", "sessions"],
+        memory_filtered_count=0,
+    )
+    assert r.is_promotion_candidate is True
+
+
+def test_search_all_applies_temporal_ranking_with_config(tmp_path: Path, monkeypatch) -> None:
+    from rekol.config import load_config
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    cfg = load_config()
+    store = IndexStore(db_path=cfg.index_db_path, dim=384)
+    store.init_schema()
+    emb = HashingEmbedder(dim=384)
+    for name, inv in (("live", None), ("bad", "2026-03-01")):
+        fp = str(tmp_path / "topics" / f"{name}.md")
+        store.upsert_file(fp, mtime=1, content_hash=name)
+        store.replace_chunks_for_file(
+            fp,
+            [
+                dict(
+                    heading=None,
+                    line_start=1,
+                    line_end=1,
+                    text="deploy process",
+                    tags=[],
+                    aliases=[],
+                    embedding=emb.embed("deploy process"),
+                )
+            ],
+            invalidated_at=inv,
+        )
+    res = search_all("deploy process", emb, memory_store=store, source="memory", config=cfg)
+    assert len(res.memory_hits) == 1  # the invalidated one is excluded
+    assert res.memory_filtered_count == 1
+    store.close()

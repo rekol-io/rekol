@@ -56,7 +56,8 @@ def test_memory_search_cli_json(tmp_path: Path, monkeypatch) -> None:
     hits = data["memory"]
     assert len(hits) >= 1
     assert any("prometheus" in hit["file_path"].lower() for hit in hits)
-    assert "score" in hits[0]
+    assert "cosine_score" in hits[0]
+    assert "final_score" in hits[0]
     assert "memory" in data["sources_queried"]
 
 
@@ -569,3 +570,147 @@ def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
     assert "(top 0)" not in result.output, result.output
     # promote-candidates surface should mention session count + zero memory hits
     assert "promotion candidate" in result.output.lower()
+
+
+def test_search_has_include_invalidated_flag() -> None:
+    res = CliRunner().invoke(search_main, ["--help"])
+    assert "--include-invalidated" in res.output
+
+
+def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    idx = tmp_path / ".index"
+    idx.mkdir()
+    con = sqlite3.connect(idx / "index.db")
+    con.execute(
+        "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"
+    )
+    con.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, "
+        "line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB)"
+    )
+    con.commit()
+    con.close()
+    res = CliRunner().invoke(search_main, ["something", "--source", "memory"])
+    assert "rekol index rebuild" in res.output
+
+
+def test_overdue_durable_tag_helper() -> None:
+    import datetime as dt
+    from pathlib import Path
+
+    from rekol.cli_search import _review_tag
+
+    hit = {"file_path": "/m/knowledge/x.md", "updated": "2020-01-01"}
+    assert (
+        _review_tag(
+            hit,
+            memory_home=Path("/m"),
+            exempt_layers=["knowledge"],
+            interval_days=180,
+            today=dt.date(2026, 6, 1),
+        )
+        == " [review?]"
+    )
+    fresh = {"file_path": "/m/topics/y.md", "updated": "2026-05-31"}
+    assert (
+        _review_tag(
+            fresh,
+            memory_home=Path("/m"),
+            exempt_layers=["knowledge"],
+            interval_days=180,
+            today=dt.date(2026, 6, 1),
+        )
+        == ""
+    )
+
+
+def test_relative_phrasing_helper() -> None:
+    import datetime as dt
+
+    from rekol.cli_search import _relative_age
+
+    assert _relative_age(dt.date(2026, 5, 11), today=dt.date(2026, 6, 1)) == "3 weeks ago"
+    assert _relative_age(dt.date(2026, 6, 1), today=dt.date(2026, 6, 1)) == "today"
+
+
+def test_search_json_includes_timestamp_fields(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text(
+        "embedding_model: test-hashing\nsession_search_enabled: false\n"
+    )
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "t.md").write_text(
+        "---\nname: t\ndescription: d\ntype: topic\ncreated: 2026-01-01\nupdated: 2026-02-01\n---\n"
+        "deploy process notes\n"
+    )
+    CliRunner().invoke(index_main, ["rebuild"])
+    res = CliRunner().invoke(search_main, ["deploy process", "--source", "memory", "--json"])
+    assert res.exit_code == 0, res.output
+    hit = json.loads(res.output)["memory"][0]
+    for key in (
+        "created",
+        "updated",
+        "valid_from",
+        "invalidated_at",
+        "cosine_score",
+        "final_score",
+    ):
+        assert key in hit
+    assert hit["updated"] == "2026-02-01"
+
+
+def test_capture_instructs_on_legacy_schema(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    idx = tmp_path / ".index"
+    idx.mkdir()
+    con = sqlite3.connect(idx / "index.db")
+    con.execute(
+        "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"
+    )
+    con.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, "
+        "line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB)"
+    )
+    con.commit()
+    con.close()
+    res = CliRunner().invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "x.md",
+            "--name",
+            "X",
+            "--description",
+            "d",
+            "--body",
+            "a body long enough to index",
+        ],
+    )
+    assert res.exit_code == 1
+    assert "rekol index rebuild" in res.output
+
+
+def test_session_timestamp_renders_local_date(monkeypatch) -> None:
+    import datetime as dt
+    import time
+
+    from rekol.cli_search import _format_session_timestamp
+
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        # 2026-06-01T05:00:00Z is 2026-05-31 22:00 PDT — render the LOCAL day, not UTC.
+        ts = int(dt.datetime(2026, 6, 1, 5, 0, 0, tzinfo=dt.UTC).timestamp())
+        assert _format_session_timestamp(ts) == "2026-05-31"
+    finally:
+        monkeypatch.undo()
+        time.tzset()

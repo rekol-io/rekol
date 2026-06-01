@@ -156,7 +156,7 @@ The `rekol` command installs to `$REKOL_HOME/../bin` (added to `$PATH` by `mac_s
 
 ## Hooks
 
-Registered in `~/.claude/settings.json` by `phase3_memory.sh`. Snippets live at `rekol/hooks/*.json`.
+Registered in `~/.claude/settings.json` by `install.sh`. Snippets live at `rekol/hooks/*.json`.
 
 | Hook | Event | Purpose |
 |---|---|---|
@@ -164,6 +164,8 @@ Registered in `~/.claude/settings.json` by `phase3_memory.sh`. Snippets live at 
 | `sessionstart-snippet.json` | SessionStart | Re-inject `MEMORY.md` into the session context |
 | `sessionend-snippet.json` | SessionEnd | Reindex memory (safety net) + run `rekol session-index --incremental` |
 | `posttooluse-snippet.json` | PostToolUse | Wraps `auto-reindex.sh` for the harness |
+| `userpromptsubmit-snippet.json` | UserPromptSubmit | Inject an `<env-time>` block (local/UTC + elapsed-since-last-user/assistant) via `rekol _hook time-context` |
+| `stop-snippet.json` | Stop | Record the assistant-completion timestamp via `rekol _hook record-stop` |
 
 ## Capture & autonomy policy
 
@@ -203,7 +205,7 @@ The phase script:
 1. Creates `$REKOL_HOME` if absent (default `~/Dropbox/memory`)
 2. Installs the Python package (`pip install -e .` against `rekol/`)
 3. Installs the `rekol` CLI into the user's `$PATH`
-4. Merges the three hook snippets into `~/.claude/settings.json` (with timestamped backup)
+4. Merges the hook snippets (SessionStart, PostToolUse, SessionEnd, UserPromptSubmit, Stop) into `~/.claude/settings.json` (with timestamped backup)
 5. Runs initial vector index build over existing memory markdown
 6. Runs initial session-search backfill over `~/.claude/projects/*/*.jsonl`
 7. Writes an install journal to `$REKOL_HOME/.install-journal-<timestamp>.log`
@@ -233,4 +235,5 @@ If the user later wants cross-machine session search, the resolution is **not** 
 - **2026-04-27** — Initial design drafted in `cassandra-team-workspace/docs/superpowers/specs/2026-04-27-persistent-memory-system-design.md`. Four-layer model, vector index, `memory-*` CLI surface, phase 3 install via mac_setup.
 - **2026-05-28** — Spec moved out of cassandra-team-workspace (retired) to live with the code in `memory-tools/docs/`. Filename de-dated per [`when-writing-specs`](../../../memory/when/when-writing-specs.md). Added session-search layer: hybrid FTS5+vec0 over `~/.claude/projects/*/*.jsonl`, layered presentation in `memory-search`, sibling `sessions.db`, incremental on SessionEnd, promotion-candidate workflow. Established per-machine vs synced state policy explicitly.
 - **2026-05-31** — Closed the gap between this spec and the code: session embeddings are now actually computed on ingest (the `--embed` flag was previously a no-op stub), so transcript search is genuinely hybrid FTS5+vec0 rather than keyword-only, sharing the curated-memory embedding model. `install.sh` now wires the SessionEnd transcript-index hook (Step 7D) and runs the initial session backfill at install (Step 9.5) — both were described here as done but were not yet implemented.
+- **2026-05-31** — Temporal grounding (build): curated retrieval is now time-aware (timestamps carried to the index; invalidated excluded by default, `valid_from` respected, layer-aware recency that treats `always/`+`knowledge/` as always-current). REKOL ships its own time hook — `rekol _hook time-context`/`record-stop` (UserPromptSubmit + Stop, install Steps 7E/7F) — replacing the external `mac_setup` time component; install warns and skips if the legacy hook is still present (run the mac_setup uninstall, then re-run `rekol install`). A durable-memory re-confirmation loop (`rekol review` + SessionEnd nudge + inline `[review?]` tag) is specified as Workstream D. See [`temporal-grounding-design.md`](temporal-grounding-design.md).
 - **2026-05-30** — Rebranded `memory-tools` → **REKOL**. Python package renamed `memory_tools` → `rekol`; the eight `memory-*` console scripts unified under a single `rekol` command (`rekol search`, `rekol index`, `rekol capture`, `rekol session-index`, `rekol import`, etc.). Data-directory env var is now `REKOL_HOME`, with `MEMORY_HOME` retained as a fallback. Data-level filenames (`MEMORY.md`, `memory.config.yaml`, the `skill/memory/` dir) are held stable for safety and deferred to a later genericization pass.

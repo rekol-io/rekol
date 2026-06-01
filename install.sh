@@ -474,6 +474,114 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7E — UserPromptSubmit time-context hook merge into settings.json
+# =============================================================================
+# Wires userpromptsubmit-snippet.json so each turn gets an <env-time> block from
+# REKOL's own hook (replacing the external mac_setup time component). Idempotency
+# is keyed on the `rekol _hook time-context` command. Double-injection guard: if
+# a legacy mac_setup inject-time-context.sh hook is still present we do NOT add a
+# second injector and we warn — run the mac_setup uninstall, then re-run install.
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_UPS="${COMPONENT_DIR}/hooks/userpromptsubmit-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing UserPromptSubmit snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_UPS}"
+  else
+    HAS_LEGACY_TIME="$(
+      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. | test("inject-time-context.sh"))' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+    HAS_REKOL_TIME="$(
+      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_LEGACY_TIME" == "true" ]]; then
+      say "Legacy mac_setup time hook detected — rekol's time hook was NOT installed. Run the mac_setup uninstall, then re-run 'rekol install'."
+    elif [[ "$HAS_REKOL_TIME" == "true" ]]; then
+      say "UserPromptSubmit time-context hook already present — no-op"
+    else
+      local_settings_ups_backup="${SETTINGS_JSON}.bak-ups-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_ups_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ups_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_UPS}' \
+        '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + \$snip[0].hooks.UserPromptSubmit)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED UserPromptSubmit time-context hook into ${SETTINGS_JSON}"
+      say "added UserPromptSubmit time-context hook to ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
+# Step 7F — Stop record-stop hook merge into settings.json
+# =============================================================================
+# Wires stop-snippet.json so the assistant-completion timestamp is recorded for
+# the next turn's elapsed deltas. Idempotency keyed on `rekol _hook record-stop`.
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_STOP="${COMPONENT_DIR}/hooks/stop-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing Stop snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_STOP}"
+  else
+    HAS_STOP_HOOK="$(
+      jq '[.hooks.Stop[]?.hooks[]?.command] | any(. == "rekol _hook record-stop")' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_STOP_HOOK" == "true" ]]; then
+      say "Stop record-stop hook already present — no-op"
+    else
+      local_settings_stop_backup="${SETTINGS_JSON}.bak-stop-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_stop_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_stop_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_STOP}' \
+        '.hooks.Stop = ((.hooks.Stop // []) + \$snip[0].hooks.Stop)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED Stop record-stop hook into ${SETTINGS_JSON}"
+      say "added Stop record-stop hook to ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
+# Step 7G — ensure the durable-memory review nudge is wired into SessionEnd
+# =============================================================================
+# Step 7D merges the whole SessionEnd block on a fresh install (which now
+# includes a `rekol review --nudge` handler). But on a machine that already had
+# the earlier two-handler SessionEnd block, Step 7D no-ops (keyed on the
+# session-index command), so the newer nudge handler would never be added. This
+# step adds the nudge as its own SessionEnd entry iff it is absent — idempotent
+# on fresh installs (where Step 7D already added it).
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  HAS_NUDGE="$(
+    jq '[.hooks.SessionEnd[]?.hooks[]?.command] | any(. == "rekol review --nudge")' \
+      "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+  if [[ "$HAS_NUDGE" == "true" ]]; then
+    say "SessionEnd review-nudge handler already present — no-op"
+  else
+    local_settings_nudge_backup="${SETTINGS_JSON}.bak-nudge-${TS}"
+    run "cp '${SETTINGS_JSON}' '${local_settings_nudge_backup}'"
+    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_nudge_backup}"
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \"rekol review --nudge\"}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "MERGED SessionEnd review-nudge handler into ${SETTINGS_JSON}"
+    say "added SessionEnd review-nudge handler to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,
@@ -557,10 +665,18 @@ fi
 # Run rebuild on first install; update on subsequent runs.
 
 if [[ -f "${RESOLVED_HOME}/.index/index.db" ]]; then
-  say "existing index found — running rekol index update"
-  # Invoke the single venv entrypoint directly so the correct venv is used even
-  # when --tools-home overrides the default ~/.local/share/rekol path.
-  run "'${TOOLS_HOME}/.venv/bin/rekol' index update"
+  # Update on a current index; rebuild if it is a legacy (pre-timestamp) schema.
+  # `rekol index update` exits non-zero and instructs a rebuild on an outdated
+  # schema — that must NOT abort the install (it would skip the Step 9.5 session
+  # backfill), so we catch it and rebuild. Invoke the venv entrypoint directly so
+  # the correct venv is used when --tools-home overrides the default.
+  say "existing index found — running rekol index update (rebuild if schema is outdated)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "DRY-RUN: '${TOOLS_HOME}/.venv/bin/rekol' index update (or rebuild on a legacy schema)"
+  elif ! "${TOOLS_HOME}/.venv/bin/rekol" index update; then
+    say "index update did not apply (legacy schema) — running rekol index rebuild"
+    "${TOOLS_HOME}/.venv/bin/rekol" index rebuild
+  fi
 else
   say "no index found — running rekol index rebuild"
   run "'${TOOLS_HOME}/.venv/bin/rekol' index rebuild"

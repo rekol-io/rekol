@@ -14,6 +14,7 @@ import click
 import yaml
 
 from rekol.chunker import chunk_body
+from rekol.cli_common import guard_curated_schema
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -169,6 +170,7 @@ def main(
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
+    guard_curated_schema(store)
 
     # Conflict check: chunk the candidate body the same way the indexer does,
     # then check each chunk against existing stored chunks.  Embedding the
