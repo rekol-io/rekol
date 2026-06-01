@@ -474,6 +474,85 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7E — UserPromptSubmit time-context hook merge into settings.json
+# =============================================================================
+# Wires userpromptsubmit-snippet.json so each turn gets an <env-time> block from
+# REKOL's own hook (replacing the external mac_setup time component). Idempotency
+# is keyed on the `rekol _hook time-context` command. Double-injection guard: if
+# a legacy mac_setup inject-time-context.sh hook is still present we do NOT add a
+# second injector and we warn — run the mac_setup uninstall, then re-run install.
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_UPS="${COMPONENT_DIR}/hooks/userpromptsubmit-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing UserPromptSubmit snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_UPS}"
+  else
+    HAS_LEGACY_TIME="$(
+      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. | test("inject-time-context.sh"))' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+    HAS_REKOL_TIME="$(
+      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_LEGACY_TIME" == "true" ]]; then
+      say "Legacy mac_setup time hook detected — rekol's time hook was NOT installed. Run the mac_setup uninstall, then re-run 'rekol install'."
+    elif [[ "$HAS_REKOL_TIME" == "true" ]]; then
+      say "UserPromptSubmit time-context hook already present — no-op"
+    else
+      local_settings_ups_backup="${SETTINGS_JSON}.bak-ups-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_ups_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ups_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_UPS}' \
+        '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + \$snip[0].hooks.UserPromptSubmit)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED UserPromptSubmit time-context hook into ${SETTINGS_JSON}"
+      say "added UserPromptSubmit time-context hook to ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
+# Step 7F — Stop record-stop hook merge into settings.json
+# =============================================================================
+# Wires stop-snippet.json so the assistant-completion timestamp is recorded for
+# the next turn's elapsed deltas. Idempotency keyed on `rekol _hook record-stop`.
+
+if [[ "$DO_HOOK" == "1" ]]; then
+  SNIPPET_STOP="${COMPONENT_DIR}/hooks/stop-snippet.json"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    say "jq not found; printing Stop snippet — merge manually into ${SETTINGS_JSON}"
+    cat "${SNIPPET_STOP}"
+  else
+    HAS_STOP_HOOK="$(
+      jq '[.hooks.Stop[]?.hooks[]?.command] | any(. == "rekol _hook record-stop")' \
+        "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    )"
+
+    if [[ "$HAS_STOP_HOOK" == "true" ]]; then
+      say "Stop record-stop hook already present — no-op"
+    else
+      local_settings_stop_backup="${SETTINGS_JSON}.bak-stop-${TS}"
+      run "cp '${SETTINGS_JSON}' '${local_settings_stop_backup}'"
+      log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_stop_backup}"
+
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      run "jq --slurpfile snip '${SNIPPET_STOP}' \
+        '.hooks.Stop = ((.hooks.Stop // []) + \$snip[0].hooks.Stop)' \
+        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MERGED Stop record-stop hook into ${SETTINGS_JSON}"
+      say "added Stop record-stop hook to ${SETTINGS_JSON}"
+    fi
+  fi
+fi
+
+# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,
