@@ -145,6 +145,67 @@ def test_session_index_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypa
     assert "8-dim" in result.output and "384-dim" in result.output
 
 
+def test_session_index_recreates_empty_stale_vec_table(tmp_path: Path, monkeypatch) -> None:
+    """An empty vec table at a stale width (e.g. left by a --no-embed run under a
+    non-default model) must NOT force a destructive rebuild — it is recreated at
+    the model's width and embedding proceeds.
+    """
+    home = _setup_home(tmp_path, monkeypatch)  # test-hashing => 384-dim
+    db_path = home / ".index" / "sessions.db"
+
+    # Pre-create an EMPTY index at a different width (no embeddings written).
+    store = SessionStore(db_path=db_path, dim=8)
+    store.init_schema()
+    assert store.count_embeddings() == 0
+    store.close()
+
+    result = CliRunner().invoke(cli_main, ["--full"])
+    assert result.exit_code == 0, result.output
+    assert "messages_inserted=3" in result.output
+
+    store = SessionStore(db_path=db_path, dim=384)
+    store.init_schema()
+    query_vec = HashingEmbedder(dim=384).embed("second user turn with list content")
+    hits = store.search_vec(query_vec, top_k=3)
+    store.close()
+    assert hits and hits[0]["message_uuid"] == "u-3"
+
+
+def test_search_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """The read path must surface the same actionable dim-mismatch message as
+    ingest, not let sqlite-vec raise a cryptic width error mid-query.
+    """
+    from rekol.cli_search import main as search_main
+
+    home = _setup_home(tmp_path, monkeypatch)  # test-hashing => 384-dim
+    db_path = home / ".index" / "sessions.db"
+
+    # A populated index at a different width than the configured model.
+    store = SessionStore(db_path=db_path, dim=8)
+    store.init_schema()
+    rid = store.insert_message(
+        dict(
+            session_id="s-1",
+            message_uuid="u-1",
+            parent_uuid=None,
+            role="user",
+            content="hello",
+            cwd="/tmp/repo",
+            timestamp_iso="2026-05-28T20:00:00Z",
+            timestamp_unix=1748462400,
+            jsonl_path="/fake.jsonl",
+            line_number=2,
+        )
+    )
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.zeros(8, dtype=np.float32))
+    store.close()
+
+    result = CliRunner().invoke(search_main, ["--source", "sessions", "hello"])
+    assert result.exit_code == 2, result.output
+    assert "8-dim" in result.output and "384-dim" in result.output
+
+
 def test_session_index_embed_heals_a_no_embed_index(tmp_path: Path, monkeypatch) -> None:
     """Regression for the mtime-skip gap: an index first built with --no-embed
     is skipped forever by the file gate, so a later default (embed) run must
