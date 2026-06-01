@@ -1,5 +1,5 @@
 # Install once per clone:  pre-commit install
-# Requires the project dev env on PATH for the mypy hook (pip install -e ".[dev]").
+# No project dev env required — pre-commit builds isolated, cached tool envs.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.15
@@ -7,11 +7,17 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
-  - repo: local
+  # mirrors-mypy (not a local/system hook) so contributors need nothing on PATH:
+  # pre-commit builds a cached, isolated mypy env. The heavy runtime deps
+  # (sentence_transformers, sqlite_vec, frontmatter) are ignore_missing_imports
+  # in [tool.mypy], so the hook env stays light — numpy/click/types only, no torch.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
     hooks:
       - id: mypy
-        name: mypy (project env)
-        entry: mypy src/rekol
-        language: system
+        args: ["src/rekol"]
         pass_filenames: false
-        types: [python]
+        additional_dependencies:
+          - numpy>=1.26
+          - click>=8.1
+          - types-PyYAML
