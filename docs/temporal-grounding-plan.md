@@ -472,15 +472,13 @@ def test_strong_old_beats_weak_new():
     assert ranked[0]["file_path"].endswith("old.md")
 
 
-def test_knowledge_layer_exempt_from_recency():
-    # A durable knowledge/ hit and a newer topics/ hit at equal cosine:
-    # the knowledge hit must NOT be out-ranked by recency (it gets zero boost,
-    # but so we test it does not lose a true tie to the boosted topics note).
+def test_knowledge_layer_treated_as_always_current():
+    # Durable knowledge/ hit (old) vs fresher topics/ hit at equal cosine.
+    # The exempt hit gets the FULL un-decayed boost (always-current), so it is
+    # not out-ranked by the fresher hit (whose boost is slightly decayed).
     hits = [_hit("knowledge", "durable", 0.80, updated="2019-01-01"),
             _hit("topics", "fresh", 0.80, updated="2026-05-31")]
     ranked, _ = _rank(hits)
-    # topics/fresh gets a boost; knowledge/durable does not — to protect durable
-    # memory we require the exempt layer to win ties, so durable must lead.
     assert ranked[0]["file_path"].endswith("durable.md")
 
 
@@ -491,7 +489,7 @@ def test_cosine_score_preserved_and_final_score_added():
     assert ranked[0]["final_score"] >= 0.7
 ```
 
-> Note: `test_knowledge_layer_exempt_from_recency` requires exempt-layer hits to win exact ties against boosted hits. Implement the tie-break so exempt (un-boosted) hits sort *above* equal-cosine boosted hits — see Step 3's stable-sort ordering.
+> Note: exempt layers are treated as **always-current** (boost = full `recency_weight`, no decay), NOT zero-boost. Zero-boost would leave a durable hit exposed to a fresher hit's boost and defeat the purpose; full boost keeps it competitive. No special tie-break needed — the exempt hit wins by the fresher hit's small decay gap.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -578,25 +576,23 @@ def apply_temporal_ranking(
             filtered_count += 1
             continue
 
-        boost = 0.0
-        if _layer_of(h["file_path"], memory_home) not in exempt:
+        if _layer_of(h["file_path"], memory_home) in exempt:
+            boost = recency_weight  # time-insensitive layer: full, un-decayed boost
+        else:
             ref = _as_date(h.get("updated") or h.get("created"))
             if ref is not None:
                 age_days = max(0, (today - ref).days)
                 boost = recency_weight * math.exp(-age_days / half)
+            else:
+                boost = 0.0
 
         final = h["cosine_score"] + boost
         if invalidated:  # only reachable under include_invalidated
             final -= _INVALIDATED_PENALTY
         h["final_score"] = final
-        h["_boost"] = boost  # tie-break key (see sort)
         kept.append(h)
 
-    # Sort by final_score desc; on a tie, the LESS-boosted hit wins so an exempt
-    # (un-boosted) durable hit is never displaced by a boosted hit at equal cosine.
-    kept.sort(key=lambda x: (-x["final_score"], x["_boost"]))
-    for h in kept:
-        h.pop("_boost", None)
+    kept.sort(key=lambda x: -x["final_score"])
     return kept, filtered_count
 ```
 
@@ -633,6 +629,7 @@ def test_temporal_defaults_loaded(tmp_path, monkeypatch):
     assert cfg.temporal_recency_weight == 0.03
     assert cfg.temporal_recency_halflife_days == 180
     assert cfg.temporal_recency_exempt_layers == ["always", "knowledge"]
+    assert cfg.temporal_confirm_interval_days == 180
 
 
 def test_temporal_overrides_from_yaml(tmp_path, monkeypatch):
@@ -662,6 +659,7 @@ Add to `DEFAULTS`:
     temporal_recency_weight=0.03,
     temporal_recency_halflife_days=180,
     temporal_recency_exempt_layers=["always", "knowledge"],
+    temporal_confirm_interval_days=180,
 ```
 
 Add to the `Config` dataclass fields:
@@ -672,6 +670,7 @@ Add to the `Config` dataclass fields:
     temporal_recency_weight: float
     temporal_recency_halflife_days: float
     temporal_recency_exempt_layers: list[str]
+    temporal_confirm_interval_days: int
 ```
 
 Add to the `Config(...)` constructor in `load_config()`:
@@ -682,6 +681,7 @@ Add to the `Config(...)` constructor in `load_config()`:
         temporal_recency_weight=float(data["temporal_recency_weight"]),
         temporal_recency_halflife_days=float(data["temporal_recency_halflife_days"]),
         temporal_recency_exempt_layers=list(data["temporal_recency_exempt_layers"]),
+        temporal_confirm_interval_days=int(data["temporal_confirm_interval_days"]),
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1347,6 +1347,366 @@ Expected: PASS
 ```bash
 git add src/rekol/cli_search.py tests/test_cli.py
 git commit -m "feat: relative date phrasing alongside absolute dates in search"
+```
+
+---
+
+## Phase D — Durable-memory confirmation
+
+Exempt layers are trusted indefinitely, so add a re-confirmation loop. Confirm
+reuses the `updated` field (no new column). Overdue = `updated`/`created` older
+than `temporal_confirm_interval_days`, or absent.
+
+### Task D1: Overdue-detection (pure) + store query
+
+**Files:**
+- Create: `src/rekol/review.py`
+- Modify: `src/rekol/store.py` (add `distinct_file_timestamps`)
+- Test: `tests/test_review.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_review.py  (new)
+import datetime as dt
+from pathlib import Path
+
+from rekol.review import find_overdue
+
+HOME = Path("/m")
+TODAY = dt.date(2026, 6, 1)
+
+
+def _rows(*specs):
+    return [dict(file_path=f"/m/{lyr}/{n}.md", updated=u, created=None) for lyr, n, u in specs]
+
+
+def test_overdue_durable_only_past_interval():
+    rows = _rows(("knowledge", "old", "2025-01-01"),   # >180d → overdue
+                 ("knowledge", "fresh", "2026-05-20"),  # <180d → ok
+                 ("topics", "old", "2020-01-01"))       # not durable → ignored
+    out = find_overdue(rows, memory_home=HOME, exempt_layers=["always", "knowledge"],
+                       interval_days=180, today=TODAY)
+    assert [o["file_path"] for o in out] == ["/m/knowledge/old.md"]
+
+
+def test_missing_date_is_overdue_and_sorts_first():
+    rows = [dict(file_path="/m/always/x.md", updated=None, created=None),
+            dict(file_path="/m/knowledge/y.md", updated="2024-01-01", created=None)]
+    out = find_overdue(rows, memory_home=HOME, exempt_layers=["always", "knowledge"],
+                       interval_days=180, today=TODAY)
+    assert out[0]["file_path"] == "/m/always/x.md" and out[0]["age_days"] is None
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_review.py -v`
+Expected: FAIL (`ModuleNotFoundError: rekol.review`)
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/rekol/review.py  (new)
+"""Find durable (exempt-layer) memories overdue for re-confirmation."""
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+from typing import Any
+
+from rekol.ranking import _as_date, _layer_of
+
+
+def find_overdue(
+    rows: list[dict[str, Any]],
+    *,
+    memory_home: Path,
+    exempt_layers: list[str],
+    interval_days: int,
+    today: dt.date,
+) -> list[dict[str, Any]]:
+    """rows: [{file_path, updated, created}]. Returns overdue durable files as
+    [{file_path, updated, age_days}], most-overdue first (no date = most overdue)."""
+    exempt = set(exempt_layers)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if _layer_of(r["file_path"], memory_home) not in exempt:
+            continue
+        ref = _as_date(r.get("updated") or r.get("created"))
+        if ref is None:
+            out.append({"file_path": r["file_path"], "updated": r.get("updated"), "age_days": None})
+        elif (today - ref).days > interval_days:
+            out.append({"file_path": r["file_path"], "updated": r.get("updated"),
+                        "age_days": (today - ref).days})
+    out.sort(key=lambda x: -(x["age_days"] if x["age_days"] is not None else 10**9))
+    return out
+```
+
+Add to `store.py`:
+
+```python
+    def distinct_file_timestamps(self) -> list[dict[str, Any]]:
+        """One row per indexed file: {file_path, updated, created}."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT file_path, updated, created FROM chunks"
+        ).fetchall()
+        return [dict(file_path=r["file_path"], updated=r["updated"],
+                     created=r["created"]) for r in rows]
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_review.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/rekol/review.py src/rekol/store.py tests/test_review.py
+git commit -m "feat: detect durable memories overdue for re-confirmation"
+```
+
+---
+
+### Task D2: `rekol review` command (--nudge / --list / interactive)
+
+**Files:**
+- Create: `src/rekol/cli_review.py`
+- Modify: `src/rekol/cli.py` (register `review`)
+- Test: `tests/test_review.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_review.py  (append)
+from click.testing import CliRunner
+
+
+def _seed_index(home, layer, name, updated):
+    import numpy as np
+    from rekol.store import IndexStore
+    (home / layer).mkdir(parents=True, exist_ok=True)
+    (home / layer / f"{name}.md").write_text("body")
+    idx = home / ".index"; idx.mkdir(exist_ok=True)
+    s = IndexStore(db_path=idx / "index.db", dim=8, use_sqlite_vec=False); s.init_schema()
+    fp = str(home / layer / f"{name}.md")
+    s.upsert_file(path=fp, mtime=1, content_hash="h")
+    s.replace_chunks_for_file(fp, [dict(heading=None, line_start=1, line_end=1, text="t",
+                                        tags=[], aliases=[], embedding=np.ones(8, dtype=np.float32))],
+                              updated=updated)
+    s.close()
+
+
+def test_review_nudge_prints_only_when_overdue(tmp_path, monkeypatch):
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    _seed_index(tmp_path, "knowledge", "old", "2020-01-01")
+    from rekol.cli_review import main
+    res = CliRunner().invoke(main, ["--nudge"])
+    assert "due for review" in res.output and res.exit_code == 0
+
+
+def test_review_confirm_bumps_updated(tmp_path, monkeypatch):
+    import datetime as dt
+    import frontmatter
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "knowledge").mkdir()
+    f = tmp_path / "knowledge" / "old.md"
+    f.write_text("---\nname: o\ndescription: d\ntype: reference\nupdated: 2020-01-01\n---\nbody\n")
+    _seed_index(tmp_path, "knowledge", "old", "2020-01-01")
+    from rekol.cli_review import main
+    res = CliRunner().invoke(main, [], input="c\n")
+    assert res.exit_code == 0
+    assert str(frontmatter.load(str(f))["updated"]) == dt.date.today().isoformat()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_review.py -k "nudge or confirm" -v`
+Expected: FAIL (`ModuleNotFoundError: rekol.cli_review`)
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/rekol/cli_review.py  (new)
+"""`rekol review` — confirm/invalidate durable memories overdue for re-confirmation."""
+from __future__ import annotations
+
+import datetime as dt
+
+import click
+import frontmatter
+
+from rekol.config import load_config
+from rekol.review import find_overdue
+from rekol.store import IndexStore
+
+
+def _overdue(cfg):
+    store = IndexStore(db_path=cfg.index_db_path, use_sqlite_vec=False)
+    store.init_schema()
+    try:
+        rows = store.distinct_file_timestamps()
+    finally:
+        store.close()
+    return find_overdue(rows, memory_home=cfg.memory_home,
+                        exempt_layers=cfg.temporal_recency_exempt_layers,
+                        interval_days=cfg.temporal_confirm_interval_days,
+                        today=dt.date.today())
+
+
+@click.command()
+@click.option("--nudge", is_flag=True, help="Print a one-line reminder iff overdue; for hooks.")
+@click.option("--list", "as_list", is_flag=True, help="Print overdue file paths (non-interactive).")
+def main(nudge: bool, as_list: bool) -> None:
+    """Review durable (always/, knowledge/) memories overdue for confirmation."""
+    cfg = load_config()
+    overdue = _overdue(cfg)
+    if nudge:
+        if overdue:
+            click.echo(f"[rekol] {len(overdue)} durable memories are due for "
+                       f"review — run `rekol review`")
+        return
+    if not overdue:
+        click.echo("All durable memories are within the confirmation interval.")
+        return
+    if as_list:
+        for o in overdue:
+            click.echo(o["file_path"])
+        return
+    for o in overdue:
+        click.echo(f"{o['file_path']} (updated {o['updated'] or 'never'})")
+        choice = click.prompt("[c]onfirm / [i]nvalidate / [s]kip", default="s").strip().lower()
+        if choice.startswith("c"):
+            post = frontmatter.load(o["file_path"])
+            post["updated"] = dt.date.today().isoformat()
+            with open(o["file_path"], "w", encoding="utf-8") as fh:
+                fh.write(frontmatter.dumps(post))
+            click.echo("  confirmed")
+        elif choice.startswith("i"):
+            click.echo(f"  to invalidate, run: rekol invalidate {o['file_path']}")
+```
+
+Register in `cli.py`: `from rekol.cli_review import main as review_cmd` / `main.add_command(review_cmd, name="review")`.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_review.py -k "nudge or confirm" -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/rekol/cli_review.py src/rekol/cli.py tests/test_review.py
+git commit -m "feat: add rekol review (confirm/invalidate overdue durable memory)"
+```
+
+---
+
+### Task D3: SessionEnd nudge handler
+
+**Files:**
+- Modify: `hooks/sessionend-snippet.json` (add a `rekol review --nudge` handler)
+- Test: `tests/test_cli_hooks.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cli_hooks.py  (append)
+def test_sessionend_snippet_includes_review_nudge():
+    import json
+    from pathlib import Path
+    snip = json.loads((Path(__file__).resolve().parents[1] / "hooks" / "sessionend-snippet.json").read_text())
+    cmds = [h["command"] for h in snip["hooks"]["SessionEnd"][0]["hooks"]]
+    assert any("rekol review --nudge" in c for c in cmds)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_cli_hooks.py -k review_nudge -v`
+Expected: FAIL
+
+- [ ] **Step 3: Write minimal implementation**
+
+Add a third handler to the `SessionEnd[0].hooks` array in `hooks/sessionend-snippet.json`:
+
+```json
+          { "type": "command", "command": "rekol review --nudge" }
+```
+
+(Fresh installs get all SessionEnd handlers via Step 7D. The cutover re-installs rekol, so existing machines pick it up too.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_cli_hooks.py -k review_nudge -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add hooks/sessionend-snippet.json tests/test_cli_hooks.py
+git commit -m "feat: nudge for overdue durable memories on session end"
+```
+
+---
+
+### Task D4: Inline `[review?]` tag in search output
+
+**Files:**
+- Modify: `src/rekol/cli_search.py` (memory-hit render)
+- Test: `tests/test_cli.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cli.py  (append)
+def test_overdue_durable_tag_helper():
+    import datetime as dt
+    from pathlib import Path
+    from rekol.cli_search import _review_tag
+    hit = {"file_path": "/m/knowledge/x.md", "updated": "2020-01-01"}
+    tag = _review_tag(hit, memory_home=Path("/m"), exempt_layers=["knowledge"],
+                      interval_days=180, today=dt.date(2026, 6, 1))
+    assert tag == " [review?]"
+    fresh = {"file_path": "/m/topics/y.md", "updated": "2026-05-31"}
+    assert _review_tag(fresh, memory_home=Path("/m"), exempt_layers=["knowledge"],
+                       interval_days=180, today=dt.date(2026, 6, 1)) == ""
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_cli.py -k review_tag -v`
+Expected: FAIL (`ImportError: _review_tag`)
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/rekol/cli_search.py
+import datetime as _dt
+from pathlib import Path as _Path
+from rekol.ranking import _as_date, _layer_of
+
+
+def _review_tag(hit, *, memory_home, exempt_layers, interval_days, today):
+    if _layer_of(hit["file_path"], memory_home) not in set(exempt_layers):
+        return ""
+    ref = _as_date(hit.get("updated") or hit.get("created"))
+    if ref is None or (today - ref).days > interval_days:
+        return " [review?]"
+    return ""
+```
+
+Append `_review_tag(...)` to each memory-hit render line (using `cfg` values and `_dt.date.today()`).
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_cli.py -k review_tag -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/rekol/cli_search.py tests/test_cli.py
+git commit -m "feat: tag overdue durable memories with [review?] in search output"
 ```
 
 ---
