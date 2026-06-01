@@ -635,3 +635,65 @@ def test_relative_phrasing_helper() -> None:
 
     assert _relative_age(dt.date(2026, 5, 11), today=dt.date(2026, 6, 1)) == "3 weeks ago"
     assert _relative_age(dt.date(2026, 6, 1), today=dt.date(2026, 6, 1)) == "today"
+
+
+def test_search_json_includes_timestamp_fields(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text(
+        "embedding_model: test-hashing\nsession_search_enabled: false\n"
+    )
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "t.md").write_text(
+        "---\nname: t\ndescription: d\ntype: topic\ncreated: 2026-01-01\nupdated: 2026-02-01\n---\n"
+        "deploy process notes\n"
+    )
+    CliRunner().invoke(index_main, ["rebuild"])
+    res = CliRunner().invoke(search_main, ["deploy process", "--source", "memory", "--json"])
+    assert res.exit_code == 0, res.output
+    hit = json.loads(res.output)["memory"][0]
+    for key in (
+        "created",
+        "updated",
+        "valid_from",
+        "invalidated_at",
+        "cosine_score",
+        "final_score",
+    ):
+        assert key in hit
+    assert hit["updated"] == "2026-02-01"
+
+
+def test_capture_instructs_on_legacy_schema(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    idx = tmp_path / ".index"
+    idx.mkdir()
+    con = sqlite3.connect(idx / "index.db")
+    con.execute(
+        "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"
+    )
+    con.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, "
+        "line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB)"
+    )
+    con.commit()
+    con.close()
+    res = CliRunner().invoke(
+        capture_main,
+        [
+            "--layer",
+            "topic",
+            "--file",
+            "x.md",
+            "--name",
+            "X",
+            "--description",
+            "d",
+            "--body",
+            "a body long enough to index",
+        ],
+    )
+    assert res.exit_code == 1
+    assert "rekol index rebuild" in res.output

@@ -49,6 +49,18 @@ def test_hook_snippets_call_rekol_hook():
     assert "rekol _hook record-stop" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
 
 
+def test_soft_fail_on_non_dict_state_file(tmp_path, monkeypatch):
+    # A state file that is valid JSON but not an object must not crash the hook.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    d = tmp_path / ".claude" / "session-env"
+    d.mkdir(parents=True)
+    (d / "time-context-s2.json").write_text("[1, 2, 3]")
+    res = _run(["time-context"], json.dumps({"session_id": "s2"}))
+    assert res.exit_code == 0
+    res2 = _run(["record-stop"], json.dumps({"session_id": "s2"}))
+    assert res2.exit_code == 0
+
+
 def test_sessionend_snippet_includes_review_nudge():
     repo = Path(__file__).resolve().parents[1]
     snip = json.loads((repo / "hooks" / "sessionend-snippet.json").read_text())
