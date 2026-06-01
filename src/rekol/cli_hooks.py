@@ -23,7 +23,10 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 def _state_path(session_id: str) -> Path:
     """Return (and ensure the dir of) the per-session state file path."""
     directory = Path.home() / ".claude" / "session-env"
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # soft-fail: a later read/write degrades gracefully and exits 0
     return directory / f"time-context-{session_id}.json"
 
 
@@ -82,7 +85,8 @@ def time_context() -> None:
     path = _state_path(session_id)
     try:
         if path.exists():
-            prev = json.loads(path.read_text())
+            loaded = json.loads(path.read_text())
+            prev = loaded if isinstance(loaded, dict) else {}
     except (ValueError, OSError):
         prev = {}
     last_user = prev.get("last_user_epoch")
@@ -110,7 +114,8 @@ def record_stop() -> None:
     prev: dict = {}
     try:
         if path.exists():
-            prev = json.loads(path.read_text())
+            loaded = json.loads(path.read_text())
+            prev = loaded if isinstance(loaded, dict) else {}
     except (ValueError, OSError):
         prev = {}
     prev["last_assistant_epoch"] = int(time.time())

@@ -109,7 +109,8 @@ class IndexStore:
     def distinct_file_timestamps(self) -> list[dict[str, Any]]:
         """One row per indexed file: ``{file_path, updated, created}``."""
         rows = self.conn.execute(
-            "SELECT DISTINCT file_path, updated, created FROM chunks"
+            "SELECT file_path, MAX(updated) AS updated, MAX(created) AS created "
+            "FROM chunks GROUP BY file_path"
         ).fetchall()
         return [
             dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows

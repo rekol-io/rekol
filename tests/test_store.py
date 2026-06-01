@@ -210,3 +210,37 @@ def test_search_returns_timestamps_and_cosine_score(store: IndexStore, tmp_path:
     h = hits[0]
     assert "cosine_score" in h
     assert h["created"] == "2026-01-01" and h["invalidated_at"] == "2026-03-01"
+
+
+def test_distinct_file_timestamps_one_row_per_file(store: IndexStore, tmp_path: Path) -> None:
+    p = tmp_path / "topics" / "multi.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("x")
+    store.upsert_file(path=str(p), mtime=1, content_hash="h")
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(
+                heading=None,
+                line_start=1,
+                line_end=1,
+                text="a",
+                tags=[],
+                aliases=[],
+                embedding=np.ones(8, dtype=np.float32),
+            ),
+            dict(
+                heading=None,
+                line_start=2,
+                line_end=2,
+                text="b",
+                tags=[],
+                aliases=[],
+                embedding=np.ones(8, dtype=np.float32),
+            ),
+        ],
+        created="2026-01-01",
+        updated="2026-02-01",
+    )
+    rows = store.distinct_file_timestamps()
+    assert len([r for r in rows if r["file_path"] == str(p)]) == 1

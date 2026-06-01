@@ -21,6 +21,7 @@ from pathlib import Path
 
 import click
 
+from rekol.cli_common import guard_curated_schema
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.store import IndexStore
@@ -90,6 +91,7 @@ def main(input_file: str | None, quiet: bool) -> None:
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
+    guard_curated_schema(store)
 
     pending_dir = cfg.memory_home / "pending-review"
     pending_dir.mkdir(parents=True, exist_ok=True)
