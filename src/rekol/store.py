@@ -100,6 +100,12 @@ class IndexStore:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(chunks)")}
         return "created" not in cols
 
+    def reset_schema(self) -> None:
+        """Drop and recreate the curated tables so a rebuild picks up schema changes."""
+        self.conn.executescript("DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files;")
+        self.conn.commit()
+        self.init_schema()
+
     def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
         """Insert or update a file's mtime, content hash, and indexed timestamp."""
         self.conn.execute(
