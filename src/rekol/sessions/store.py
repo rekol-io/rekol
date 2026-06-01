@@ -27,6 +27,26 @@ if TYPE_CHECKING:
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
 
 
+class SessionStoreDimMismatch(RuntimeError):
+    """Raised when the on-disk vector index width can't hold the model's vectors.
+
+    Carries the conflicting dimensions so callers can render an actionable
+    message instead of letting a raw sqlite-vec width error surface on the first
+    read or write.
+    """
+
+    def __init__(self, db_path: Path, existing_dim: int, wanted_dim: int) -> None:
+        self.db_path = db_path
+        self.existing_dim = existing_dim
+        self.wanted_dim = wanted_dim
+        super().__init__(
+            f"sessions index at {db_path} was built with {existing_dim}-dim embeddings, "
+            f"but the configured model produces {wanted_dim}-dim vectors. Restore the "
+            f"previous embedding_model, or rebuild the transcript index:\n"
+            f"  rm '{db_path}' && rekol session-index --full"
+        )
+
+
 def build_fts_match(query: str) -> str | None:
     """Turn a raw user query into a safe FTS5 ``MATCH`` expression.
 
@@ -366,6 +386,45 @@ class SessionStore:
         if row is None or row["nbytes"] is None:
             return None
         return int(row["nbytes"]) // 4  # float32 → 4 bytes per dimension
+
+    def reconcile_embedding_dim(self, wanted_dim: int) -> None:
+        """Make the vector index able to hold ``wanted_dim`` vectors, or fail loudly.
+
+        Owns the "requested dim must match on-disk dim" invariant for every
+        caller that reads or writes vectors (ingest and search alike), instead
+        of each command re-checking. Three cases:
+
+        - matching, or no vectors stored yet → no-op.
+        - a stale **empty** vec0 table at a different width (e.g. one created by
+          a ``--no-embed`` run before any model wrote to it) → drop and recreate
+          at ``wanted_dim``; nothing is lost.
+        - a **populated** table at a different width → raise
+          :class:`SessionStoreDimMismatch` so the caller can surface remediation
+          rather than crashing on the first read/write.
+        """
+        existing = self.existing_vec_dim()
+        if existing is None or existing == wanted_dim:
+            self.dim = wanted_dim
+            return
+        if self.count_embeddings() == 0:
+            self._recreate_empty_vec(wanted_dim)
+            return
+        raise SessionStoreDimMismatch(self.db_path, existing, wanted_dim)
+
+    def _recreate_empty_vec(self, dim: int) -> None:
+        """Drop and recreate the (empty) vec0 table at ``dim``.
+
+        Only the vec0 path declares a width up front, so only it can be "empty
+        but wrong width"; the numpy fallback has no declared width and reports
+        ``existing_vec_dim() is None`` when empty, so it never reaches here.
+        """
+        self.dim = dim
+        if self._vec_loaded:
+            self.conn.execute("DROP TABLE IF EXISTS messages_vec")
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE messages_vec USING vec0(embedding float[{dim}])"
+            )
+            self.conn.commit()
 
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.

@@ -22,7 +22,7 @@ import click
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.sessions.ingest import embed_missing, ingest_directory
-from rekol.sessions.store import SessionStore
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatch
 
 
 @click.command()
@@ -90,43 +90,38 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
         progress_cb = _emit_progress
 
     repaired = 0
-    with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
-        store.init_schema()
-        # Fail fast on an embedding-dimension change. Without this, a sessions.db
-        # built with one model and re-indexed under a different-dim model would
-        # crash cryptically on the first vector insert (sqlite-vec rejects the
-        # width). Guard only when embedding; --no-embed never writes vectors.
-        if embedder is not None:
-            existing_dim = store.existing_vec_dim()
-            if existing_dim is not None and existing_dim != embedder.dim:
-                click.echo(
-                    f"sessions index at {cfg.sessions_db_path} was built with "
-                    f"{existing_dim}-dim embeddings, but model '{cfg.embedding_model}' "
-                    f"produces {embedder.dim}-dim vectors. Restore the previous "
-                    f"embedding_model, or rebuild the transcript index:\n"
-                    f"  rm '{cfg.sessions_db_path}' && rekol session-index --full",
-                    err=True,
-                )
-                sys.exit(2)
-        # --full forces re-walk even of unchanged files; default (incremental)
-        # trusts files_seen mtime+size and skips matches.
-        stats = ingest_directory(
-            projects_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
-        )
-        # Self-heal: embed any messages that lack an embedding. Catches indices
-        # built FTS-only or with --no-embed, which the mtime skip gate would
-        # otherwise leave keyword-only forever. No-op (cheap count guard) once
-        # everything is embedded.
-        if embedder is not None:
-            repaired = embed_missing(
-                store,
-                embedder,
-                progress_cb=(
-                    (lambda done: click.echo(f"... {done} messages embedded (repair)", err=True))
-                    if progress
-                    else None
-                ),
+    try:
+        with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
+            store.init_schema()
+            # Reconcile the on-disk vector width with the model before any vector
+            # work. The store owns this invariant (empty stale table → recreate;
+            # populated mismatch → raise), so ingest and search behave the same.
+            # Only when embedding: --no-embed writes no vectors and must not be
+            # blocked by an existing index's width.
+            if embedder is not None:
+                store.reconcile_embedding_dim(embedder.dim)
+            # --full forces re-walk even of unchanged files; default (incremental)
+            # trusts files_seen mtime+size and skips matches.
+            stats = ingest_directory(
+                projects_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
             )
+            # Self-heal: embed any messages that lack an embedding. Catches indices
+            # built FTS-only or with --no-embed, which the mtime skip gate would
+            # otherwise leave keyword-only forever. No-op (cheap count guard) once
+            # everything is embedded.
+            if embedder is not None:
+                repaired = embed_missing(
+                    store,
+                    embedder,
+                    progress_cb=(
+                        (lambda done: click.echo(f"... {done} messages embedded (repair)", err=True))
+                        if progress
+                        else None
+                    ),
+                )
+    except SessionStoreDimMismatch as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(2)
 
     click.echo(
         f"files_seen={stats.files_seen} "

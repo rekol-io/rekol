@@ -6,7 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from rekol.sessions.store import SessionStore
+import pytest
+
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatch
 
 
 def test_init_schema_creates_expected_tables(tmp_path: Path) -> None:
@@ -169,6 +171,54 @@ def test_existing_vec_dim_reports_stored_dimension(tmp_path: Path) -> None:
         store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
     # vec0 reads the dim from the schema; numpy fallback infers it from the row.
     assert store.existing_vec_dim() == 4
+    store.close()
+
+
+def test_reconcile_embedding_dim_noop_when_matching(tmp_path: Path) -> None:
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    # Same width — must not raise or disturb the stored embedding.
+    store.reconcile_embedding_dim(4)
+    assert store.count_embeddings() == 1
+    store.close()
+
+
+def test_reconcile_embedding_dim_recreates_empty_stale_table(tmp_path: Path) -> None:
+    """A vec table created at one width but never written (e.g. by a --no-embed
+    run) must be recreated at the new width rather than blocking embedding.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    assert store.count_embeddings() == 0  # nothing written
+    # No rows → safe to adopt the new width with no data loss, no error.
+    store.reconcile_embedding_dim(8)
+    assert store.dim == 8
+    # A subsequent 8-dim embedding now writes and is searchable.
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(
+            rid, np.array([1, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        )
+    assert store.count_embeddings() == 1
+    store.close()
+
+
+def test_reconcile_embedding_dim_raises_on_populated_mismatch(tmp_path: Path) -> None:
+    """A vec index that already holds vectors at one width must refuse a
+    different width loudly, so callers surface remediation instead of crashing.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    with pytest.raises(SessionStoreDimMismatch) as excinfo:
+        store.reconcile_embedding_dim(8)
+    assert excinfo.value.existing_dim == 4
+    assert excinfo.value.wanted_dim == 8
     store.close()
 
 
