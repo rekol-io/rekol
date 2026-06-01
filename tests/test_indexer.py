@@ -60,6 +60,27 @@ def _make_indexer(memory_root: Path) -> Indexer:
     return Indexer(memory_root=memory_root, store=store, embedder=emb)
 
 
+def test_indexer_carries_frontmatter_timestamps(tmp_path: Path) -> None:
+    root = tmp_path / "mem"
+    (root / "topics").mkdir(parents=True)
+    (root / "topics" / "t.md").write_text(
+        "---\nname: t\ndescription: d\ntype: topic\n"
+        "created: 2026-01-01\nupdated: 2026-02-01\ninvalidated_at: 2026-03-01\n---\nbody\n"
+    )
+    store = IndexStore(db_path=root / ".index" / "index.db", dim=384, use_sqlite_vec=False)
+    store.init_schema()
+    Indexer(memory_root=root, store=store, embedder=HashingEmbedder(dim=384)).rebuild()
+    row = store.conn.execute(
+        "SELECT created, updated, invalidated_at FROM chunks LIMIT 1"
+    ).fetchone()
+    assert (row["created"], row["updated"], row["invalidated_at"]) == (
+        "2026-01-01",
+        "2026-02-01",
+        "2026-03-01",
+    )
+    store.close()
+
+
 def test_rebuild_indexes_all_files(memory_root: Path) -> None:
     idx = _make_indexer(memory_root)
     stats = idx.rebuild()

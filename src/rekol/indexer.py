@@ -102,6 +102,10 @@ class Indexer:
                         embedding=vec,
                     )
                 ],
+                created=mf.created,
+                updated=mf.updated,
+                valid_from=mf.valid_from,
+                invalidated_at=mf.invalidated_at,
             )
             return 1
         # Prefix each chunk with the file name to give the embedder more context:
@@ -121,7 +125,14 @@ class Indexer:
             )
             for i, c in enumerate(chunks)
         ]
-        self.store.replace_chunks_for_file(str(path), records)
+        self.store.replace_chunks_for_file(
+            str(path),
+            records,
+            created=mf.created,
+            updated=mf.updated,
+            valid_from=mf.valid_from,
+            invalidated_at=mf.invalidated_at,
+        )
         return len(records)
 
     def rebuild(self) -> IndexStats:
