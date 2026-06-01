@@ -1,8 +1,9 @@
-"""Hidden Claude Code hook subcommands: time-context + record-stop.
+"""Hidden Claude Code hook subcommands: time-context, record-stop, nudge.
 
-Stdlib-only and soft-fail by design — any error degrades and exits 0 so a hook
-problem never blocks a prompt. Per-session state lives at
-``~/.claude/session-env/time-context-<session_id>.json``.
+Soft-fail by design — any error degrades and exits 0 so a hook problem never
+blocks a prompt or session start. Per-session time state lives at
+``~/.claude/session-env/time-context-<session_id>.json``; the one-time
+SessionStart ingest nudge marker lives under ``$REKOL_HOME/.index/``.
 """
 
 from __future__ import annotations
@@ -15,9 +16,24 @@ from pathlib import Path
 
 import click
 
+from rekol.onboarding import count_claude_transcripts, count_curated_memory_files
+
 # Claude Code session ids are UUID-like; restrict to a safe charset before
 # using one in a filesystem path (prevents traversal from a malformed payload).
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# A store with at most this many curated markdown files counts as "near-empty"
+# for the SessionStart ingest nudge. A fresh install seeds the template's couple
+# of starter layer files, so a strict zero would never fire; this small slack
+# lets the nudge reach users who have an essentially blank store but suppresses
+# it once they have accumulated real memories.
+_NEAR_EMPTY_MAX_FILES = 3
+
+# Marker filename written under $REKOL_HOME/.index/ after the nudge fires once.
+# .index/ is machine-local, excluded from sync (.dropboxignore) and from the
+# curated-emptiness count, and is not walked by the markdown indexer — so the
+# marker never pollutes curated memory, gets indexed, or syncs across machines.
+_NUDGE_MARKER_NAME = ".session-start-nudge-shown"
 
 
 def _state_path(session_id: str) -> Path:
@@ -123,3 +139,53 @@ def record_stop() -> None:
         path.write_text(json.dumps(prev))
     except OSError as exc:
         click.echo(f"record-stop: state write failed: {exc}", err=True)
+
+
+@hook_group.command(name="session-start-nudge")
+def session_start_nudge() -> None:
+    """SessionStart hook: one-time offer to ingest history into an empty store.
+
+    Fires at most once. Emits a context line telling the assistant to OFFER to
+    index past Claude Code sessions and import notes, but only when (a) REKOL is
+    configured, (b) the curated store is near-empty, (c) past transcripts exist,
+    and (d) the nudge has not already fired. Soft-fails: any error exits 0 and
+    prints nothing, so a hook problem never blocks session start.
+    """
+    # Read the payload to mirror the other hooks' stdin contract, even though the
+    # nudge does not key off the session id (the marker is store-global).
+    _read_payload()
+    try:
+        from rekol.config import load_config
+
+        try:
+            cfg = load_config()
+        except RuntimeError:
+            return  # REKOL not configured → soft no-op
+
+        marker = cfg.memory_home / ".index" / _NUDGE_MARKER_NAME
+        if marker.exists():
+            return  # already offered → no-op
+
+        if count_curated_memory_files(cfg.memory_home) > _NEAR_EMPTY_MAX_FILES:
+            return  # store has real content → nothing to nudge about
+
+        n_transcripts = count_claude_transcripts(cfg.claude_projects_dir)
+        if n_transcripts <= 0:
+            return  # no history to offer → no-op
+
+        click.echo(
+            f"[rekol] Your memory store looks empty, but {n_transcripts} past "
+            "Claude Code sessions exist on this machine. Offer to bootstrap the "
+            "user's memory: run `rekol session-index --incremental` to make their "
+            "past sessions searchable, and `rekol import <dir>` to pull in an "
+            "existing notes/docs folder (e.g. an Obsidian vault). Ask first; do "
+            "not run anything without confirmation."
+        )
+
+        # Write the marker only AFTER a successful emit so a crash mid-emit does
+        # not silently consume the one-time nudge.
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+    except Exception:
+        # Soft-fail: never let a nudge error break session start.
+        return
