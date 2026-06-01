@@ -596,3 +596,33 @@ def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
     con.close()
     res = CliRunner().invoke(search_main, ["something", "--source", "memory"])
     assert "rekol index rebuild" in res.output
+
+
+def test_overdue_durable_tag_helper() -> None:
+    import datetime as dt
+    from pathlib import Path
+
+    from rekol.cli_search import _review_tag
+
+    hit = {"file_path": "/m/knowledge/x.md", "updated": "2020-01-01"}
+    assert (
+        _review_tag(
+            hit,
+            memory_home=Path("/m"),
+            exempt_layers=["knowledge"],
+            interval_days=180,
+            today=dt.date(2026, 6, 1),
+        )
+        == " [review?]"
+    )
+    fresh = {"file_path": "/m/topics/y.md", "updated": "2026-05-31"}
+    assert (
+        _review_tag(
+            fresh,
+            memory_home=Path("/m"),
+            exempt_layers=["knowledge"],
+            interval_days=180,
+            today=dt.date(2026, 6, 1),
+        )
+        == ""
+    )

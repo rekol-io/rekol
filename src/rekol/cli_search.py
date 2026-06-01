@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import json as json_mod
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 import click
 
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
+from rekol.ranking import _as_date, _layer_of
 from rekol.search_combined import Source, search_all
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 from rekol.store import IndexStore
@@ -36,6 +38,23 @@ def _format_session_timestamp(ts_unix: int) -> str:
         return datetime.fromtimestamp(ts_unix, tz=UTC).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return "unknown"
+
+
+def _review_tag(
+    hit: dict,
+    *,
+    memory_home: Path,
+    exempt_layers: list[str],
+    interval_days: int,
+    today: date,
+) -> str:
+    """Return ' [review?]' for an overdue durable (exempt-layer) hit, else ''."""
+    if _layer_of(hit["file_path"], memory_home) not in set(exempt_layers):
+        return ""
+    ref = _as_date(hit.get("updated") or hit.get("created"))
+    if ref is None or (today - ref).days > interval_days:
+        return " [review?]"
+    return ""
 
 
 def _render_text(
@@ -62,6 +81,7 @@ def _render_text(
             lines.append(
                 f"{h.get('final_score', h['cosine_score']):.3f}  "
                 f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']}){ts}{inv}"
+                f"{h.get('review_tag', '')}"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
@@ -178,6 +198,15 @@ def main(
             config=cfg,
             include_invalidated=include_invalidated,
         )
+        review_today = date.today()
+        for hit in result.memory_hits:
+            hit["review_tag"] = _review_tag(
+                hit,
+                memory_home=cfg.memory_home,
+                exempt_layers=cfg.temporal_recency_exempt_layers,
+                interval_days=cfg.temporal_confirm_interval_days,
+                today=review_today,
+            )
         if as_json:
             click.echo(
                 json_mod.dumps(
