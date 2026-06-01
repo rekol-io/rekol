@@ -4,8 +4,9 @@ Bi-temporal model: a memory's facts may stop being true (Phase 2 hyperparameters
 change, a service URL is decommissioned, a person leaves the team) but the
 historical claim remains useful — "what did I believe in March?" is a real
 query.  Invalidation sets ``invalidated_at`` in the frontmatter and bumps
-``updated``.  The file stays on disk and remains searchable, but downstream
-retrieval can de-prioritize invalidated memories.
+``updated``.  The file stays on disk, but retrieval excludes invalidated
+memories from default recall (opt-in via ``rekol search --include-invalidated``,
+where they are tagged and ranked below live hits — see ``ranking.py``).
 """
 
 from __future__ import annotations
