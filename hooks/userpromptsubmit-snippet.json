@@ -1,0 +1,16 @@
+{
+  "_comment": "Merge into ~/.claude/settings.json hooks.UserPromptSubmit. Injects an <env-time> block (local/UTC time plus elapsed-since-last-user/assistant). Soft-fail: always exits 0 so it never blocks a prompt.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rekol _hook time-context"
+          }
+        ]
+      }
+    ]
+  }
+}
