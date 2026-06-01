@@ -90,3 +90,24 @@ def test_resolve_memory_home_returns_none_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("REKOL_HOME", raising=False)
     monkeypatch.delenv("MEMORY_HOME", raising=False)
     assert resolve_memory_home() is None
+
+
+def test_temporal_defaults_loaded(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    cfg = load_config()
+    assert cfg.temporal_exclude_invalidated is True
+    assert cfg.temporal_respect_valid_from is True
+    assert cfg.temporal_recency_weight == 0.03
+    assert cfg.temporal_recency_halflife_days == 180
+    assert cfg.temporal_recency_exempt_layers == ["always", "knowledge"]
+    assert cfg.temporal_confirm_interval_days == 180
+
+
+def test_temporal_overrides_from_yaml(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "rekol.config.yaml").write_text(
+        "temporal_recency_weight: 0.1\ntemporal_recency_exempt_layers: [always]\n"
+    )
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    cfg = load_config()
+    assert cfg.temporal_recency_weight == 0.1
+    assert cfg.temporal_recency_exempt_layers == ["always"]
