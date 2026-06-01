@@ -432,8 +432,12 @@ fi
 # hand.  Default-on under DO_HOOK (consistent with Steps 7 and 7C); --no-hook
 # disables all hook wiring.
 #
-# Idempotency: skips the merge if the snippet's first command is already present
-# in any existing SessionEnd hook entry (same pattern as Steps 7 and 7C).
+# Idempotency: skips the merge if the snippet's session-index command is already
+# present in any existing SessionEnd hook entry. We key on the second handler
+# (`rekol session-index ...`) rather than the first (the capture-reminder echo),
+# because the reminder wording is the most likely thing to change between
+# versions — keying on it would re-append the whole block (and a second
+# session-index handler) after any reminder tweak.
 
 if [[ "$DO_HOOK" == "1" ]]; then
   SNIPPET_SE="${COMPONENT_DIR}/hooks/sessionend-snippet.json"
@@ -445,7 +449,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
     HAS_SE_HOOK="$(
       jq --slurpfile snip "${SNIPPET_SE}" '
         (.hooks.SessionEnd // []) as $cur
-        | ($snip[0].hooks.SessionEnd[0].hooks[0].command) as $cmd
+        | ($snip[0].hooks.SessionEnd[0].hooks[1].command) as $cmd
         | any($cur[]; .hooks // [] | any(.command == $cmd))
       ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
