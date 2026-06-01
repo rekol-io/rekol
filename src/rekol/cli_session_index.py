@@ -20,8 +20,9 @@ import sys
 import click
 
 from rekol.config import load_config
-from rekol.sessions.ingest import ingest_directory
-from rekol.sessions.store import SessionStore
+from rekol.embeddings import get_embedder
+from rekol.sessions.ingest import embed_missing, ingest_directory
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
 
 @click.command()
@@ -42,11 +43,11 @@ from rekol.sessions.store import SessionStore
 )
 @click.option(
     "--embed/--no-embed",
-    default=False,
+    default=True,
     show_default=True,
-    help="Compute vector embeddings for new messages. Off by default for speed; "
-    "Phase 2 will turn this on once search wiring is in place. (v1 stub — "
-    "the flag is accepted but no embedding work is performed yet.)",
+    help="Compute local vector embeddings for new messages so transcript search "
+    "is semantic, not keyword-only. On by default (the SessionEnd hook path "
+    "must be semantic); pass --no-embed for a faster FTS5-only ingest.",
 )
 @click.option(
     "--progress/--no-progress",
@@ -71,6 +72,13 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
         click.echo(f"claude_projects_dir does not exist: {projects_root}", err=True)
         sys.exit(2)
 
+    # Build the embedder only AFTER the projects-dir guard above, so the
+    # missing-dir / disabled-config exit paths never pay the model load cost.
+    # Uses the same local model as curated-memory search (cfg.embedding_model),
+    # so transcript and memory search share one semantic space.
+    embedder = get_embedder(cfg.embedding_model) if embed else None
+    store_dim = embedder.dim if embedder is not None else 384
+
     # Progress callback prints to stderr so it doesn't interleave with the
     # final stats line on stdout (tests assert against stdout substrings).
     progress_cb = None
@@ -81,11 +89,37 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
 
         progress_cb = _emit_progress
 
-    with SessionStore(db_path=cfg.sessions_db_path, dim=384) as store:
-        store.init_schema()
-        # --full forces re-walk even of unchanged files; default (incremental)
-        # trusts files_seen mtime+size and skips matches.
-        stats = ingest_directory(projects_root, store, force=mode_full, progress_cb=progress_cb)
+    repaired = 0
+    try:
+        with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
+            store.init_schema()
+            # Reconcile the on-disk vector width with the model before any vector
+            # work. The store owns this invariant (empty stale table → recreate;
+            # populated mismatch → raise), so ingest and search behave the same.
+            # Only when embedding: --no-embed writes no vectors and must not be
+            # blocked by an existing index's width.
+            if embedder is not None:
+                store.reconcile_embedding_dim(embedder.dim)
+            # --full forces re-walk even of unchanged files; default (incremental)
+            # trusts files_seen mtime+size and skips matches.
+            stats = ingest_directory(
+                projects_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
+            )
+            # Self-heal: embed any messages that lack an embedding. Catches indices
+            # built FTS-only or with --no-embed, which the mtime skip gate would
+            # otherwise leave keyword-only forever. No-op (cheap count guard) once
+            # everything is embedded.
+            if embedder is not None:
+
+                def _repair_progress(done: int) -> None:
+                    click.echo(f"... {done} messages embedded (repair)", err=True)
+
+                repaired = embed_missing(
+                    store, embedder, progress_cb=_repair_progress if progress else None
+                )
+    except SessionStoreDimMismatchError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(2)
 
     click.echo(
         f"files_seen={stats.files_seen} "
@@ -94,7 +128,8 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
         f"messages_inserted={stats.messages_inserted} "
         f"messages_skipped_dupe={stats.messages_skipped_dupe} "
         f"messages_skipped_malformed={stats.messages_skipped_malformed} "
-        f"messages_skipped_no_text={stats.messages_skipped_no_text}"
+        f"messages_skipped_no_text={stats.messages_skipped_no_text} "
+        f"messages_embedded_repaired={repaired}"
     )
 
 
