@@ -58,7 +58,8 @@ def _render_text(
         for h in result.memory_hits:
             heading = f" #{h['heading']}" if h.get("heading") else ""
             lines.append(
-                f"{h['score']:.3f}  {h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']})"
+                f"{h.get('final_score', h['cosine_score']):.3f}  "
+                f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']})"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
@@ -170,7 +171,8 @@ def main(
                                 heading=h.get("heading"),
                                 line_start=h["line_start"],
                                 line_end=h["line_end"],
-                                score=h["score"],
+                                cosine_score=h["cosine_score"],
+                                final_score=h.get("final_score", h["cosine_score"]),
                                 tags=h.get("tags", []),
                                 aliases=h.get("aliases", []),
                                 snippet=h["text"][:300],

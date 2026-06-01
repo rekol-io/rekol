@@ -56,7 +56,8 @@ def test_memory_search_cli_json(tmp_path: Path, monkeypatch) -> None:
     hits = data["memory"]
     assert len(hits) >= 1
     assert any("prometheus" in hit["file_path"].lower() for hit in hits)
-    assert "score" in hits[0]
+    assert "cosine_score" in hits[0]
+    assert "final_score" in hits[0]
     assert "memory" in data["sources_queried"]
 
 

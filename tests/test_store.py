@@ -181,3 +181,32 @@ def test_replace_chunks_persists_file_timestamps(store: IndexStore, tmp_path: Pa
         "2026-01-01",
         None,
     )
+
+
+def test_search_returns_timestamps_and_cosine_score(store: IndexStore, tmp_path: Path) -> None:
+    p = tmp_path / "topics" / "y.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("dummy")
+    store.upsert_file(path=str(p), mtime=1, content_hash="h")
+    store.replace_chunks_for_file(
+        str(p),
+        [
+            dict(
+                heading=None,
+                line_start=1,
+                line_end=2,
+                text="t",
+                tags=[],
+                aliases=[],
+                embedding=np.ones(8, dtype=np.float32),
+            )
+        ],
+        created="2026-01-01",
+        updated="2026-02-01",
+        valid_from="2026-01-01",
+        invalidated_at="2026-03-01",
+    )
+    hits = store.search(np.ones(8, dtype=np.float32), top_k=1)
+    h = hits[0]
+    assert "cosine_score" in h
+    assert h["created"] == "2026-01-01" and h["invalidated_at"] == "2026-03-01"

@@ -194,7 +194,8 @@ class IndexStore:
             query_vec = query_vec.astype(np.float32)
         rows = self.conn.execute(
             "SELECT id, file_path, heading, line_start, line_end, text, "
-            "tags_json, aliases_json, embedding FROM chunks"
+            "tags_json, aliases_json, created, updated, valid_from, "
+            "invalidated_at, embedding FROM chunks"
         ).fetchall()
         if not rows:
             return []
@@ -217,7 +218,12 @@ class IndexStore:
                     text=r["text"],
                     tags=json.loads(r["tags_json"]),
                     aliases=json.loads(r["aliases_json"]),
-                    score=float(scores[i]),
+                    created=r["created"],
+                    updated=r["updated"],
+                    valid_from=r["valid_from"],
+                    invalidated_at=r["invalidated_at"],
+                    cosine_score=float(scores[i]),
+                    score=float(scores[i]),  # back-compat alias (= cosine; pre-ranking readers)
                 )
             )
         return out
