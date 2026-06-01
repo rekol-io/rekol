@@ -51,8 +51,9 @@ That **merged in PR #1 (2026-05-31)** — already in `sessions/store.py` and
   `rekol search --include-invalidated`, tagged and forced below all live hits.
 - **`valid_from`:** future-dated memory filtered out by default.
 - **Recency:** a mild, tunable, **layer-aware** boost intended to separate
-  near-ties (durable layers `always/`/`knowledge/` exempt); see A4 for the
-  (honest) limits of that intent.
+  near-ties. Durable layers `always/`/`knowledge/` are treated as always-current
+  (full, un-decayed boost — not zero-boost); see A4. They are kept honest by a
+  periodic confirmation loop (Workstream D).
 - **Legacy cutover:** `mac_setup` gains a real uninstall for the two legacy
   components it installed; the `time-tracking/` component is retired. Sequence:
   `mac_setup uninstall` → `rekol install`. No general rekol migration tool.
@@ -133,12 +134,19 @@ scores, before `top_k` truncation:
    `today` and the comparison are date-granularity; missing/unparseable → keep.
 3. **Recency boost (layer-aware).** `final = cosine + w·exp(-age_days /
    halflife)`, age from `updated` (fallback `created`); no usable date → zero
-   term (no penalty). **Chunks whose layer (the first path component under
-   `$MEMORY_HOME`, e.g. `knowledge/`) is in `temporal_recency_exempt_layers` get
-   a zero recency term** — `always/` and `knowledge/` are durable/time-insensitive,
-   so among still-valid hits they rank on pure cosine (invalidation and
-   `valid_from` filters still apply to them; only the recency tiebreak is
-   suppressed). `filtered_count` (hits removed by 1+2) is returned alongside.
+   term. **Chunks whose layer (first path component under `$MEMORY_HOME`, e.g.
+   `knowledge/`) is in `temporal_recency_exempt_layers` are treated as
+   always-current: they get the full, un-decayed boost `w`** (not a zero term).
+   This is what actually protects durable `always/`/`knowledge/` memory — a
+   *zero* term would NOT, because a fresher non-exempt hit's own boost would
+   still edge a durable hit out at equal cosine. Full boost keeps the durable
+   hit competitive (it wins the near-tie by the fresh hit's small decay gap).
+   Invalidation and `valid_from` filters still apply to exempt layers.
+   `filtered_count` (hits removed by 1+2) is returned alongside.
+
+   **Safety valve:** because exempt memory never decays, it must be periodically
+   re-confirmed so a wrong-but-durable fact can't sit atop recall forever — see
+   Workstream D.
 
 **Honest limit (review correction):** a `w=0.03` boost is *not* a structural
 guarantee of "never overrides semantic relevance" — a 0.03 cosine gap is
@@ -179,7 +187,8 @@ temporal_exclude_invalidated:    true   # bool
 temporal_respect_valid_from:     true   # bool
 temporal_recency_weight:         0.03   # float — small; only near-ties
 temporal_recency_halflife_days:  180    # number — exponential half-life
-temporal_recency_exempt_layers:  ["always", "knowledge"]  # list[str] — durable layers exempt from the recency boost
+temporal_recency_exempt_layers:  ["always", "knowledge"]  # list[str] — durable layers; treated as always-current
+temporal_confirm_interval_days:  180    # number — durable memory overdue for re-confirmation (Workstream D)
 ```
 
 (The exempt-layers value is a flat top-level key with a list value — handled by
@@ -251,6 +260,34 @@ Happy-path order (uninstall → install) avoids this entirely.
 
 Relative phrasing ("3 weeks ago") beside absolute dates in session + curated
 hits (`cli_search.py` rendering only — no ranking change). Lowest priority.
+
+## Workstream D — Durable-memory confirmation
+
+Because exempt layers are treated as always-current, a wrong-but-durable fact
+could sit atop recall indefinitely. Add a lightweight re-confirmation loop.
+**Confirmation reuses the existing `updated` field** (confirming bumps `updated`
+to today) — no new schema column or frontmatter field; an edit already counts as
+a freshness signal. "Overdue" = `updated` (fallback `created`) older than
+`temporal_confirm_interval_days` (default 180); a memory with no date is overdue
+(encourages stamping). The exempt layers are exactly `temporal_recency_exempt_layers`.
+
+- **`rekol review`** — interactive: lists overdue exempt-layer memories and for
+  each offers **confirm** (bump `updated` to today), **invalidate** (delegates to
+  the existing invalidate path), or **skip**. `rekol review --nudge` prints only
+  the one-line reminder (for the hook) and exits 0; `--list` prints the overdue
+  set for scripting.
+- **SessionEnd nudge** — extend the SessionEnd hook with a handler running
+  `rekol review --nudge`, which prints `[rekol] N durable memories are due for
+  review — run rekol review` **only when N>0** (silent otherwise). Soft, fires at
+  most once per session end.
+- **Inline `[review?]` tag** — in search output, an exempt-layer hit whose
+  `updated` is older than the interval is tagged `[review?]` so staleness shows
+  in context.
+- **Config:** `temporal_confirm_interval_days` (default 180), tunable.
+
+Confirm writes are markdown-only (frontmatter `updated`); the index refreshes on
+the next reindex — no special index path. Overdue detection reads the curated
+index `updated` column (added in A1).
 
 ## Cutover — retire the mac_setup install (Option 2)
 
@@ -351,7 +388,11 @@ Stop             ─▶ rekol _hook record-stop  ─▶ state file (assistant ep
   not-yet-`valid_from` memory isn't surfaced.
 - Recency *usually* lets newer memory win ties without overriding a clearly
   more-relevant older hit (tunable; not a hard guarantee); it is layer-aware —
-  `always/`/`knowledge/` hits are exempt from the recency term.
+  `always/`/`knowledge/` hits get the full un-decayed boost, so a durable hit is
+  not out-ranked by a fresher hit at equal cosine.
+- `rekol review` lists durable memories overdue past `temporal_confirm_interval_days`;
+  confirm bumps `updated`; overdue durable hits are tagged `[review?]` in search;
+  the SessionEnd nudge prints only when overdue>0.
 - Search output (text + JSON) includes `created`/`updated`/`valid_from` plus
   `cosine_score` and `final_score` for curated hits.
 - A query matched only by invalidated/future memory returns 0 live hits and does
