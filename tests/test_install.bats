@@ -294,3 +294,34 @@ teardown() {
     "$SBHOME/.claude/settings.json"
   [ "$status" -ne 0 ]
 }
+
+@test "re-install adds the review nudge to a legacy two-handler SessionEnd block" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-nudge"
+  mkdir -p "$SBHOME/.claude"
+  # A SessionEnd block as a PR#1-era install would have it: capture-reminder +
+  # session-index, but no review nudge. Step 7D no-ops on this; Step 7G adds it.
+  printf '%s' \
+    '{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"},{"type":"command","command":"rekol session-index --incremental"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-nudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(. == "rekol review --nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  # session-index must not be duplicated by the merge.
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | map(select(. == "rekol session-index --incremental")) | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
