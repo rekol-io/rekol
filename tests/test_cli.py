@@ -570,3 +570,29 @@ def test_memory_search_promote_candidates_flag(tmp_path, monkeypatch):
     assert "(top 0)" not in result.output, result.output
     # promote-candidates surface should mention session count + zero memory hits
     assert "promotion candidate" in result.output.lower()
+
+
+def test_search_has_include_invalidated_flag() -> None:
+    res = CliRunner().invoke(search_main, ["--help"])
+    assert "--include-invalidated" in res.output
+
+
+def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    idx = tmp_path / ".index"
+    idx.mkdir()
+    con = sqlite3.connect(idx / "index.db")
+    con.execute(
+        "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"
+    )
+    con.execute(
+        "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, "
+        "line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB)"
+    )
+    con.commit()
+    con.close()
+    res = CliRunner().invoke(search_main, ["something", "--source", "memory"])
+    assert "rekol index rebuild" in res.output

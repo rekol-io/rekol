@@ -27,7 +27,8 @@ def rebuild() -> None:
     cfg = load_config()
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
-    store.init_schema()
+    # reset (not just init) so a pre-timestamp index gains the new columns.
+    store.reset_schema()
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,
@@ -53,6 +54,12 @@ def update() -> None:
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
+    if store.needs_schema_migration():
+        click.echo(
+            "curated index schema is out of date — run `rekol index rebuild`",
+            err=True,
+        )
+        sys.exit(1)
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,

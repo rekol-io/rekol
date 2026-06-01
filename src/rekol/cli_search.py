@@ -57,9 +57,11 @@ def _render_text(
         lines.append(f"━━ FROM MEMORY (curated, {len(result.memory_hits)} hits) ━━━━━━━━━━━━━━")
         for h in result.memory_hits:
             heading = f" #{h['heading']}" if h.get("heading") else ""
+            ts = f" · updated {h['updated']}" if h.get("updated") else ""
+            inv = " [INVALIDATED]" if h.get("invalidated_at") else ""
             lines.append(
                 f"{h.get('final_score', h['cosine_score']):.3f}  "
-                f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']})"
+                f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']}){ts}{inv}"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
@@ -110,12 +112,19 @@ def _render_text(
     is_flag=True,
     help="Output results as a single JSON object.",
 )
+@click.option(
+    "--include-invalidated",
+    is_flag=True,
+    default=False,
+    help="Include invalidated memories (tagged; ranked below live hits).",
+)
 def main(
     query: tuple[str, ...],
     top_k: int,
     source: Source,
     promote_candidates: bool,
     as_json: bool,
+    include_invalidated: bool,
 ) -> None:
     r"""Search memory and conversation transcripts. Layered output by default.
 
@@ -136,6 +145,13 @@ def main(
         # init_schema() so a missing DB doesn't crash the CLI on first run
         memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
         memory_store.init_schema()
+        if memory_store.needs_schema_migration():
+            memory_store.close()
+            click.echo(
+                "curated index schema is out of date — run `rekol index rebuild`",
+                err=True,
+            )
+            sys.exit(1)
     if source in ("sessions", "all") and cfg.session_search_enabled:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
@@ -159,6 +175,8 @@ def main(
             source=source,
             memory_top_k=top_k,
             sessions_top_k=top_k,
+            config=cfg,
+            include_invalidated=include_invalidated,
         )
         if as_json:
             click.echo(
