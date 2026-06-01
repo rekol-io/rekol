@@ -405,3 +405,81 @@ teardown() {
     "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
   [ "$output" = "1" ]
 }
+
+@test "install wires the SessionStart ingest-nudge hook" {
+  # Piece 3: install.sh must merge `rekol _hook session-start-nudge` into the
+  # SessionStart hooks so an empty store offers to ingest past history.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-ssnudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "rekol _hook session-start-nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-install adds the SessionStart nudge to a legacy single-handler block" {
+  # A SessionStart block from an earlier install carries only the index-cat
+  # handler. Step 7 no-ops on it (keyed on the index-cat command), so Step 7H
+  # must add the nudge handler exactly once.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge-legacy"
+  mkdir -p "$SBHOME/.claude"
+  # Legacy single-handler SessionStart block (no nudge handler).
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\""}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-ssnudge-legacy"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "rekol _hook session-start-nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-running install does not duplicate the SessionStart nudge handler" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge-idem"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-ssnudge-idem"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  # Exactly one nudge handler after two installs.
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | map(select(. == "rekol _hook session-start-nudge")) | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
