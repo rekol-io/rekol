@@ -26,7 +26,7 @@ import click
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.search_combined import Source, search_all
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatch
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 from rekol.store import IndexStore
 
 
@@ -144,7 +144,7 @@ def main(
         # raise a cryptic width error mid-query.
         try:
             session_store.reconcile_embedding_dim(embedder.dim)
-        except SessionStoreDimMismatch as exc:
+        except SessionStoreDimMismatchError as exc:
             session_store.close()
             click.echo(str(exc), err=True)
             sys.exit(2)

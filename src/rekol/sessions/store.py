@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
 
 
-class SessionStoreDimMismatch(RuntimeError):
+class SessionStoreDimMismatchError(RuntimeError):
     """Raised when the on-disk vector index width can't hold the model's vectors.
 
     Carries the conflicting dimensions so callers can render an actionable
@@ -399,7 +399,7 @@ class SessionStore:
           a ``--no-embed`` run before any model wrote to it) → drop and recreate
           at ``wanted_dim``; nothing is lost.
         - a **populated** table at a different width → raise
-          :class:`SessionStoreDimMismatch` so the caller can surface remediation
+          :class:`SessionStoreDimMismatchError` so the caller can surface remediation
           rather than crashing on the first read/write.
         """
         existing = self.existing_vec_dim()
@@ -409,7 +409,7 @@ class SessionStore:
         if self.count_embeddings() == 0:
             self._recreate_empty_vec(wanted_dim)
             return
-        raise SessionStoreDimMismatch(self.db_path, existing, wanted_dim)
+        raise SessionStoreDimMismatchError(self.db_path, existing, wanted_dim)
 
     def _recreate_empty_vec(self, dim: int) -> None:
         """Drop and recreate the (empty) vec0 table at ``dim``.

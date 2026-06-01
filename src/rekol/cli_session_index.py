@@ -22,7 +22,7 @@ import click
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.sessions.ingest import embed_missing, ingest_directory
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatch
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
 
 @click.command()
@@ -110,16 +110,14 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             # otherwise leave keyword-only forever. No-op (cheap count guard) once
             # everything is embedded.
             if embedder is not None:
+
+                def _repair_progress(done: int) -> None:
+                    click.echo(f"... {done} messages embedded (repair)", err=True)
+
                 repaired = embed_missing(
-                    store,
-                    embedder,
-                    progress_cb=(
-                        (lambda done: click.echo(f"... {done} messages embedded (repair)", err=True))
-                        if progress
-                        else None
-                    ),
+                    store, embedder, progress_cb=_repair_progress if progress else None
                 )
-    except SessionStoreDimMismatch as exc:
+    except SessionStoreDimMismatchError as exc:
         click.echo(str(exc), err=True)
         sys.exit(2)
 
