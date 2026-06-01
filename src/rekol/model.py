@@ -59,8 +59,9 @@ class MemoryFile:
             Defaults to ``created`` when absent.  Bi-temporal model: lets you
             represent "what did I believe in March?" instead of overwriting.
         invalidated_at: ISO-8601 date this memory's facts stopped being true.
-            ``None`` means the memory is still valid.  Search and retrieval
-            paths should de-prioritize invalidated memories.
+            ``None`` means the memory is still valid.
+            ``ranking.apply_temporal_ranking`` excludes invalidated memories
+            from default recall (opt-in via ``--include-invalidated``).
     """
 
     path: Path
