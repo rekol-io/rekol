@@ -325,3 +325,33 @@ teardown() {
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
 }
+
+@test "install rebuilds (not just updates) when the existing index has a legacy schema" {
+  command -v jq >/dev/null 2>&1 || skip "jq required"
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 required"
+
+  SBHOME="$TESTROOT/sandhome-legacy-idx"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-legacy-idx"
+  mkdir -p "$REKOLH/always" "$REKOLH/.index"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf -- '---\nname: id\ndescription: d\ntype: always\n---\nbody\n' \
+    > "$REKOLH/always/identity.md"
+  # A legacy curated index: chunks table WITHOUT the timestamp columns. Step 9's
+  # `index update` must detect this, NOT abort the install, and rebuild instead.
+  sqlite3 "$REKOLH/.index/index.db" \
+    "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT); CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB);"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-hook --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # Rebuilt (migrated): the chunks table now has the timestamp columns.
+  run sqlite3 "$REKOLH/.index/index.db" \
+    "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
+  [ "$output" = "1" ]
+}

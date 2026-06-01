@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json as json_mod
 import sys
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import click
@@ -33,9 +33,9 @@ from rekol.store import IndexStore
 
 
 def _format_session_timestamp(ts_unix: int) -> str:
-    """Format a unix timestamp as YYYY-MM-DD for the text-output session line."""
+    """Format a unix timestamp as YYYY-MM-DD in local time for the session line."""
     try:
-        return datetime.fromtimestamp(ts_unix, tz=UTC).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts_unix).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return "unknown"
 
@@ -227,7 +227,7 @@ def main(
             )
         for hit in result.session_hits:
             try:
-                session_date = datetime.fromtimestamp(hit["timestamp_unix"], tz=UTC).date()
+                session_date = datetime.fromtimestamp(hit["timestamp_unix"]).date()
                 hit["ts_rel"] = _relative_age(session_date, today=review_today)
             except (OverflowError, OSError, ValueError, KeyError):
                 hit["ts_rel"] = ""

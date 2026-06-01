@@ -697,3 +697,20 @@ def test_capture_instructs_on_legacy_schema(tmp_path: Path, monkeypatch) -> None
     )
     assert res.exit_code == 1
     assert "rekol index rebuild" in res.output
+
+
+def test_session_timestamp_renders_local_date(monkeypatch) -> None:
+    import datetime as dt
+    import time
+
+    from rekol.cli_search import _format_session_timestamp
+
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        # 2026-06-01T05:00:00Z is 2026-05-31 22:00 PDT — render the LOCAL day, not UTC.
+        ts = int(dt.datetime(2026, 6, 1, 5, 0, 0, tzinfo=dt.UTC).timestamp())
+        assert _format_session_timestamp(ts) == "2026-05-31"
+    finally:
+        monkeypatch.undo()
+        time.tzset()

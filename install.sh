@@ -665,10 +665,18 @@ fi
 # Run rebuild on first install; update on subsequent runs.
 
 if [[ -f "${RESOLVED_HOME}/.index/index.db" ]]; then
-  say "existing index found — running rekol index update"
-  # Invoke the single venv entrypoint directly so the correct venv is used even
-  # when --tools-home overrides the default ~/.local/share/rekol path.
-  run "'${TOOLS_HOME}/.venv/bin/rekol' index update"
+  # Update on a current index; rebuild if it is a legacy (pre-timestamp) schema.
+  # `rekol index update` exits non-zero and instructs a rebuild on an outdated
+  # schema — that must NOT abort the install (it would skip the Step 9.5 session
+  # backfill), so we catch it and rebuild. Invoke the venv entrypoint directly so
+  # the correct venv is used when --tools-home overrides the default.
+  say "existing index found — running rekol index update (rebuild if schema is outdated)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "DRY-RUN: '${TOOLS_HOME}/.venv/bin/rekol' index update (or rebuild on a legacy schema)"
+  elif ! "${TOOLS_HOME}/.venv/bin/rekol" index update; then
+    say "index update did not apply (legacy schema) — running rekol index rebuild"
+    "${TOOLS_HOME}/.venv/bin/rekol" index rebuild
+  fi
 else
   say "no index found — running rekol index rebuild"
   run "'${TOOLS_HOME}/.venv/bin/rekol' index rebuild"
