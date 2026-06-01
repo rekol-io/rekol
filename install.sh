@@ -553,6 +553,35 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7G — ensure the durable-memory review nudge is wired into SessionEnd
+# =============================================================================
+# Step 7D merges the whole SessionEnd block on a fresh install (which now
+# includes a `rekol review --nudge` handler). But on a machine that already had
+# the earlier two-handler SessionEnd block, Step 7D no-ops (keyed on the
+# session-index command), so the newer nudge handler would never be added. This
+# step adds the nudge as its own SessionEnd entry iff it is absent — idempotent
+# on fresh installs (where Step 7D already added it).
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  HAS_NUDGE="$(
+    jq '[.hooks.SessionEnd[]?.hooks[]?.command] | any(. == "rekol review --nudge")' \
+      "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+  if [[ "$HAS_NUDGE" == "true" ]]; then
+    say "SessionEnd review-nudge handler already present — no-op"
+  else
+    local_settings_nudge_backup="${SETTINGS_JSON}.bak-nudge-${TS}"
+    run "cp '${SETTINGS_JSON}' '${local_settings_nudge_backup}'"
+    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_nudge_backup}"
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \"rekol review --nudge\"}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "MERGED SessionEnd review-nudge handler into ${SETTINGS_JSON}"
+    say "added SessionEnd review-nudge handler to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,
