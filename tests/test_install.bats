@@ -240,3 +240,57 @@ teardown() {
   run env REKOL_HOME="$TESTROOT/mem" "$TESTROOT/tools/.venv/bin/rekol" search "identity" --top 3
   [ "$status" -eq 0 ]
 }
+
+@test "install wires UserPromptSubmit time-context and Stop record-stop hooks" {
+  # Verifies Phase B: install.sh Steps 7E/7F merge REKOL's own time hooks so the
+  # <env-time> block comes from rekol, not the external mac_setup component.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-time"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-time"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '.hooks.UserPromptSubmit[].hooks[] | select(.command == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  run jq -e '.hooks.Stop[].hooks[] | select(.command == "rekol _hook record-stop")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "double-injection guard warns and skips on a legacy mac_setup time hook" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-legacy"
+  mkdir -p "$SBHOME/.claude"
+  printf '%s' \
+    '{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"~/.local/share/mac_setup/hooks/inject-time-context.sh"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-legacy"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Legacy mac_setup time hook detected"* ]]
+
+  # REKOL's time-context hook must NOT have been added while the legacy one stands.
+  run jq -e '[.hooks.UserPromptSubmit[].hooks[].command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+}
