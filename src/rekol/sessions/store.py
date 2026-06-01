@@ -27,6 +27,26 @@ if TYPE_CHECKING:
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
 
 
+class SessionStoreDimMismatchError(RuntimeError):
+    """Raised when the on-disk vector index width can't hold the model's vectors.
+
+    Carries the conflicting dimensions so callers can render an actionable
+    message instead of letting a raw sqlite-vec width error surface on the first
+    read or write.
+    """
+
+    def __init__(self, db_path: Path, existing_dim: int, wanted_dim: int) -> None:
+        self.db_path = db_path
+        self.existing_dim = existing_dim
+        self.wanted_dim = wanted_dim
+        super().__init__(
+            f"sessions index at {db_path} was built with {existing_dim}-dim embeddings, "
+            f"but the configured model produces {wanted_dim}-dim vectors. Restore the "
+            f"previous embedding_model, or rebuild the transcript index:\n"
+            f"  rm '{db_path}' && rekol session-index --full"
+        )
+
+
 def build_fts_match(query: str) -> str | None:
     """Turn a raw user query into a safe FTS5 ``MATCH`` expression.
 
@@ -272,6 +292,139 @@ class SessionStore:
                 (rowid, vec.tobytes()),
             )
         self.conn.commit()
+
+    def upsert_embedding_no_commit(self, rowid: int, vec: np.ndarray) -> None:
+        """Same as ``upsert_embedding`` but the caller controls the transaction.
+
+        Used by ``ingest_file`` so a whole file's message embeddings are written
+        in the same single BEGIN/COMMIT as the message inserts — avoiding the
+        per-row fsync that would otherwise dominate a deep-history backfill, and
+        keeping message rows and their embeddings atomic (a crash leaves the
+        file un-recorded in ``files_seen`` and the next run reingests cleanly).
+        """
+        import numpy as np
+
+        if vec.dtype != np.float32:
+            vec = vec.astype(np.float32)
+        if self._vec_loaded:
+            self.conn.execute("DELETE FROM messages_vec WHERE rowid = ?", (rowid,))
+            self.conn.execute(
+                "INSERT INTO messages_vec(rowid, embedding) VALUES(?, ?)",
+                (rowid, vec.tobytes()),
+            )
+        else:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO messages_vec_numpy(rowid, embedding) VALUES(?, ?)",
+                (rowid, vec.tobytes()),
+            )
+
+    def _vec_table(self) -> str:
+        """Name of the embedding table in use (vec0 vs numpy fallback).
+
+        A single internal constant, never user input, so it is safe to splice
+        into the SQL below.
+        """
+        return "messages_vec" if self._vec_loaded else "messages_vec_numpy"
+
+    def count_messages(self) -> int:
+        """Total message rows. Used as a cheap guard for the self-heal pass."""
+        return int(self.conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"])
+
+    def count_embeddings(self) -> int:
+        """Total embedding rows.
+
+        Embeddings are a subset of message rowids (never orphaned: messages are
+        never deleted here), so ``count_embeddings() == count_messages()`` iff
+        every message is embedded — letting the repair pass skip the (more
+        expensive) anti-join in the steady state.
+        """
+        return int(
+            self.conn.execute(f"SELECT COUNT(*) AS n FROM {self._vec_table()}").fetchone()["n"]
+        )
+
+    def fetch_unembedded(self, limit: int) -> list[tuple[int, str]]:
+        """Return up to ``limit`` (rowid, content) pairs for unembedded messages.
+
+        Drives the self-heal pass that backfills embeddings for an index built
+        FTS-only (or with ``--no-embed``): the mtime+size skip gate would never
+        revisit those files, so this is the only path to full semantic coverage
+        short of a destructive rebuild.
+        """
+        rows = self.conn.execute(
+            f"SELECT m.id AS id, m.content AS content FROM messages m "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {self._vec_table()} v WHERE v.rowid = m.id) "
+            f"ORDER BY m.id LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [(int(r["id"]), r["content"]) for r in rows]
+
+    def existing_vec_dim(self) -> int | None:
+        """Embedding dimension already stored on disk, or None if undetermined.
+
+        ``init_schema`` creates ``messages_vec`` with ``CREATE ... IF NOT
+        EXISTS``, so re-opening a DB that was built at a different dimension is a
+        silent no-op — the table keeps its original width and the mismatch only
+        surfaces later as a cryptic sqlite-vec error on the first insert. This
+        lets callers detect the conflict up front and tell the user how to fix
+        it.
+
+        vec0 path: parse the declared ``float[N]`` from the table's schema.
+        numpy fallback: infer N from the byte length of any stored row (float32,
+        4 bytes each); returns None when the table is empty (no width yet).
+        """
+        if self._vec_loaded:
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'messages_vec'"
+            ).fetchone()
+            if row is None or not row["sql"]:
+                return None
+            match = re.search(r"float\s*\[\s*(\d+)\s*\]", row["sql"])
+            return int(match.group(1)) if match else None
+        row = self.conn.execute(
+            "SELECT LENGTH(embedding) AS nbytes FROM messages_vec_numpy LIMIT 1"
+        ).fetchone()
+        if row is None or row["nbytes"] is None:
+            return None
+        return int(row["nbytes"]) // 4  # float32 → 4 bytes per dimension
+
+    def reconcile_embedding_dim(self, wanted_dim: int) -> None:
+        """Make the vector index able to hold ``wanted_dim`` vectors, or fail loudly.
+
+        Owns the "requested dim must match on-disk dim" invariant for every
+        caller that reads or writes vectors (ingest and search alike), instead
+        of each command re-checking. Three cases:
+
+        - matching, or no vectors stored yet → no-op.
+        - a stale **empty** vec0 table at a different width (e.g. one created by
+          a ``--no-embed`` run before any model wrote to it) → drop and recreate
+          at ``wanted_dim``; nothing is lost.
+        - a **populated** table at a different width → raise
+          :class:`SessionStoreDimMismatchError` so the caller can surface remediation
+          rather than crashing on the first read/write.
+        """
+        existing = self.existing_vec_dim()
+        if existing is None or existing == wanted_dim:
+            self.dim = wanted_dim
+            return
+        if self.count_embeddings() == 0:
+            self._recreate_empty_vec(wanted_dim)
+            return
+        raise SessionStoreDimMismatchError(self.db_path, existing, wanted_dim)
+
+    def _recreate_empty_vec(self, dim: int) -> None:
+        """Drop and recreate the (empty) vec0 table at ``dim``.
+
+        Only the vec0 path declares a width up front, so only it can be "empty
+        but wrong width"; the numpy fallback has no declared width and reports
+        ``existing_vec_dim() is None`` when empty, so it never reaches here.
+        """
+        self.dim = dim
+        if self._vec_loaded:
+            self.conn.execute("DROP TABLE IF EXISTS messages_vec")
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE messages_vec USING vec0(embedding float[{dim}])"
+            )
+            self.conn.commit()
 
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.

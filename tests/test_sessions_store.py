@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from rekol.sessions.store import SessionStore
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
 
 def test_init_schema_creates_expected_tables(tmp_path: Path) -> None:
@@ -111,6 +112,119 @@ def test_search_vec_returns_top_k(tmp_path: Path) -> None:
     hits = store.search_vec(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), top_k=1)
     assert len(hits) == 1
     assert hits[0]["message_uuid"] == "a"
+    store.close()
+
+
+def test_upsert_embedding_no_commit_batches_within_caller_transaction(tmp_path: Path) -> None:
+    """The no-commit variant lets ingest write a whole file's embeddings in one
+    transaction (no per-row fsync). Rows must be searchable once the caller's
+    transaction commits.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rowid_a = store.insert_message(_make_msg(uuid="a"))
+    rowid_b = store.insert_message(_make_msg(uuid="b", line=2))
+    with store.conn:
+        store.upsert_embedding_no_commit(rowid_a, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        store.upsert_embedding_no_commit(rowid_b, np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+    hits = store.search_vec(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), top_k=1)
+    assert len(hits) == 1
+    assert hits[0]["message_uuid"] == "b"
+    store.close()
+
+
+def test_fetch_unembedded_and_counts(tmp_path: Path) -> None:
+    """The self-heal primitives must report which messages lack an embedding so
+    an index built FTS-only (or with --no-embed) can be brought to full
+    semantic coverage without a destructive rebuild.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid_a = store.insert_message(_make_msg(uuid="a"))
+    rid_b = store.insert_message(_make_msg(uuid="b", line=2))
+    rid_c = store.insert_message(_make_msg(uuid="c", line=3))
+    assert store.count_messages() == 3
+    assert store.count_embeddings() == 0
+    # All three are unembedded initially.
+    pending = store.fetch_unembedded(limit=10)
+    assert {rowid for rowid, _content in pending} == {rid_a, rid_b, rid_c}
+    # Embed one; it must drop out of the unembedded set and the counts update.
+    with store.conn:
+        store.upsert_embedding_no_commit(rid_a, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    assert store.count_embeddings() == 1
+    remaining = store.fetch_unembedded(limit=10)
+    assert rid_a not in {rowid for rowid, _content in remaining}
+    assert {rowid for rowid, _content in remaining} == {rid_b, rid_c}
+    store.close()
+
+
+def test_existing_vec_dim_reports_stored_dimension(tmp_path: Path) -> None:
+    """existing_vec_dim must report the width an index was built with, so a later
+    run under a different-dimension model can fail fast instead of crashing
+    cryptically on the first vector insert.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    # vec0 reads the dim from the schema; numpy fallback infers it from the row.
+    assert store.existing_vec_dim() == 4
+    store.close()
+
+
+def test_reconcile_embedding_dim_noop_when_matching(tmp_path: Path) -> None:
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    # Same width — must not raise or disturb the stored embedding.
+    store.reconcile_embedding_dim(4)
+    assert store.count_embeddings() == 1
+    store.close()
+
+
+def test_reconcile_embedding_dim_recreates_empty_stale_table(tmp_path: Path) -> None:
+    """A vec table created at one width but never written (e.g. by a --no-embed
+    run) must be recreated at the new width rather than blocking embedding.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    assert store.count_embeddings() == 0  # nothing written
+    # No rows → safe to adopt the new width with no data loss, no error.
+    store.reconcile_embedding_dim(8)
+    assert store.dim == 8
+    # A subsequent 8-dim embedding now writes and is searchable.
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32))
+    assert store.count_embeddings() == 1
+    store.close()
+
+
+def test_reconcile_embedding_dim_raises_on_populated_mismatch(tmp_path: Path) -> None:
+    """A vec index that already holds vectors at one width must refuse a
+    different width loudly, so callers surface remediation instead of crashing.
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    rid = store.insert_message(_make_msg(uuid="a"))
+    with store.conn:
+        store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    with pytest.raises(SessionStoreDimMismatchError) as excinfo:
+        store.reconcile_embedding_dim(8)
+    assert excinfo.value.existing_dim == 4
+    assert excinfo.value.wanted_dim == 8
+    store.close()
+
+
+def test_fetch_unembedded_respects_limit(tmp_path: Path) -> None:
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4)
+    store.init_schema()
+    for i in range(5):
+        store.insert_message(_make_msg(uuid=f"u{i}", line=i + 1))
+    assert len(store.fetch_unembedded(limit=2)) == 2
     store.close()
 
 

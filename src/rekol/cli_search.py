@@ -26,7 +26,7 @@ import click
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.search_combined import Source, search_all
-from rekol.sessions.store import SessionStore
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 from rekol.store import IndexStore
 
 
@@ -138,6 +138,16 @@ def main(
     if source in ("sessions", "all") and cfg.session_search_enabled:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
+        # The vector tier can only be queried at the index's own width. If the
+        # embedding model changed since the index was built, fail with the same
+        # actionable message the ingest path uses rather than letting sqlite-vec
+        # raise a cryptic width error mid-query.
+        try:
+            session_store.reconcile_embedding_dim(embedder.dim)
+        except SessionStoreDimMismatchError as exc:
+            session_store.close()
+            click.echo(str(exc), err=True)
+            sys.exit(2)
     try:
         query_text = " ".join(query)
         result = search_all(

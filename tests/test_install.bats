@@ -156,6 +156,71 @@ teardown() {
     [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }
 
+@test "install wires SessionEnd transcript-index hook and backfills sessions" {
+  # Verifies FIX 1: install.sh merges the SessionEnd hook (Step 7D) so
+  # transcripts index automatically, and backfills existing history (Step 9.5).
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  # Sandbox HOME so the hook merge targets a throwaway settings.json, never the
+  # real ~/.claude/settings.json.
+  SBHOME="$TESTROOT/sandhome"
+  mkdir -p "$SBHOME/.claude/projects/proj"
+  # A real transcript to backfill (the same fixture the Python tests use).
+  cp "$COMPONENT_DIR/tests/fixtures/sample_session.jsonl" \
+     "$SBHOME/.claude/projects/proj/session.jsonl"
+
+  # Pre-seed REKOL_HOME with a test-hashing config so the home is non-empty
+  # (skips template seeding) and both the Step 9 rebuild and Step 9.5 backfill
+  # use the fast hashing embedder — no sentence-transformers model download.
+  # git_track: false is required — install.sh Step 8.5 greps the config for it
+  # under `set -o pipefail`, so a config missing the key aborts the install.
+  REKOLH="$TESTROOT/rekolhome"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\nclaude_projects_dir: %s/.claude/projects\n' \
+    "$SBHOME" > "$REKOLH/rekol.config.yaml"
+
+  # Hooks ON (no --no-hook); skip skill/shellrc to keep side effects in the box.
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # Step 7D: the SessionEnd hook now carries the transcript-index command.
+  run jq -e '.hooks.SessionEnd[].hooks[] | select(.command | test("session-index"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+
+  # Step 9.5: the backfill created the sessions index from the fixture history.
+  [ -f "$REKOLH/.index/sessions.db" ]
+}
+
+@test "install does not abort when the config omits git_track" {
+  # Regression: Step 8.5 greps the config for git_track under `set -o pipefail`.
+  # A config that omits the key makes grep exit 1, which used to abort the whole
+  # install. A hand-written/partial config must still install cleanly (git
+  # tracking simply stays off, the safe default).
+  SBHOME="$TESTROOT/sandhome-gt"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-gt"
+  mkdir -p "$REKOLH"
+  # Deliberately NO git_track line, and no projects dir (backfill self-gates).
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-hook --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  # Got past Step 8.5 and built the curated index.
+  [ -f "$REKOLH/.index/index.db" ]
+  # git tracking stayed off (no key present, no repo initialised).
+  [ ! -d "$REKOLH/.git" ]
+}
+
 @test "full install seeds generic template and yields a working search" {
   # Plan 2: migration is now opt-in (no --migrate here), and the template is
   # genericized, so the from-zero install path can run end-to-end in CI.
