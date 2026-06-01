@@ -57,6 +57,18 @@ def _review_tag(
     return ""
 
 
+def _relative_age(day: date, *, today: date) -> str:
+    """Phrase the age of ``day`` relative to ``today`` (e.g. '3 weeks ago')."""
+    days = (today - day).days
+    if days <= 0:
+        return "today"
+    for unit, span in (("year", 365), ("month", 30), ("week", 7), ("day", 1)):
+        if days >= span:
+            value = days // span
+            return f"{value} {unit}{'s' if value > 1 else ''} ago"
+    return "today"
+
+
 def _render_text(
     result,
     top_k_memory: int,
@@ -76,7 +88,8 @@ def _render_text(
         lines.append(f"━━ FROM MEMORY (curated, {len(result.memory_hits)} hits) ━━━━━━━━━━━━━━")
         for h in result.memory_hits:
             heading = f" #{h['heading']}" if h.get("heading") else ""
-            ts = f" · updated {h['updated']}" if h.get("updated") else ""
+            rel = f" ({h['updated_rel']})" if h.get("updated_rel") else ""
+            ts = f" · updated {h['updated']}{rel}" if h.get("updated") else ""
             inv = " [INVALIDATED]" if h.get("invalidated_at") else ""
             lines.append(
                 f"{h.get('final_score', h['cosine_score']):.3f}  "
@@ -92,7 +105,8 @@ def _render_text(
             date_str = _format_session_timestamp(h["timestamp_unix"])
             cwd = h.get("cwd") or "?"
             session_id_short = h["session_id"][:8]
-            lines.append(f"{h['score']:.3f}  {date_str} — {cwd} — session {session_id_short}")
+            srel = f" ({h['ts_rel']})" if h.get("ts_rel") else ""
+            lines.append(f"{h['score']:.3f}  {date_str}{srel} — {cwd} — session {session_id_short}")
             lines.append(f"    [{h['role']}] {h['content'][:200]}")
             lines.append("")
     if promote_candidates and result.is_promotion_candidate:
@@ -207,6 +221,16 @@ def main(
                 interval_days=cfg.temporal_confirm_interval_days,
                 today=review_today,
             )
+            updated_date = _as_date(hit.get("updated"))
+            hit["updated_rel"] = (
+                _relative_age(updated_date, today=review_today) if updated_date else ""
+            )
+        for hit in result.session_hits:
+            try:
+                session_date = datetime.fromtimestamp(hit["timestamp_unix"], tz=UTC).date()
+                hit["ts_rel"] = _relative_age(session_date, today=review_today)
+            except (OverflowError, OSError, ValueError, KeyError):
+                hit["ts_rel"] = ""
         if as_json:
             click.echo(
                 json_mod.dumps(

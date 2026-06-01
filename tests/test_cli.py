@@ -626,3 +626,12 @@ def test_overdue_durable_tag_helper() -> None:
         )
         == ""
     )
+
+
+def test_relative_phrasing_helper() -> None:
+    import datetime as dt
+
+    from rekol.cli_search import _relative_age
+
+    assert _relative_age(dt.date(2026, 5, 11), today=dt.date(2026, 6, 1)) == "3 weeks ago"
+    assert _relative_age(dt.date(2026, 6, 1), today=dt.date(2026, 6, 1)) == "today"
