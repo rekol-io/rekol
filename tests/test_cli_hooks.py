@@ -47,3 +47,10 @@ def test_hook_snippets_call_rekol_hook():
     assert "rekol _hook time-context" in ups["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     stop = json.loads((repo / "hooks" / "stop-snippet.json").read_text())
     assert "rekol _hook record-stop" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+
+def test_sessionend_snippet_includes_review_nudge():
+    repo = Path(__file__).resolve().parents[1]
+    snip = json.loads((repo / "hooks" / "sessionend-snippet.json").read_text())
+    cmds = [h["command"] for h in snip["hooks"]["SessionEnd"][0]["hooks"]]
+    assert any("rekol review --nudge" in c for c in cmds)
