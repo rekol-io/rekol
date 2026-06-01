@@ -9,6 +9,13 @@ from typing import Any
 
 import numpy as np
 
+CURATED_SCHEMA_VERSION = 2  # 1 = original schema; 2 = with curated timestamp columns
+
+
+class CuratedSchemaOutdatedError(RuntimeError):
+    """Curated index predates the timestamp columns; a rebuild is required."""
+
+
 SCHEMA_FILES = """
 CREATE TABLE IF NOT EXISTS files (
     path          TEXT PRIMARY KEY,
@@ -28,6 +35,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     text         TEXT NOT NULL,
     tags_json    TEXT NOT NULL DEFAULT '[]',
     aliases_json TEXT NOT NULL DEFAULT '[]',
+    created        TEXT,
+    updated        TEXT,
+    valid_from     TEXT,
+    invalidated_at TEXT,
     embedding    BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
@@ -72,12 +83,22 @@ class IndexStore:
     def init_schema(self) -> None:
         """Create the files and chunks tables if they do not yet exist."""
         self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS)
+        self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
         self.conn.commit()
 
     def list_tables(self) -> list[str]:
         """Return the names of all tables in the database."""
         rows = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return [r["name"] for r in rows]
+
+    def needs_schema_migration(self) -> bool:
+        """True when the curated index predates the timestamp columns.
+
+        Detected by column presence (robust even for indexes built before
+        versioning existed); ``user_version`` is also stamped for future use.
+        """
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(chunks)")}
+        return "created" not in cols
 
     def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
         """Insert or update a file's mtime, content hash, and indexed timestamp."""
