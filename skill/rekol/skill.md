@@ -24,6 +24,18 @@ Before capturing a new memory, run `rekol search` against its gist. If a near-du
 
 Before recommending a path, command, ID, env name, or canonical reference, do a quick `rekol search` against the topic. Prevents recommending stale info from in-context reasoning when a canonical source already exists.
 
+## Bring in existing history
+
+When a user wants to seed REKOL from work that already exists, map their phrasing to these commands. Run the command, then confirm with a `rekol search` so the user can verify ingestion worked.
+
+| The user says… | Run | What it does |
+| --- | --- | --- |
+| "Index my past Claude Code sessions" / "index my history" | `rekol session-index --incremental` (or `--full` to force a re-walk of everything). On a brand-new install, `rekol init` wraps this with a confirm prompt. | Ingests `~/.claude/projects/**/*.jsonl` transcripts into the sessions index so `rekol search` surfaces past work. |
+| "Import my notes from ~/Documents/ObsidianVault" | `rekol import ~/Documents/ObsidianVault` | Converts a tree of text files into synthetic transcripts under `claude_projects_dir`, then chains `session-index --incremental` to ingest them. |
+| "What do you remember about <X>?" | `rekol search "<X>" --top 5 --json` | Searches curated memory + transcripts; use it to confirm an index/import actually landed. |
+
+`rekol import` is a **mechanical conversion** — it turns your documents into searchable transcript text. It is **not** an LLM reading your notes and filing them into `always/`/`when/`/`topics/` layers. Curating notes into durable layered memory is still done with `rekol capture` (manually or proactively), one fact at a time.
+
 ## Capture — proactive, not silent
 
 Capture surprises, corrections, and validated approaches as a side effect of getting work done — not just on explicit "remember this." But always tell the user **what** was captured/changed in one line so they can audit without going hunting.
