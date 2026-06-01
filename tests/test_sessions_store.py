@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
 import pytest
 
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatch
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
 
 def test_init_schema_creates_expected_tables(tmp_path: Path) -> None:
@@ -199,9 +198,7 @@ def test_reconcile_embedding_dim_recreates_empty_stale_table(tmp_path: Path) -> 
     # A subsequent 8-dim embedding now writes and is searchable.
     rid = store.insert_message(_make_msg(uuid="a"))
     with store.conn:
-        store.upsert_embedding_no_commit(
-            rid, np.array([1, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        )
+        store.upsert_embedding_no_commit(rid, np.array([1, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32))
     assert store.count_embeddings() == 1
     store.close()
 
@@ -215,7 +212,7 @@ def test_reconcile_embedding_dim_raises_on_populated_mismatch(tmp_path: Path) ->
     rid = store.insert_message(_make_msg(uuid="a"))
     with store.conn:
         store.upsert_embedding_no_commit(rid, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
-    with pytest.raises(SessionStoreDimMismatch) as excinfo:
+    with pytest.raises(SessionStoreDimMismatchError) as excinfo:
         store.reconcile_embedding_dim(8)
     assert excinfo.value.existing_dim == 4
     assert excinfo.value.wanted_dim == 8
