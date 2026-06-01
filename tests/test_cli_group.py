@@ -18,11 +18,14 @@ EXPECTED_COMMANDS = {
     "capture",
     "invalidate",
     "propose",
+    "review",
     "migrate",
     "session-index",
     "import",
     "init",
 }
+
+HIDDEN_COMMANDS = {"_hook"}  # registered but hidden from --help
 
 
 def test_main_is_a_click_group() -> None:
@@ -31,7 +34,12 @@ def test_main_is_a_click_group() -> None:
 
 def test_registered_command_names_match_exactly() -> None:
     # This set is the automated guard that every console script is accounted for.
-    assert set(rekol_main.commands.keys()) == EXPECTED_COMMANDS
+    assert set(rekol_main.commands.keys()) == EXPECTED_COMMANDS | HIDDEN_COMMANDS
+
+
+def test_hook_group_is_hidden_from_help() -> None:
+    result = CliRunner().invoke(rekol_main, ["--help"])
+    assert "_hook" not in result.output
 
 
 def test_help_exits_zero_and_lists_subcommands() -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 import click
 import frontmatter
 
+from rekol.cli_common import guard_curated_schema
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -80,6 +81,7 @@ def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
+    guard_curated_schema(store)
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,

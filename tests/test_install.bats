@@ -240,3 +240,118 @@ teardown() {
   run env REKOL_HOME="$TESTROOT/mem" "$TESTROOT/tools/.venv/bin/rekol" search "identity" --top 3
   [ "$status" -eq 0 ]
 }
+
+@test "install wires UserPromptSubmit time-context and Stop record-stop hooks" {
+  # Verifies Phase B: install.sh Steps 7E/7F merge REKOL's own time hooks so the
+  # <env-time> block comes from rekol, not the external mac_setup component.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-time"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-time"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '.hooks.UserPromptSubmit[].hooks[] | select(.command == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  run jq -e '.hooks.Stop[].hooks[] | select(.command == "rekol _hook record-stop")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "double-injection guard warns and skips on a legacy mac_setup time hook" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-legacy"
+  mkdir -p "$SBHOME/.claude"
+  printf '%s' \
+    '{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"~/.local/share/mac_setup/hooks/inject-time-context.sh"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-legacy"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Legacy mac_setup time hook detected"* ]]
+
+  # REKOL's time-context hook must NOT have been added while the legacy one stands.
+  run jq -e '[.hooks.UserPromptSubmit[].hooks[].command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "re-install adds the review nudge to a legacy two-handler SessionEnd block" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-nudge"
+  mkdir -p "$SBHOME/.claude"
+  # A SessionEnd block as a PR#1-era install would have it: capture-reminder +
+  # session-index, but no review nudge. Step 7D no-ops on this; Step 7G adds it.
+  printf '%s' \
+    '{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"},{"type":"command","command":"rekol session-index --incremental"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-nudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(. == "rekol review --nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  # session-index must not be duplicated by the merge.
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | map(select(. == "rekol session-index --incremental")) | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "install rebuilds (not just updates) when the existing index has a legacy schema" {
+  command -v jq >/dev/null 2>&1 || skip "jq required"
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 required"
+
+  SBHOME="$TESTROOT/sandhome-legacy-idx"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-legacy-idx"
+  mkdir -p "$REKOLH/always" "$REKOLH/.index"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf -- '---\nname: id\ndescription: d\ntype: always\n---\nbody\n' \
+    > "$REKOLH/always/identity.md"
+  # A legacy curated index: chunks table WITHOUT the timestamp columns. Step 9's
+  # `index update` must detect this, NOT abort the install, and rebuild instead.
+  sqlite3 "$REKOLH/.index/index.db" \
+    "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT); CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB);"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-hook --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # Rebuilt (migrated): the chunks table now has the timestamp columns.
+  run sqlite3 "$REKOLH/.index/index.db" \
+    "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
+  [ "$output" = "1" ]
+}

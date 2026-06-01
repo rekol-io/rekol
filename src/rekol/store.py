@@ -9,6 +9,13 @@ from typing import Any
 
 import numpy as np
 
+CURATED_SCHEMA_VERSION = 2  # 1 = original schema; 2 = with curated timestamp columns
+
+
+class CuratedSchemaOutdatedError(RuntimeError):
+    """Curated index predates the timestamp columns; a rebuild is required."""
+
+
 SCHEMA_FILES = """
 CREATE TABLE IF NOT EXISTS files (
     path          TEXT PRIMARY KEY,
@@ -28,6 +35,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     text         TEXT NOT NULL,
     tags_json    TEXT NOT NULL DEFAULT '[]',
     aliases_json TEXT NOT NULL DEFAULT '[]',
+    created        TEXT,
+    updated        TEXT,
+    valid_from     TEXT,
+    invalidated_at TEXT,
     embedding    BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
@@ -72,12 +83,38 @@ class IndexStore:
     def init_schema(self) -> None:
         """Create the files and chunks tables if they do not yet exist."""
         self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS)
+        self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
         self.conn.commit()
 
     def list_tables(self) -> list[str]:
         """Return the names of all tables in the database."""
         rows = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return [r["name"] for r in rows]
+
+    def needs_schema_migration(self) -> bool:
+        """True when the curated index predates the timestamp columns.
+
+        Detected by column presence (robust even for indexes built before
+        versioning existed); ``user_version`` is also stamped for future use.
+        """
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(chunks)")}
+        return "created" not in cols
+
+    def reset_schema(self) -> None:
+        """Drop and recreate the curated tables so a rebuild picks up schema changes."""
+        self.conn.executescript("DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files;")
+        self.conn.commit()
+        self.init_schema()
+
+    def distinct_file_timestamps(self) -> list[dict[str, Any]]:
+        """One row per indexed file: ``{file_path, updated, created}``."""
+        rows = self.conn.execute(
+            "SELECT file_path, MAX(updated) AS updated, MAX(created) AS created "
+            "FROM chunks GROUP BY file_path"
+        ).fetchall()
+        return [
+            dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows
+        ]
 
     def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
         """Insert or update a file's mtime, content hash, and indexed timestamp."""
@@ -113,8 +150,13 @@ class IndexStore:
         self,
         file_path: str,
         chunks: list[dict[str, Any]],
+        *,
+        created: str | None = None,
+        updated: str | None = None,
+        valid_from: str | None = None,
+        invalidated_at: str | None = None,
     ) -> None:
-        """Replace all chunks for a file with ``chunks``, storing their embeddings."""
+        """Replace a file's chunks; the four file-level timestamps go on each row."""
         cur = self.conn.cursor()
         cur.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
         for c in chunks:
@@ -123,7 +165,8 @@ class IndexStore:
                 emb = emb.astype(np.float32)
             cur.execute(
                 "INSERT INTO chunks(file_path, heading, line_start, line_end, "
-                "text, tags_json, aliases_json, embedding) VALUES(?,?,?,?,?,?,?,?)",
+                "text, tags_json, aliases_json, created, updated, valid_from, "
+                "invalidated_at, embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     file_path,
                     c.get("heading"),
@@ -132,6 +175,10 @@ class IndexStore:
                     c["text"],
                     json.dumps(c.get("tags", [])),
                     json.dumps(c.get("aliases", [])),
+                    created,
+                    updated,
+                    valid_from,
+                    invalidated_at,
                     emb.tobytes(),
                 ),
             )
@@ -163,7 +210,8 @@ class IndexStore:
             query_vec = query_vec.astype(np.float32)
         rows = self.conn.execute(
             "SELECT id, file_path, heading, line_start, line_end, text, "
-            "tags_json, aliases_json, embedding FROM chunks"
+            "tags_json, aliases_json, created, updated, valid_from, "
+            "invalidated_at, embedding FROM chunks"
         ).fetchall()
         if not rows:
             return []
@@ -186,7 +234,12 @@ class IndexStore:
                     text=r["text"],
                     tags=json.loads(r["tags_json"]),
                     aliases=json.loads(r["aliases_json"]),
-                    score=float(scores[i]),
+                    created=r["created"],
+                    updated=r["updated"],
+                    valid_from=r["valid_from"],
+                    invalidated_at=r["invalidated_at"],
+                    cosine_score=float(scores[i]),
+                    score=float(scores[i]),  # back-compat alias (= cosine; pre-ranking readers)
                 )
             )
         return out
