@@ -106,6 +106,15 @@ class IndexStore:
         self.conn.commit()
         self.init_schema()
 
+    def distinct_file_timestamps(self) -> list[dict[str, Any]]:
+        """One row per indexed file: ``{file_path, updated, created}``."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT file_path, updated, created FROM chunks"
+        ).fetchall()
+        return [
+            dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows
+        ]
+
     def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
         """Insert or update a file's mtime, content hash, and indexed timestamp."""
         self.conn.execute(
