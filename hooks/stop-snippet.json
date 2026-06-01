@@ -1,0 +1,16 @@
+{
+  "_comment": "Merge into ~/.claude/settings.json hooks.Stop. Records the assistant-completion timestamp so the next turn can compute elapsed deltas. Soft-fail: writes nothing to stdout and always exits 0.",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rekol _hook record-stop"
+          }
+        ]
+      }
+    ]
+  }
+}

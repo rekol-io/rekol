@@ -1,6 +1,7 @@
 """Tests for the hidden rekol _hook time-context / record-stop subcommands."""
 
 import json
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -38,3 +39,11 @@ def test_soft_fail_on_path_traversal_session_id(tmp_path, monkeypatch):
     res = _run(["time-context"], json.dumps({"session_id": "../../evil"}))
     assert res.exit_code == 0
     assert not (tmp_path / "evil.json").exists()
+
+
+def test_hook_snippets_call_rekol_hook():
+    repo = Path(__file__).resolve().parents[1]
+    ups = json.loads((repo / "hooks" / "userpromptsubmit-snippet.json").read_text())
+    assert "rekol _hook time-context" in ups["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    stop = json.loads((repo / "hooks" / "stop-snippet.json").read_text())
+    assert "rekol _hook record-stop" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
