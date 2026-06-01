@@ -7,6 +7,7 @@ provides the single entry-point ``parse_file`` used by every other module.
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +88,27 @@ class MemoryFile:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_ts(value: object, *, date_only: bool) -> str | None:
+    """Canonicalize a frontmatter timestamp to a single ISO format.
+
+    PyYAML parses bare dates to ``date``/``datetime`` objects whose ``str()`` is
+    space-separated, while the capture/invalidate CLIs write ``T``-separated ISO
+    strings. Left unnormalized the index column would hold incompatible formats.
+    ``date_only=True`` stores ``YYYY-MM-DD`` (created/updated/valid_from);
+    otherwise full ISO with a ``T`` separator (invalidated_at).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, _dt.datetime):  # before date: datetime subclasses date
+        return value.date().isoformat() if date_only else value.isoformat(timespec="seconds")
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    s = str(value).strip()
+    if date_only:
+        return s[:10]
+    return s.replace(" ", "T")
+
+
 def parse_file(path: Path) -> MemoryFile:
     """Read *path*, parse its YAML frontmatter, validate, and return a :class:`MemoryFile`.
 
@@ -132,10 +154,10 @@ def parse_file(path: Path) -> MemoryFile:
         tags=_coerce_list(meta, "tags", path),
         aliases=_coerce_list(meta, "aliases", path),
         see_also=_coerce_list(meta, "see_also", path),
-        created=str(meta["created"]) if meta.get("created") else None,
-        updated=str(meta["updated"]) if meta.get("updated") else None,
-        valid_from=str(meta["valid_from"]) if meta.get("valid_from") else None,
-        invalidated_at=(str(meta["invalidated_at"]) if meta.get("invalidated_at") else None),
+        created=_normalize_ts(meta.get("created"), date_only=True),
+        updated=_normalize_ts(meta.get("updated"), date_only=True),
+        valid_from=_normalize_ts(meta.get("valid_from"), date_only=True),
+        invalidated_at=_normalize_ts(meta.get("invalidated_at"), date_only=False),
     )
 
 
