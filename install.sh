@@ -66,6 +66,73 @@ log_journal() {
   fi
 }
 
+# Expands a single leading `~` to $HOME (the shell does not expand tilde inside
+# variables read from stdin). Anything else is returned unchanged.
+expand_leading_tilde() {
+  local value="$1"
+  case "$value" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s/%s' "$HOME" "${value#\~/}" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+# Lists existing common macOS cloud-sync dirs (best-effort, one per line) so the
+# prompt can suggest them. The authoritative detection lives in the Python
+# onboarding.detect module (`rekol init`); this is a deliberately thin shell
+# subset that must never fail the install if nothing matches.
+detected_cloud_sync_dirs() {
+  local candidate glob
+  for candidate in \
+    "$HOME/Library/CloudStorage/Dropbox" \
+    "$HOME/Dropbox" \
+    "$HOME/Library/Mobile Documents/com~apple~CloudDocs"; do
+    if [[ -d "$candidate" ]]; then printf '%s\n' "$candidate"; fi
+  done
+  # GoogleDrive-* / OneDrive-* mount under CloudStorage with an account suffix;
+  # glob them so a present account is suggested without hard-coding the email.
+  for glob in \
+    "$HOME/Library/CloudStorage/GoogleDrive-"* \
+    "$HOME/Library/CloudStorage/OneDrive-"*; do
+    if [[ -d "$glob" ]]; then printf '%s\n' "$glob"; fi
+  done
+  # Always succeed: a no-match must not make `set -e` abort the caller's
+  # `suggestions="$(detected_cloud_sync_dirs)"` assignment.
+  return 0
+}
+
+# Interactively resolves a memory-home path from the user, defaulting to
+# DEFAULT_HOME on empty input and expanding a leading tilde. Suggestions (any
+# detected cloud-sync dirs) and the prompt go to stderr so the resolved path is
+# the only thing on stdout — callers capture it with $(...). The `read` is
+# guarded with `|| true` so an EOF under `set -e`/`pipefail` does not abort the
+# install before the value is resolved.
+prompt_for_memory_home() {
+  local default_home="$1"
+  local suggestions reply
+  suggestions="$(detected_cloud_sync_dirs)"
+  if [[ -n "$suggestions" ]]; then
+    {
+      printf 'Detected cloud-sync folders you could keep memory in:\n'
+      printf '  %s\n' $suggestions
+      printf '(or any local folder; keep the .index/ dir out of sync)\n'
+    } >&2
+  fi
+  printf 'Memory folder [%s]: ' "$default_home" >&2
+  read -r reply || true
+  if [[ -z "$reply" ]]; then
+    reply="$default_home"
+  fi
+  expand_leading_tilde "$reply"
+}
+
+# Sourcing hook: when REKOL_INSTALL_SOURCE_ONLY=1, define the helpers above and
+# return before any installation runs, so tests can exercise the prompt logic in
+# isolation. Harmless in normal use (the variable is unset).
+if [[ "${REKOL_INSTALL_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # --- Argument parsing ---
 
 while [[ $# -gt 0 ]]; do
@@ -86,10 +153,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Pre-flight: REKOL_HOME (or MEMORY_HOME fallback) must be set ---
+# When neither is set we prompt for a folder IF stdin is a TTY (interactive
+# install), defaulting to $HOME/rekol-memory. When stdin is NOT a TTY
+# (CI/piped/non-interactive) we keep the hard `exit 2` — there is no one to
+# answer the prompt, so failing loudly is correct.
 
 if [[ -z "${REKOL_HOME:-}" && -z "${MEMORY_HOME:-}" ]]; then
-  printf 'error: neither REKOL_HOME nor MEMORY_HOME is set. Point REKOL_HOME at any directory (sync it via Dropbox/iCloud/git/Syncthing or keep it local) (MEMORY_HOME is accepted as a fallback).\n' >&2
-  exit 2
+  if [[ -t 0 ]]; then
+    REKOL_HOME="$(prompt_for_memory_home "$HOME/rekol-memory")"
+  else
+    printf 'error: neither REKOL_HOME nor MEMORY_HOME is set. Point REKOL_HOME at any directory (sync it via Dropbox/iCloud/git/Syncthing or keep it local) (MEMORY_HOME is accepted as a fallback).\n' >&2
+    exit 2
+  fi
 fi
 
 # REKOL_HOME is the primary data-directory variable; MEMORY_HOME is kept as a
