@@ -10,6 +10,7 @@ import click
 
 from rekol.cli_capture import main as capture_cmd
 from rekol.cli_docs_convert import main as import_cmd
+from rekol.cli_hooks import hook_group
 from rekol.cli_index import main as index_grp
 from rekol.cli_init import main as init_cmd
 from rekol.cli_invalidate import main as invalidate_cmd
@@ -37,6 +38,7 @@ main.add_command(migrate_grp, name="migrate")
 main.add_command(session_index_cmd, name="session-index")
 main.add_command(import_cmd, name="import")
 main.add_command(init_cmd, name="init")
+main.add_command(hook_group, name="_hook")
 
 
 # Enables `python -m rekol.cli` (used by the bin/rekol shim). The installed
