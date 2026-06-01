@@ -16,6 +16,7 @@ from rekol.cli_init import main as init_cmd
 from rekol.cli_invalidate import main as invalidate_cmd
 from rekol.cli_migrate import main as migrate_grp
 from rekol.cli_propose import main as propose_cmd
+from rekol.cli_review import main as review_cmd
 from rekol.cli_search import main as search_cmd
 from rekol.cli_session_index import main as session_index_cmd
 
@@ -34,6 +35,7 @@ main.add_command(index_grp, name="index")
 main.add_command(capture_cmd, name="capture")
 main.add_command(invalidate_cmd, name="invalidate")
 main.add_command(propose_cmd, name="propose")
+main.add_command(review_cmd, name="review")
 main.add_command(migrate_grp, name="migrate")
 main.add_command(session_index_cmd, name="session-index")
 main.add_command(import_cmd, name="import")
