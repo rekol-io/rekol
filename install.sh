@@ -388,6 +388,39 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7A — strip the deprecated SessionStart ingest-nudge handler
+# =============================================================================
+# An earlier rekol version wired a `rekol _hook session-start-nudge` handler into
+# the SessionStart block. Onboarding is now pull-only (the user asks the agent to
+# set up memory), so that auto-nudge was removed. The code revert leaves the
+# handler already wired on existing machines, so (re-)install must actively strip
+# it: drop any SessionStart handler whose command contains `session-start-nudge`,
+# leave every other handler intact, and prune entries left with no handlers.
+# Idempotent — a no-op when no nudge handler is present.
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  HAS_SS_NUDGE="$(
+    jq '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("session-start-nudge"))' \
+      "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+  if [[ "$HAS_SS_NUDGE" != "true" ]]; then
+    say "no deprecated SessionStart ingest-nudge handler to remove — no-op"
+  else
+    local_settings_ssnudge_backup="${SETTINGS_JSON}.bak-ssnudge-${TS}"
+    run "cp '${SETTINGS_JSON}' '${local_settings_ssnudge_backup}'"
+    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ssnudge_backup}"
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq '.hooks.SessionStart = [
+        .hooks.SessionStart[]?
+        | .hooks = [.hooks[]? | select((.command // \"\") | contains(\"session-start-nudge\") | not)]
+        | select((.hooks | length) > 0)
+      ]' '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "REMOVED deprecated SessionStart ingest-nudge handler from ${SETTINGS_JSON}"
+    say "removed deprecated SessionStart ingest-nudge handler from ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 7.5 — REKOL_HOME into ~/.claude/settings.json env block
 # =============================================================================
 # Claude Code sessions do NOT source ~/.zshrc, so the shell-level REKOL_HOME
@@ -657,36 +690,6 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# Step 7H — ensure the SessionStart ingest-nudge is wired into SessionStart
-# =============================================================================
-# Step 7 merges the whole SessionStart block on a fresh install (the snippet now
-# carries a `rekol _hook session-start-nudge` handler alongside the index-cat).
-# But on a machine that already had the earlier single-handler SessionStart
-# block, Step 7 no-ops (keyed on the index-cat command), so the newer nudge
-# handler would never be added. This step adds it as its own SessionStart entry
-# iff absent — idempotent on fresh installs (where Step 7 already added it) and
-# on reruns (keyed on the exact nudge command).
-
-if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
-  HAS_SS_NUDGE="$(
-    jq '[.hooks.SessionStart[]?.hooks[]?.command] | any(. == "rekol _hook session-start-nudge")' \
-      "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
-  )"
-  if [[ "$HAS_SS_NUDGE" == "true" ]]; then
-    say "SessionStart ingest-nudge handler already present — no-op"
-  else
-    local_settings_ssnudge_backup="${SETTINGS_JSON}.bak-ssnudge-${TS}"
-    run "cp '${SETTINGS_JSON}' '${local_settings_ssnudge_backup}'"
-    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ssnudge_backup}"
-    local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \"rekol _hook session-start-nudge\"}]}])' \
-      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-    log_journal "MERGED SessionStart ingest-nudge handler into ${SETTINGS_JSON}"
-    say "added SessionStart ingest-nudge handler to ${SETTINGS_JSON}"
-  fi
-fi
-
-# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,
@@ -851,3 +854,5 @@ say "next steps:"
 say "  1. source ${ZSHRC}   (or open a new terminal)"
 say "  2. edit ${RESOLVED_HOME}/always/identity.md   to tell Claude who you are"
 say "  3. rekol search \"identity\"   to verify"
+say "  4. open Claude and ask it to \"set up my rekol memory\" or \"index my past sessions\""
+say "     to bring your history in (rekol never does this on its own)"
