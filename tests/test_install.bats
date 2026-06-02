@@ -134,6 +134,8 @@ teardown() {
 # ---------------------------------------------------------------------------
 # Test 6 — missing home (neither REKOL_HOME nor MEMORY_HOME) fails with error
 # ---------------------------------------------------------------------------
+# Piece 1: a NON-interactive run (stdin is the bats pipe, not a TTY) with both
+# vars unset must still hard-exit 2 — the prompt only fires on a real TTY.
 @test "missing REKOL_HOME and MEMORY_HOME exits 2 with error message" {
     run env -u REKOL_HOME -u MEMORY_HOME \
         "${COMPONENT_DIR}/install.sh" \
@@ -143,6 +145,54 @@ teardown() {
 
     [ "$status" -eq 2 ]
     [[ "$output" == *"REKOL_HOME"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Piece 1 — interactive prompt-with-default (prompt logic, sourced in isolation)
+# ---------------------------------------------------------------------------
+# bats's `run` pipes stdin, so the installer's `[[ -t 0 ]]` TTY check is false
+# and the prompt never fires end-to-end. We instead source ONLY the helper
+# functions (REKOL_INSTALL_SOURCE_ONLY=1 makes install.sh return early) and call
+# prompt_for_memory_home directly with piped input — exactly what the TTY path
+# would read. The prompt text goes to stderr, so we discard stderr (2>/dev/null)
+# and assert against stdout, which carries only the resolved path.
+
+@test "prompt_for_memory_home accepts a typed path" {
+    run env REKOL_INSTALL_SOURCE_ONLY=1 HOME="$TESTROOT/home" bash -c '
+        source "'"${COMPONENT_DIR}"'/install.sh"
+        printf "%s\n" "/tmp/my-mem" | prompt_for_memory_home "$HOME/rekol-memory" 2>/dev/null
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "/tmp/my-mem" ]
+}
+
+@test "prompt_for_memory_home defaults on empty input" {
+    run env REKOL_INSTALL_SOURCE_ONLY=1 HOME="$TESTROOT/home" bash -c '
+        source "'"${COMPONENT_DIR}"'/install.sh"
+        printf "\n" | prompt_for_memory_home "$HOME/rekol-memory" 2>/dev/null
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "$TESTROOT/home/rekol-memory" ]
+}
+
+@test "prompt_for_memory_home expands a leading tilde" {
+    run env REKOL_INSTALL_SOURCE_ONLY=1 HOME="$TESTROOT/home" bash -c '
+        source "'"${COMPONENT_DIR}"'/install.sh"
+        printf "%s\n" "~/elsewhere" | prompt_for_memory_home "$HOME/rekol-memory" 2>/dev/null
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "$TESTROOT/home/elsewhere" ]
+}
+
+@test "prompt_for_memory_home defaults on EOF without aborting under set -e" {
+    # Closed stdin (EOF) must yield the default, not a non-zero exit — the `read`
+    # is guarded with `|| true` precisely so `set -euo pipefail` does not abort.
+    run env REKOL_INSTALL_SOURCE_ONLY=1 HOME="$TESTROOT/home" bash -c '
+        source "'"${COMPONENT_DIR}"'/install.sh"
+        prompt_for_memory_home "$HOME/rekol-memory" < /dev/null 2>/dev/null
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "$TESTROOT/home/rekol-memory" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -354,4 +404,82 @@ teardown() {
   run sqlite3 "$REKOLH/.index/index.db" \
     "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
   [ "$output" = "1" ]
+}
+
+@test "install wires the SessionStart ingest-nudge hook" {
+  # Piece 3: install.sh must merge `rekol _hook session-start-nudge` into the
+  # SessionStart hooks so an empty store offers to ingest past history.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-ssnudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "rekol _hook session-start-nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-install adds the SessionStart nudge to a legacy single-handler block" {
+  # A SessionStart block from an earlier install carries only the index-cat
+  # handler. Step 7 no-ops on it (keyed on the index-cat command), so Step 7H
+  # must add the nudge handler exactly once.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge-legacy"
+  mkdir -p "$SBHOME/.claude"
+  # Legacy single-handler SessionStart block (no nudge handler).
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\""}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-ssnudge-legacy"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "rekol _hook session-start-nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-running install does not duplicate the SessionStart nudge handler" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-ssnudge-idem"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-ssnudge-idem"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  # Exactly one nudge handler after two installs.
+  run jq -e '[.hooks.SessionStart[].hooks[].command] | map(select(. == "rekol _hook session-start-nudge")) | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
 }

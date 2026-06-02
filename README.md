@@ -16,25 +16,43 @@
 
 ## Install (macOS)
 ```bash
-git clone https://github.com/leonkatz/rekol
-cd rekol
-export REKOL_HOME="$HOME/memory"   # any folder you like
-./install.sh
+git clone https://github.com/leonkatz/rekol && cd rekol && ./install.sh
 ```
-`install.sh` sets up a venv, the `rekol` CLI, the Claude Code hooks + skill,
-seeds a starter memory from `template/`, and builds the vector index.
+The installer asks where to keep your memory (default `~/rekol-memory`,
+press Enter to accept). It then sets up a venv, the `rekol` CLI, the Claude
+Code hooks + skill, seeds a starter memory from `template/`, and builds the
+vector index.
+
+**Optional — choose the folder up front** (skips the prompt):
+```bash
+export REKOL_HOME="$HOME/rekol-memory"   # any folder you own
+```
+Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the `.index/`
+directory stays local and is excluded from sync.
+
+## Bring in your history
+
+A fresh install starts with an essentially empty store. To seed it from work
+you already have:
+
+- **Index past Claude Code sessions** — `rekol session-index --incremental`
+  makes your existing transcripts searchable. `rekol init` wraps this (and the
+  steps below) in confirm prompts. When the store is empty and past sessions
+  exist, REKOL also offers this once at the start of a session.
+- **Import a notes/docs folder** — `rekol import ~/Documents/ObsidianVault`
+  converts a tree of text files into searchable content. This is a mechanical
+  conversion (it makes your docs findable) — not an LLM filing notes into the
+  `always`/`when`/`topics` layers.
+- **Verify it landed** — `rekol search "something you wrote"`.
 
 ## Quickstart (fresh install)
 
-1. `git clone https://github.com/leonkatz/rekol && cd rekol`
-2. Point REKOL at a folder you own: `export REKOL_HOME=~/rekol-memory`
-   (sync it via Dropbox/iCloud/git/Syncthing or keep it local — the `.index/`
-   directory stays local and is excluded from sync).
-3. `./install.sh` — seeds the empty root from `template/`, builds the first
-   index, and installs the hook + skill.
-4. `rekol init` — indexes any existing Claude Code history and offers to import
+1. `git clone https://github.com/leonkatz/rekol && cd rekol && ./install.sh`
+   — answer the memory-folder prompt (or pre-set `REKOL_HOME`), then it seeds
+   `template/`, builds the first index, and installs the hook + skill.
+2. `rekol init` — indexes any existing Claude Code history and offers to import
    your notes.
-5. Edit `always/identity.md`, then try `rekol search "..."` / `rekol capture`.
+3. Edit `always/identity.md`, then try `rekol search "..."` / `rekol capture`.
 
 ## CLI
 A single `rekol` command with subcommands:
