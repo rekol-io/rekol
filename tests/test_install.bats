@@ -405,3 +405,92 @@ teardown() {
     "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
   [ "$output" = "1" ]
 }
+
+@test "fresh install does NOT wire the SessionStart ingest-nudge handler" {
+  # Onboarding is pull-only: the SessionStart auto-nudge was removed. A fresh
+  # install must never wire `rekol _hook session-start-nudge`.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-no-ssnudge"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-no-ssnudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # No SessionStart handler may reference the nudge.
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("session-start-nudge"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "re-install strips an already-wired SessionStart nudge, keeping the index-cat handler" {
+  # An earlier rekol version wired `rekol _hook session-start-nudge` into the
+  # SessionStart block on existing machines. (Re-)installing must actively
+  # remove that handler while leaving the index-cat handler intact.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-strip-ssnudge"
+  mkdir -p "$SBHOME/.claude"
+  # SessionStart block as a nudge-era install left it: index-cat handler plus a
+  # separate nudge handler entry.
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\""}]},{"matcher":"","hooks":[{"type":"command","command":"rekol _hook session-start-nudge"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-strip-ssnudge"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # The nudge handler is gone...
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("session-start-nudge"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+  # ...and the index-cat handler survives.
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("REKOL.md"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-install leaves a nudge-free SessionStart block untouched (idempotent strip)" {
+  # The strip must be a no-op when no nudge handler is present, and stay clean
+  # across repeated installs over a settings.json that once had the nudge.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-idem-strip"
+  mkdir -p "$SBHOME/.claude"
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"rekol _hook session-start-nudge"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-idem-strip"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("session-start-nudge"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+}

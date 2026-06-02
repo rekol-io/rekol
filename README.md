@@ -37,8 +37,8 @@ you already have:
 
 - **Index past Claude Code sessions** — `rekol session-index --incremental`
   makes your existing transcripts searchable. `rekol init` wraps this (and the
-  steps below) in confirm prompts. When the store is empty and past sessions
-  exist, REKOL also offers this once at the start of a session.
+  steps below) in confirm prompts. REKOL never indexes on its own — just open
+  Claude and ask it to "set up my rekol memory" or "index my past sessions".
 - **Import a notes/docs folder** — `rekol import ~/Documents/ObsidianVault`
   converts a tree of text files into searchable content. This is a mechanical
   conversion (it makes your docs findable) — not an LLM filing notes into the
