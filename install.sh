@@ -657,36 +657,6 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# Step 7H — ensure the SessionStart ingest-nudge is wired into SessionStart
-# =============================================================================
-# Step 7 merges the whole SessionStart block on a fresh install (the snippet now
-# carries a `rekol _hook session-start-nudge` handler alongside the index-cat).
-# But on a machine that already had the earlier single-handler SessionStart
-# block, Step 7 no-ops (keyed on the index-cat command), so the newer nudge
-# handler would never be added. This step adds it as its own SessionStart entry
-# iff absent — idempotent on fresh installs (where Step 7 already added it) and
-# on reruns (keyed on the exact nudge command).
-
-if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
-  HAS_SS_NUDGE="$(
-    jq '[.hooks.SessionStart[]?.hooks[]?.command] | any(. == "rekol _hook session-start-nudge")' \
-      "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
-  )"
-  if [[ "$HAS_SS_NUDGE" == "true" ]]; then
-    say "SessionStart ingest-nudge handler already present — no-op"
-  else
-    local_settings_ssnudge_backup="${SETTINGS_JSON}.bak-ssnudge-${TS}"
-    run "cp '${SETTINGS_JSON}' '${local_settings_ssnudge_backup}'"
-    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ssnudge_backup}"
-    local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \"rekol _hook session-start-nudge\"}]}])' \
-      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-    log_journal "MERGED SessionStart ingest-nudge handler into ${SETTINGS_JSON}"
-    say "added SessionStart ingest-nudge handler to ${SETTINGS_JSON}"
-  fi
-fi
-
-# =============================================================================
 # Step 8 — Sync-ignore file for the local vector index (best-effort)
 # =============================================================================
 # Keep the local vector index out of any file-sync (it is machine-specific,

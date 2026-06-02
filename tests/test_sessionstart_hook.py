@@ -12,9 +12,8 @@ SNIPPET = REPO_ROOT / "hooks" / "sessionstart-snippet.json"
 
 def _hook_command() -> str:
     data = json.loads(SNIPPET.read_text(encoding="utf-8"))
-    # Snippet shape: {"hooks":{"SessionStart":[{"hooks":[{"command": "..."}, ...]}]}}
-    # Collect every command, then return the index-cat one (the snippet also
-    # carries a `rekol _hook session-start-nudge` handler we ignore here).
+    # Snippet shape: {"hooks":{"SessionStart":[{"hooks":[{"command": "..."}]}]}}
+    # Walk to the single command string regardless of nesting depth.
     found: list[str] = []
 
     def walk(node: object) -> None:
@@ -28,9 +27,8 @@ def _hook_command() -> str:
                 walk(v)
 
     walk(data)
-    cat_commands = [c for c in found if "REKOL.md" in c]
-    assert len(cat_commands) == 1, f"expected one index-cat command, got {len(cat_commands)}"
-    return cat_commands[0]
+    assert len(found) == 1, f"expected exactly one command, got {len(found)}"
+    return found[0]
 
 
 def _run(command: str, home: Path) -> str:
