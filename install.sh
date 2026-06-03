@@ -190,6 +190,34 @@ if [[ "$DRY_RUN" == "0" ]]; then
   printf 'rekol install %s\n' "$TS" >> "$JOURNAL"
 fi
 
+# --- Install manifest ---
+# Records the resolved install parameters so uninstall.sh can be deterministic:
+# when a user installs with custom --tools-home/--bin-dir and later runs
+# uninstall with no flags, the uninstaller reads this manifest to find the exact
+# venv + shim it must remove (instead of guessing built-in defaults and silently
+# leaving the custom paths behind).
+#
+# Location: a STABLE path under $REKOL_HOME that uninstall can find knowing only
+# REKOL_HOME — NOT under .index/ (disposable/purgeable). Reuses .install-logs/.
+# Format: simple KEY=value lines, overwritten on every (re)install (idempotent).
+# Uninstall reads it by whitelisting keys — it never sources this file.
+MANIFEST="${JOURNAL_DIR}/manifest.env"
+if [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: write install manifest ${MANIFEST}"
+else
+  {
+    printf '# rekol install manifest — written by install.sh; read by uninstall.sh.\n'
+    printf '# Whitelisted KEY=value lines only; never sourced. Safe to delete.\n'
+    printf 'TOOLS_HOME=%s\n' "${TOOLS_HOME}"
+    printf 'BIN_DIR=%s\n' "${BIN_DIR}"
+    printf 'REKOL_HOME=%s\n' "${RESOLVED_HOME}"
+    printf 'SHIM=%s\n' "${BIN_DIR}/rekol"
+    printf 'INSTALLED_AT=%s\n' "${TS}"
+  } > "${MANIFEST}"
+  log_journal "WROTE manifest ${MANIFEST}"
+  say "wrote install manifest ${MANIFEST}"
+fi
+
 # =============================================================================
 # Step 1 — Python venv
 # =============================================================================
