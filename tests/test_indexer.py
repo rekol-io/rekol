@@ -136,6 +136,26 @@ def test_rebuild_removes_legacy_root_INDEX_md(memory_root: Path) -> None:
     assert (memory_root / ".index" / "INDEX.md").is_file()
 
 
+def test_index_md_follows_cache_dir_not_memory_root(memory_root: Path, tmp_path: Path) -> None:
+    # SECURITY/relocation: when the index dir is a separate cache (outside the
+    # memory root), INDEX.md is written there too — $REKOL_HOME holds ZERO
+    # derived state.
+    cache_dir = tmp_path / "cache" / "rekol" / "abc123"
+    store = IndexStore(db_path=cache_dir / "index.db", dim=384, use_sqlite_vec=False)
+    store.init_schema()
+    idx = Indexer(
+        memory_root=memory_root,
+        store=store,
+        embedder=HashingEmbedder(dim=384),
+        index_dir=cache_dir,
+    )
+    idx.rebuild()
+    assert (cache_dir / "INDEX.md").is_file()
+    # Nothing derived lands under the (syncable) memory root.
+    assert not (memory_root / ".index").exists()
+    assert not (memory_root / "INDEX.md").exists()
+
+
 def test_skips_files_with_bad_frontmatter(memory_root: Path) -> None:
     bad = memory_root / "topics" / "broken.md"
     bad.write_text("no frontmatter at all\n")

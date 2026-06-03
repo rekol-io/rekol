@@ -1,4 +1,4 @@
-"""Indexer: walk $MEMORY_HOME, embed changed files, write .index/INDEX.md."""
+"""Indexer: walk $MEMORY_HOME, embed changed files, write INDEX.md into the cache."""
 
 from __future__ import annotations
 
@@ -67,11 +67,17 @@ class Indexer:
         store: IndexStore,
         embedder: BaseEmbedder,
         chunk_max_bytes: int = 4000,
+        index_dir: Path | None = None,
     ) -> None:
         self.memory_root = Path(memory_root)
         self.store = store
         self.embedder = embedder
         self.chunk_max_bytes = chunk_max_bytes
+        # SECURITY: INDEX.md is derived state and must land in the local-only
+        # cache (outside $REKOL_HOME) alongside the SQLite stores, so the synced
+        # memory folder holds pure markdown only.  When no index_dir is given we
+        # fall back to the legacy in-tree location for backward compatibility.
+        self.index_dir = Path(index_dir) if index_dir is not None else self.memory_root / ".index"
 
     def _index_one(self, path: Path) -> int:
         """Parse, embed, and write chunks for a single file.
@@ -208,16 +214,17 @@ class Indexer:
         return stats
 
     def _write_index_md(self) -> None:  # noqa: C901  # complex but stable; refactor tracked separately
-        """Regenerate ``.index/INDEX.md``: tag → files, alias → file, per-layer listing.
+        """Regenerate ``INDEX.md``: tag → files, alias → file, per-layer listing.
 
         Groups files by their top-level directory name (``always``, ``when``,
         ``topics``, ``knowledge``) rather than by the ``type`` frontmatter field.
         The directory names are intentionally plural (e.g. ``topics/``), while
         the type field value is singular (``topic``).
 
-        Lives under ``.index/`` so Claude does not speculatively read it as
-        memory content.  ``REKOL.md`` (always-on, hand-curated) is the only
-        index file at the memory_root level.
+        Written into ``self.index_dir`` — the local-only cache outside
+        ``$REKOL_HOME`` — so it is treated as derived state and never synced.
+        ``REKOL.md`` (always-on, hand-curated) is the only index file the
+        memory_root carries.
         """
         tag_to_files: dict[str, list[str]] = {}
         alias_to_file: dict[str, str] = {}
@@ -279,10 +286,15 @@ class Indexer:
                 lines.append(f"- `{alias}` → [`{rel}`]({rel})")
             lines.append("")
 
-        index_dir = self.memory_root / ".index"
-        index_dir.mkdir(parents=True, exist_ok=True)
-        (index_dir / "INDEX.md").write_text("\n".join(lines))
-        # Remove any pre-existing root-level INDEX.md from older installs.
-        legacy = self.memory_root / "INDEX.md"
-        if legacy.exists():
-            legacy.unlink()
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        (self.index_dir / "INDEX.md").write_text("\n".join(lines))
+        # Remove any pre-existing INDEX.md from older installs that wrote it
+        # inside the synced memory tree (root-level and the legacy .index/ dir).
+        for legacy in (
+            self.memory_root / "INDEX.md",
+            self.memory_root / ".index" / "INDEX.md",
+        ):
+            # Never delete the file we just wrote (covers the no-cache fallback
+            # where index_dir == memory_root/.index).
+            if legacy != self.index_dir / "INDEX.md" and legacy.exists():
+                legacy.unlink()
