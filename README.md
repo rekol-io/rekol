@@ -78,5 +78,34 @@ vector index under `.index/` stays local and must be excluded from sync (it is
 machine-specific and rebuildable). The installer writes `.dropboxignore`; for
 other sync tools, exclude `.index/` yourself.
 
+## Uninstalling
+rekol is yours to remove cleanly. From the repo:
+```bash
+./uninstall.sh            # interactive — asks before deleting the rebuildable index
+./uninstall.sh --dry-run  # preview every change without touching anything
+./uninstall.sh --yes      # non-interactive (keeps the index)
+```
+The uninstaller reverses what the installer set up — the `~/bin/rekol` shim, the
+`rekol`/`memory` skills, the `~/.local/share/rekol` venv, every rekol hook in
+`~/.claude/settings.json` (plus `env.REKOL_HOME`), and the rekol PATH + env
+export lines in `~/.zshrc`. It backs up `settings.json` and `.zshrc` to
+timestamped `.bak` files before editing them, and is idempotent (safe to re-run).
+
+If you installed to **custom paths** (`--tools-home` / `--bin-dir`), you don't
+need to repeat them: the installer records the resolved paths in a manifest at
+`$REKOL_HOME/.install-logs/manifest.env`, and `./uninstall.sh` reads it to find
+the right venv and shim. Precedence is explicit flags, then the manifest, then
+the built-in defaults. If a path can't be confirmed (no manifest and nothing at
+the default), the uninstaller reports it as a possible leftover at the end rather
+than silently skipping it — re-run with `--tools-home PATH` / `--bin-dir PATH` (or
+delete it by hand).
+
+**Your markdown memory is never deleted.** Everything under `$REKOL_HOME`
+(`always/`, `when/`, `topics/`, `knowledge/`, your `*.md`, the config, the local
+git repo) is preserved. Only the derived `.index/` is removable — and only with
+`--purge-index` or by confirming the prompt. After uninstalling, run
+`source ~/.zshrc` (or open a new terminal). Re-running `./install.sh` later works
+cleanly from that state.
+
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).
