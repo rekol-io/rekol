@@ -6,15 +6,17 @@
 #
 # SAFETY: your markdown memory is NEVER deleted. The user's content under
 # $REKOL_HOME (always/, when/, topics/, knowledge/, *.md, *.config.yaml, the
-# local git repo, etc.) is preserved. Only the derived, rebuildable .index/ may
-# be removed — and only with confirmation or --purge-index.
+# local git repo, etc.) is preserved. Only the derived, rebuildable index — the
+# local cache outside $REKOL_HOME, plus any legacy in-tree .index/ — may be
+# removed, and only with confirmation or --purge-index.
 #
 # Required environment variable (same resolver as install.sh):
 #   REKOL_HOME — path to the memory root (MEMORY_HOME accepted as a fallback).
 #
 # Flags:
 #   --dry-run       print what would change; touch nothing
-#   --purge-index   also delete $REKOL_HOME/.index/ (rebuildable; off by default)
+#   --purge-index   also delete the rebuildable index (local cache + any legacy
+#                   in-tree $REKOL_HOME/.index/); off by default
 #   --yes           non-interactive; assume "yes" to prompts (e.g. CI/scripts)
 #   --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
 #   --bin-dir P     override default ~/bin (where the rekol shim lives)
@@ -73,18 +75,21 @@ What it removes:
 What it PRESERVES:
   - all markdown memory under $REKOL_HOME (always/, when/, topics/, knowledge/,
     *.md, *.config.yaml, the local git repo) — your data, never deleted
-  - the derived .index/ unless you pass --purge-index (or confirm the prompt)
+  - the derived index (local cache outside $REKOL_HOME, plus any legacy in-tree
+    .index/) unless you pass --purge-index (or confirm the prompt)
 
 Path discovery: the venv (tools-home) and shim (bin-dir) are resolved by
 precedence — explicit --tools-home/--bin-dir flags, else the install manifest at
-$REKOL_HOME/.install-logs/manifest.env, else the built-in defaults. So a custom
-install is found automatically; you only need the flags if the manifest is gone.
-If a path cannot be confirmed (no manifest, default missing), it is reported at
-the end as a possible leftover instead of being silently skipped.
+$REKOL_HOME/.install-logs/manifest.env, else the built-in defaults. The local
+index cache is read from the manifest's INDEX_DIR (or recomputed from the venv
+if still present). So a custom install is found automatically; you only need the
+flags if the manifest is gone. If a path cannot be confirmed (no manifest,
+default missing), it is reported at the end as a possible leftover instead of
+being silently skipped.
 
 Flags:
   --dry-run       print what would change; touch nothing
-  --purge-index   also delete $REKOL_HOME/.index/ (rebuildable)
+  --purge-index   also delete the rebuildable index (cache + legacy in-tree)
   --yes           non-interactive; assume "yes" to prompts
   --tools-home P  override the venv home (else manifest, else ~/.local/share/rekol)
   --bin-dir P     override the shim dir (else manifest, else ~/bin)
@@ -175,6 +180,7 @@ note_leftover()  { LEFTOVERS+=("$1"); }
 MANIFEST_FILE="${RESOLVED_HOME:+${RESOLVED_HOME}/.install-logs/manifest.env}"
 MANIFEST_TOOLS_HOME=""
 MANIFEST_BIN_DIR=""
+MANIFEST_INDEX_DIR=""
 MANIFEST_FOUND=0
 
 # Reads one whitelisted KEY's value from the manifest. Only the exact keys passed
@@ -195,6 +201,7 @@ if [[ -n "$MANIFEST_FILE" && -f "$MANIFEST_FILE" ]]; then
   MANIFEST_FOUND=1
   MANIFEST_TOOLS_HOME="$(manifest_value TOOLS_HOME "$MANIFEST_FILE")"
   MANIFEST_BIN_DIR="$(manifest_value BIN_DIR "$MANIFEST_FILE")"
+  MANIFEST_INDEX_DIR="$(manifest_value INDEX_DIR "$MANIFEST_FILE")"
 fi
 
 # TOOLS_HOME: flag wins; else manifest; else default. Track the source so the
@@ -219,6 +226,31 @@ else
   BIN_DIR="$BIN_DIR_DEFAULT"
 fi
 readonly TOOLS_HOME BIN_DIR TOOLS_HOME_SOURCE BIN_DIR_SOURCE MANIFEST_FOUND MANIFEST_FILE
+
+# --- Resolve the local-only index cache to remove ---
+# SECURITY: install relocated the index (index.db + the secrets-bearing
+# sessions.db + INDEX.md) OUT of $REKOL_HOME into ${XDG_CACHE_HOME:-~/.cache}/
+# rekol/<hash>. Uninstall must remove that cache too, or it lingers forever.
+# Resolution (highest precedence first):
+#   1. the manifest's recorded INDEX_DIR (exact path install used)
+#   2. the still-present venv's resolver (only if the venv exists AND we know
+#      REKOL_HOME) — recomputes the same hash the tools use
+# Resolve this BEFORE Step 3 removes the venv. If neither source yields a path,
+# INDEX_DIR stays empty and Step 6 reports it as a possible leftover.
+INDEX_DIR=""
+INDEX_DIR_SOURCE="unknown"
+if [[ -n "$MANIFEST_INDEX_DIR" ]]; then
+  INDEX_DIR="$MANIFEST_INDEX_DIR"
+  INDEX_DIR_SOURCE="manifest"
+elif [[ -n "$RESOLVED_HOME" && -x "${TOOLS_HOME}/.venv/bin/python" ]]; then
+  INDEX_DIR="$(
+    REKOL_HOME="${RESOLVED_HOME}" "${TOOLS_HOME}/.venv/bin/python" -c \
+      'from rekol.config import resolve_index_dir, resolve_memory_home; from pathlib import Path; import os; print(resolve_index_dir(Path(os.path.expanduser(resolve_memory_home()))))' \
+      2>/dev/null || true
+  )"
+  [[ -n "$INDEX_DIR" ]] && INDEX_DIR_SOURCE="venv"
+fi
+readonly INDEX_DIR INDEX_DIR_SOURCE
 
 say "rekol uninstall — preserving your markdown memory; removing the tooling."
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -436,34 +468,57 @@ if [[ -f "$ZSHRC" ]]; then
 fi
 
 # =============================================================================
-# Step 6 — optionally remove the derived vector index (.index/)
+# Step 6 — optionally remove the derived vector index (cache + any legacy copy)
 # =============================================================================
-# The index is machine-specific and rebuildable. It is NOT user content, but it
-# lives under $REKOL_HOME, so we are extra careful: remove it ONLY with
-# --purge-index, or with explicit confirmation. NEVER remove anything else under
-# $REKOL_HOME. When the home is unset we skip this entirely.
+# The index is machine-specific and rebuildable, not user content. It now lives
+# in a local-only cache OUTSIDE $REKOL_HOME (resolved above into INDEX_DIR);
+# older installs kept it in-tree at $REKOL_HOME/.index/. Both are removed under
+# the same opt-in gate: --purge-index, or explicit confirmation. We NEVER remove
+# anything else under $REKOL_HOME. Markdown memory is always preserved.
 
-if [[ -z "$RESOLVED_HOME" ]]; then
-  say "REKOL_HOME/MEMORY_HOME not set — skipping the optional .index/ cleanup."
-else
-  index_dir="${RESOLVED_HOME}/.index"
-  if [[ ! -d "$index_dir" ]]; then
-    : # nothing to do
-  elif [[ "$PURGE_INDEX" == "1" ]]; then
-    say "removing derived index ${index_dir} (--purge-index)"
-    run "rm -rf '${index_dir}'"
-    note_removed "index ${index_dir}"
-  elif [[ "$ASSUME_YES" == "1" ]]; then
-    say "keeping the derived index ${index_dir} (--yes does not purge it; pass --purge-index to remove it)"
-    note_preserved "index ${index_dir}"
-  elif confirm "Also delete the rebuildable vector index at ${index_dir}? (your markdown is kept either way)"; then
-    say "removing derived index ${index_dir}"
-    run "rm -rf '${index_dir}'"
-    note_removed "index ${index_dir}"
-  else
-    say "keeping the derived index ${index_dir} (pass --purge-index to remove it)"
-    note_preserved "index ${index_dir}"
+# Gated removal of one derived-index directory. Honours --purge-index (remove),
+# --yes (keep — --yes alone must not purge the index), confirm prompt otherwise.
+# $1 = path, $2 = human label for the prompt/report.
+purge_index_dir() {
+  local target="$1" label="$2"
+  if [[ ! -d "$target" ]]; then
+    return 0
   fi
+  if [[ "$PURGE_INDEX" == "1" ]]; then
+    say "removing ${label} ${target} (--purge-index)"
+    run "rm -rf '${target}'"
+    note_removed "${label} ${target}"
+  elif [[ "$ASSUME_YES" == "1" ]]; then
+    say "keeping ${label} ${target} (--yes does not purge it; pass --purge-index to remove it)"
+    note_preserved "${label} ${target}"
+  elif confirm "Also delete the rebuildable ${label} at ${target}? (your markdown is kept either way)"; then
+    say "removing ${label} ${target}"
+    run "rm -rf '${target}'"
+    note_removed "${label} ${target}"
+  else
+    say "keeping ${label} ${target} (pass --purge-index to remove it)"
+    note_preserved "${label} ${target}"
+  fi
+}
+
+# 6a — the relocated local-only cache (the current home of the index).
+if [[ -n "$INDEX_DIR" ]]; then
+  purge_index_dir "$INDEX_DIR" "vector index cache"
+elif [[ -n "$RESOLVED_HOME" ]]; then
+  # We could not resolve the cache path (no manifest INDEX_DIR and no venv to ask
+  # — e.g. the venv was already removed by a prior partial uninstall). Report it
+  # so the user can clear ${XDG_CACHE_HOME:-~/.cache}/rekol/ by hand rather than
+  # silently leaving the cache (and its sessions.db) behind.
+  say "could not resolve the local index cache (no INDEX_DIR in manifest, no venv to ask)"
+  note_leftover "vector index cache: not resolved; remove the matching dir under \${XDG_CACHE_HOME:-~/.cache}/rekol/ by hand"
+else
+  say "REKOL_HOME/MEMORY_HOME not set and no manifest INDEX_DIR — skipping index-cache cleanup."
+fi
+
+# 6b — a legacy in-tree $REKOL_HOME/.index/ from before the relocation. Removed
+# under the same gate; only the .index/ dir, never other $REKOL_HOME content.
+if [[ -n "$RESOLVED_HOME" ]]; then
+  purge_index_dir "${RESOLVED_HOME}/.index" "legacy in-tree vector index"
 fi
 
 # Always record that the markdown memory is preserved.
