@@ -39,8 +39,9 @@ vector index.
 ```bash
 export REKOL_HOME="$HOME/rekol-memory"   # any folder you own
 ```
-Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the `.index/`
-directory stays local and is excluded from sync.
+Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the index lives in
+a local cache *outside* your memory folder, so syncing your memory never syncs
+the index.
 
 ## Bring in your history
 
@@ -80,15 +81,18 @@ Memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback):
 - `topics/` — canonical-source registry.
 - `knowledge/` — long-form durable lessons.
 
-The markdown is the source of truth; `.index/` is a disposable, rebuildable
-SQLite vector index (never synced).
+The markdown is the source of truth. The SQLite vector index is disposable and
+rebuildable, and lives in a machine-local cache *outside* `$REKOL_HOME`
+(`${XDG_CACHE_HOME:-~/.cache}/rekol/<id>`), so nothing derived sits in your
+memory folder.
 
 ## Sync (optional)
 `$REKOL_HOME` is a local folder you own; sync it across machines however you
-like — Dropbox, iCloud Drive, a git remote, Syncthing, or not at all. The
-vector index under `.index/` stays local and must be excluded from sync (it is
-machine-specific and rebuildable). The installer writes `.dropboxignore`; for
-other sync tools, exclude `.index/` yourself.
+like — Dropbox, iCloud Drive, a git remote, Syncthing, or not at all. The index
+lives in a local cache *outside* your memory folder, so syncing your memory
+never syncs the index — there is no per-tool ignore file to maintain. The cache
+also holds `sessions.db`, which records your transcripts verbatim; keeping it
+out of the synced tree means a pasted secret can never leak through sync.
 
 ## Uninstalling
 rekol is yours to remove cleanly. From the repo:
@@ -104,20 +108,22 @@ export lines in `~/.zshrc`. It backs up `settings.json` and `.zshrc` to
 timestamped `.bak` files before editing them, and is idempotent (safe to re-run).
 
 If you installed to **custom paths** (`--tools-home` / `--bin-dir`), you don't
-need to repeat them: the installer records the resolved paths in a manifest at
+need to repeat them: the installer records the resolved paths — including the
+local index cache (`INDEX_DIR`) — in a manifest at
 `$REKOL_HOME/.install-logs/manifest.env`, and `./uninstall.sh` reads it to find
-the right venv and shim. Precedence is explicit flags, then the manifest, then
-the built-in defaults. If a path can't be confirmed (no manifest and nothing at
-the default), the uninstaller reports it as a possible leftover at the end rather
-than silently skipping it — re-run with `--tools-home PATH` / `--bin-dir PATH` (or
-delete it by hand).
+the right venv, shim, and cache. Precedence is explicit flags, then the manifest,
+then the built-in defaults. If a path can't be confirmed (no manifest and nothing
+at the default), the uninstaller reports it as a possible leftover at the end
+rather than silently skipping it — re-run with `--tools-home PATH` /
+`--bin-dir PATH` (or delete it by hand).
 
 **Your markdown memory is never deleted.** Everything under `$REKOL_HOME`
 (`always/`, `when/`, `topics/`, `knowledge/`, your `*.md`, the config, the local
-git repo) is preserved. Only the derived `.index/` is removable — and only with
-`--purge-index` or by confirming the prompt. After uninstalling, run
-`source ~/.zshrc` (or open a new terminal). Re-running `./install.sh` later works
-cleanly from that state.
+git repo) is preserved. Only the derived index — the local cache outside
+`$REKOL_HOME`, plus any legacy in-tree `.index/` from an older install — is
+removable, and only with `--purge-index` or by confirming the prompt. After
+uninstalling, run `source ~/.zshrc` (or open a new terminal). Re-running
+`./install.sh` later works cleanly from that state.
 
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).
