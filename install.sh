@@ -115,7 +115,7 @@ prompt_for_memory_home() {
     {
       printf 'Detected cloud-sync folders you could keep memory in:\n'
       printf '  %s\n' $suggestions
-      printf '(or any local folder; keep the .index/ dir out of sync)\n'
+      printf '(or any local folder; the index lives in a local cache outside it, so syncing your memory never syncs the index)\n'
     } >&2
   fi
   printf 'Memory folder [%s]: ' "$default_home" >&2
@@ -190,33 +190,10 @@ if [[ "$DRY_RUN" == "0" ]]; then
   printf 'rekol install %s\n' "$TS" >> "$JOURNAL"
 fi
 
-# --- Install manifest ---
-# Records the resolved install parameters so uninstall.sh can be deterministic:
-# when a user installs with custom --tools-home/--bin-dir and later runs
-# uninstall with no flags, the uninstaller reads this manifest to find the exact
-# venv + shim it must remove (instead of guessing built-in defaults and silently
-# leaving the custom paths behind).
-#
-# Location: a STABLE path under $REKOL_HOME that uninstall can find knowing only
-# REKOL_HOME — NOT under .index/ (disposable/purgeable). Reuses .install-logs/.
-# Format: simple KEY=value lines, overwritten on every (re)install (idempotent).
-# Uninstall reads it by whitelisting keys — it never sources this file.
+# Manifest path is stable and computable now; it is WRITTEN after Step 1 below,
+# once the venv exists and the local-only INDEX_DIR can be resolved from the same
+# Python the tools use (single source of truth — see the manifest block there).
 MANIFEST="${JOURNAL_DIR}/manifest.env"
-if [[ "$DRY_RUN" == "1" ]]; then
-  say "DRY-RUN: write install manifest ${MANIFEST}"
-else
-  {
-    printf '# rekol install manifest — written by install.sh; read by uninstall.sh.\n'
-    printf '# Whitelisted KEY=value lines only; never sourced. Safe to delete.\n'
-    printf 'TOOLS_HOME=%s\n' "${TOOLS_HOME}"
-    printf 'BIN_DIR=%s\n' "${BIN_DIR}"
-    printf 'REKOL_HOME=%s\n' "${RESOLVED_HOME}"
-    printf 'SHIM=%s\n' "${BIN_DIR}/rekol"
-    printf 'INSTALLED_AT=%s\n' "${TS}"
-  } > "${MANIFEST}"
-  log_journal "WROTE manifest ${MANIFEST}"
-  say "wrote install manifest ${MANIFEST}"
-fi
 
 # =============================================================================
 # Step 1 — Python venv
@@ -259,6 +236,60 @@ fi
 say "installing/upgrading rekol into venv"
 run "'${TOOLS_HOME}/.venv/bin/pip' install -U pip"
 run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
+
+# --- Resolve the local-only index/cache dir (single source of truth) ---
+# SECURITY: the index (index.db + the secrets-bearing sessions.db + INDEX.md)
+# lives OUTSIDE $REKOL_HOME, under ${XDG_CACHE_HOME:-~/.cache}/rekol/<hash>, so a
+# synced memory folder never carries derived/secret state. We ask the freshly
+# installed venv for the path rather than re-deriving the hash in shell, so the
+# manifest, the Step 9 gate, and the legacy-migration cleanup all agree exactly
+# with what `rekol` uses at runtime. In dry-run the venv may not exist; fall back
+# to a best-effort note so the message stays meaningful.
+INDEX_DIR=""
+if [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: resolve local index dir via '${TOOLS_HOME}/.venv/bin/python'"
+else
+  INDEX_DIR="$(
+    REKOL_HOME="${RESOLVED_HOME}" "${TOOLS_HOME}/.venv/bin/python" -c \
+      'from rekol.config import resolve_index_dir, resolve_memory_home; from pathlib import Path; import os; print(resolve_index_dir(Path(os.path.expanduser(resolve_memory_home()))))' \
+      2>/dev/null || true
+  )"
+  if [[ -z "$INDEX_DIR" ]]; then
+    say "ERROR: could not resolve the local index dir from the venv" >&2
+    exit 1
+  fi
+  say "local index/cache dir: ${INDEX_DIR}"
+fi
+readonly INDEX_DIR
+
+# --- Install manifest ---
+# Records the resolved install parameters so uninstall.sh can be deterministic:
+# when a user installs with custom --tools-home/--bin-dir and later runs
+# uninstall with no flags, the uninstaller reads this manifest to find the exact
+# venv + shim (and the local index cache) it must remove — instead of guessing
+# built-in defaults and silently leaving the custom paths behind.
+#
+# Location: a STABLE path under $REKOL_HOME that uninstall can find knowing only
+# REKOL_HOME. Reuses .install-logs/.  Format: simple KEY=value lines, overwritten
+# on every (re)install (idempotent). Uninstall reads it by whitelisting keys — it
+# never sources this file. INDEX_DIR is recorded so uninstall can remove the
+# local cache without re-deriving the hash.
+if [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: write install manifest ${MANIFEST}"
+else
+  {
+    printf '# rekol install manifest — written by install.sh; read by uninstall.sh.\n'
+    printf '# Whitelisted KEY=value lines only; never sourced. Safe to delete.\n'
+    printf 'TOOLS_HOME=%s\n' "${TOOLS_HOME}"
+    printf 'BIN_DIR=%s\n' "${BIN_DIR}"
+    printf 'REKOL_HOME=%s\n' "${RESOLVED_HOME}"
+    printf 'SHIM=%s\n' "${BIN_DIR}/rekol"
+    printf 'INDEX_DIR=%s\n' "${INDEX_DIR}"
+    printf 'INSTALLED_AT=%s\n' "${TS}"
+  } > "${MANIFEST}"
+  log_journal "WROTE manifest ${MANIFEST}"
+  say "wrote install manifest ${MANIFEST}"
+fi
 
 # =============================================================================
 # Step 2 — ~/bin shim
@@ -718,17 +749,12 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# Step 8 — Sync-ignore file for the local vector index (best-effort)
+# Step 8 — (removed) sync-ignore file for the local vector index
 # =============================================================================
-# Keep the local vector index out of any file-sync (it is machine-specific,
-# rebuildable, and would conflict across machines). We write `.dropboxignore`;
-# for other sync tools exclude `.index/` yourself.
-
-if [[ ! -f "${RESOLVED_HOME}/.dropboxignore" ]]; then
-  say "writing ${RESOLVED_HOME}/.dropboxignore to keep machine-specific .index/ out of sync (for other sync tools, exclude .index/ yourself)"
-  run "printf '.index/\n.writing.lock\n' > '${RESOLVED_HOME}/.dropboxignore'"
-  log_journal "CREATED ${RESOLVED_HOME}/.dropboxignore"
-fi
+# Previously wrote $REKOL_HOME/.dropboxignore to keep the in-tree .index/ out of
+# Dropbox sync. The index now lives in a machine-local cache OUTSIDE $REKOL_HOME
+# (see the INDEX_DIR resolution after Step 1), so nothing derived sits in the
+# synced tree and no per-tool ignore file is needed. Intentionally a no-op.
 
 # =============================================================================
 # Step 8.5 — Local git repo for audit trail (opt-in via rekol.config.yaml (memory.config.yaml as fallback))
@@ -769,8 +795,10 @@ if [[ "${GIT_TRACK}" == "true" ]]; then
     log_journal "GIT-INIT ${RESOLVED_HOME}"
   fi
   if [[ ! -f "${RESOLVED_HOME}/.gitignore" ]]; then
+    # No .index/ entry: the index now lives in a local cache outside $REKOL_HOME,
+    # so there is no derived state in the tree to exclude from version control.
     say "writing ${RESOLVED_HOME}/.gitignore"
-    run "printf '.index/\n.writing.lock\n.install-logs/\n' > '${RESOLVED_HOME}/.gitignore'"
+    run "printf '.writing.lock\n.install-logs/\n' > '${RESOLVED_HOME}/.gitignore'"
     log_journal "CREATED ${RESOLVED_HOME}/.gitignore"
   fi
   # Initial commit if the repo has no commits yet.  Set local user.email/name
@@ -796,26 +824,69 @@ if [[ "${GIT_TRACK}" == "true" ]]; then
 fi
 
 # =============================================================================
-# Step 9 — Build or update the vector index
+# Step 9 — Build or update the vector index (in the local-only cache)
 # =============================================================================
-# Run rebuild on first install; update on subsequent runs.
+# Run rebuild on first install; update on subsequent runs. The index DB now
+# lives at ${INDEX_DIR}/index.db (outside $REKOL_HOME), so the gate checks the
+# cache, not the old in-tree .index/. When an old in-tree .index/ exists but the
+# cache does not, this falls through to a rebuild — which populates the cache —
+# and Step 9.6 then removes the stale (secrets-bearing) in-tree .index/.
 
-if [[ -f "${RESOLVED_HOME}/.index/index.db" ]]; then
+if [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: '${TOOLS_HOME}/.venv/bin/rekol' index update/rebuild (index dir: ${INDEX_DIR:-<resolved at runtime>})"
+elif [[ -f "${INDEX_DIR}/index.db" ]]; then
   # Update on a current index; rebuild if it is a legacy (pre-timestamp) schema.
   # `rekol index update` exits non-zero and instructs a rebuild on an outdated
   # schema — that must NOT abort the install (it would skip the Step 9.5 session
   # backfill), so we catch it and rebuild. Invoke the venv entrypoint directly so
   # the correct venv is used when --tools-home overrides the default.
-  say "existing index found — running rekol index update (rebuild if schema is outdated)"
-  if [[ "$DRY_RUN" == "1" ]]; then
-    say "DRY-RUN: '${TOOLS_HOME}/.venv/bin/rekol' index update (or rebuild on a legacy schema)"
-  elif ! "${TOOLS_HOME}/.venv/bin/rekol" index update; then
+  say "existing index found at ${INDEX_DIR} — running rekol index update (rebuild if schema is outdated)"
+  if ! "${TOOLS_HOME}/.venv/bin/rekol" index update; then
     say "index update did not apply (legacy schema) — running rekol index rebuild"
     "${TOOLS_HOME}/.venv/bin/rekol" index rebuild
   fi
 else
-  say "no index found — running rekol index rebuild"
-  run "'${TOOLS_HOME}/.venv/bin/rekol' index rebuild"
+  say "no index in cache — running rekol index rebuild (writes to ${INDEX_DIR})"
+  "${TOOLS_HOME}/.venv/bin/rekol" index rebuild
+fi
+
+# =============================================================================
+# Step 9.6 — Migrate away from an old in-tree $REKOL_HOME/.index/
+# =============================================================================
+# SECURITY: older installs kept the index (including sessions.db, which records
+# every prompt/assistant turn verbatim — and thus any pasted secrets) inside
+# $REKOL_HOME. If that folder is synced (Dropbox/iCloud/Drive/OneDrive/Syncthing/
+# git), those secrets leak. Step 9 above has just (re)built the index in the
+# local-only cache, so the in-tree copy is now redundant AND dangerous — delete
+# it. We remove ONLY the .index/ directory and never touch any markdown or other
+# content under $REKOL_HOME.
+
+OLD_INTREE_INDEX="${RESOLVED_HOME}/.index"
+if [[ -d "${OLD_INTREE_INDEX}" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "DRY-RUN: rm -rf ${OLD_INTREE_INDEX} (legacy in-tree index; rebuilt into ${INDEX_DIR:-the cache})"
+  else
+    say "removing legacy in-tree index ${OLD_INTREE_INDEX} (rebuilt into ${INDEX_DIR}; its sessions.db must not stay in a synced folder)"
+    rm -rf "${OLD_INTREE_INDEX}"
+    log_journal "MIGRATED-INDEX removed legacy ${OLD_INTREE_INDEX}; rebuilt into ${INDEX_DIR}"
+  fi
+fi
+
+# Also drop a now-stale $REKOL_HOME/.dropboxignore that older installs wrote to
+# keep the in-tree .index/ out of Dropbox. With the index relocated there is
+# nothing left for it to protect; leaving it would be confusing. Only remove the
+# exact two-line file we used to write, so a user-authored .dropboxignore is
+# never clobbered.
+STALE_DBIGNORE="${RESOLVED_HOME}/.dropboxignore"
+if [[ -f "${STALE_DBIGNORE}" ]] \
+   && [[ "$(printf '.index/\n.writing.lock\n')" == "$(cat "${STALE_DBIGNORE}")" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "DRY-RUN: rm ${STALE_DBIGNORE} (stale: index no longer in-tree)"
+  else
+    say "removing stale ${STALE_DBIGNORE} (the index no longer lives in $REKOL_HOME)"
+    rm -f "${STALE_DBIGNORE}"
+    log_journal "REMOVED stale ${STALE_DBIGNORE}"
+  fi
 fi
 
 # =============================================================================
