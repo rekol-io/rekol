@@ -1,18 +1,30 @@
 # REKOL
 
-> Local-first, files-you-own memory for AI assistants. Structured markdown +
-> on-device vector search. No cloud, no API key, nothing leaves your machine.
+> **Local-first memory for the AI assistant you already use.** A drop-in memory
+> layer — no API key, runs on your machine, and your assistant uses it
+> automatically. Your memory is markdown in a folder you own.
 
 **Status:** v0.1 (pre-release). macOS-first; Claude Code is the reference integration.
 
 ## Why
-- **100% local & private** — embeddings via `sentence-transformers`, vector
-  search via `sqlite-vec`. Your data never leaves the machine.
-- **Your memory is human-readable markdown** in a folder you own — browse it in
-  Obsidian or any editor. No bespoke UI to babysit.
-- **Structured, not a blob** — `always / when / topics / knowledge` layers with
-  retrieval triggers, plus dual-source search over curated memory *and* your
-  past session transcripts.
+
+You don't run memory commands — you just work, and the assistant already has
+your context and uses it. REKOL's specific corner:
+
+- **No API key, fully local.** Embeddings (BAAI `bge-small`) and vector search
+  (`sqlite-vec`) run on your machine. No account, no key, no telemetry — the
+  memory layer doesn't even need an LLM provider.
+- **A drop-in *layer*, not a new app.** REKOL plugs into the assistant you
+  already use (Claude Code today, every MCP assistant next) — no agent to adopt,
+  no tool to switch.
+- **Memory that surfaces itself.** A layered model (`always / when / topics /
+  knowledge`) injects the right context at the start of each session, and the
+  assistant pulls in more as it works — it just *knows*, instead of being told
+  to look.
+
+Your memory is plain **markdown you own** (Obsidian, grep, git), and REKOL
+searches your past **session transcripts** alongside your curated notes — these
+are table stakes done well, not the headline.
 
 ## Install (macOS)
 ```bash
