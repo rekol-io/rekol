@@ -51,7 +51,7 @@ def call_claude_classifier(
 
     Args:
         prompt: The classifier prompt (instructions + schema).
-        index_context: Current ``$MEMORY_HOME/INDEX.md`` content.
+        index_context: Current ``INDEX.md`` content (from the local cache).
         file_body: Legacy file body (with frontmatter intact if present).
         model: Claude model id.
         timeout_sec: Hard timeout for the subprocess.

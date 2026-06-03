@@ -13,6 +13,7 @@ from pathlib import Path
 import frontmatter
 import yaml
 
+from rekol.config import resolve_index_dir
 from rekol.migrate.archive import archive_file, write_retirement_pointer
 from rekol.migrate.classify import Classification, classify_file
 from rekol.migrate.discover import (
@@ -133,9 +134,14 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             write_retirement_pointer(source_dir, memory_home=memory_home)
         return report
 
-    # INDEX.md lives under .index/ on current installs; fall back to the
-    # legacy root location for compatibility with already-deployed setups.
-    index_candidates = [memory_home / ".index" / "INDEX.md", memory_home / "INDEX.md"]
+    # INDEX.md now lives in the local-only cache (outside $REKOL_HOME); fall
+    # back to the legacy in-tree locations for compatibility with already-
+    # deployed setups that haven't been relocated yet.
+    index_candidates = [
+        resolve_index_dir(memory_home) / "INDEX.md",
+        memory_home / ".index" / "INDEX.md",
+        memory_home / "INDEX.md",
+    ]
     index_context = ""
     for candidate in index_candidates:
         if candidate.exists():
