@@ -105,6 +105,51 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 3b — install writes a durable manifest recording the resolved paths
+# ---------------------------------------------------------------------------
+# The manifest is what makes uninstall deterministic: it records the resolved
+# TOOLS_HOME / BIN_DIR / REKOL_HOME so `uninstall.sh` (no flags) can find a custom
+# install. It lives at a STABLE path under REKOL_HOME (.install-logs/manifest.env,
+# NOT under the disposable .index/) and is overwritten — not appended — on rerun.
+@test "install writes the manifest with the resolved paths and overwrites on rerun" {
+    "${COMPONENT_DIR}/install.sh" \
+        --tools-home "${TOOLS_HOME}" \
+        --bin-dir "${BIN_DIR}" \
+        --test-mode
+
+    MANIFEST="${MEMORY_HOME}/.install-logs/manifest.env"
+    [ -f "${MANIFEST}" ]
+    grep -q "^TOOLS_HOME=${TOOLS_HOME}$" "${MANIFEST}"
+    grep -q "^BIN_DIR=${BIN_DIR}$" "${MANIFEST}"
+    grep -q "^REKOL_HOME=${MEMORY_HOME}$" "${MANIFEST}"
+    grep -q "^SHIM=${BIN_DIR}/rekol$" "${MANIFEST}"
+
+    # Rerun overwrites in place: exactly one manifest, still the right TOOLS_HOME.
+    run "${COMPONENT_DIR}/install.sh" \
+        --tools-home "${TOOLS_HOME}" \
+        --bin-dir "${BIN_DIR}" \
+        --test-mode
+    [ "$status" -eq 0 ]
+    MANIFEST_COUNT="$(find "${MEMORY_HOME}/.install-logs" -name 'manifest.env' | wc -l | tr -d ' ')"
+    [ "$MANIFEST_COUNT" -eq 1 ]
+    [ "$(grep -c '^TOOLS_HOME=' "${MANIFEST}")" -eq 1 ]
+    grep -q "^TOOLS_HOME=${TOOLS_HOME}$" "${MANIFEST}"
+}
+
+# ---------------------------------------------------------------------------
+# Test 3c — dry-run does not write the manifest
+# ---------------------------------------------------------------------------
+@test "dry-run install does not write the manifest" {
+    run "${COMPONENT_DIR}/install.sh" \
+        --dry-run \
+        --tools-home "${TOOLS_HOME}" \
+        --bin-dir "${BIN_DIR}" \
+        --test-mode
+    [ "$status" -eq 0 ]
+    [ ! -f "${MEMORY_HOME}/.install-logs/manifest.env" ]
+}
+
+# ---------------------------------------------------------------------------
 # Test 4 — the rekol shim errors clearly when the venv is absent
 # ---------------------------------------------------------------------------
 @test "shim exits 2 with helpful message when venv is missing" {
