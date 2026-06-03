@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from click.testing import CliRunner
 
+from cache_helpers import cache_dir_for
 from rekol.cli_session_index import main as cli_main
 from rekol.embeddings import HashingEmbedder
 from rekol.sessions.store import SessionStore
@@ -49,7 +50,7 @@ def test_session_index_full_runs_against_directory(tmp_path: Path, monkeypatch) 
     result = runner.invoke(cli_main, ["--full"])
     assert result.exit_code == 0, result.output
     assert "messages_inserted=3" in result.output
-    assert (home / ".index" / "sessions.db").exists()
+    assert (cache_dir_for(home) / "sessions.db").exists()
 
 
 def test_session_index_incremental_is_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -85,7 +86,7 @@ def test_session_index_embeds_by_default(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "messages_inserted=3" in result.output
 
-    store = SessionStore(db_path=home / ".index" / "sessions.db", dim=384)
+    store = SessionStore(db_path=cache_dir_for(home) / "sessions.db", dim=384)
     store.init_schema()
     query_vec = HashingEmbedder(dim=384).embed("second user turn with list content")
     hits = store.search_vec(query_vec, top_k=3)
@@ -103,7 +104,7 @@ def test_session_index_no_embed_leaves_vector_index_empty(tmp_path: Path, monkey
     assert result.exit_code == 0, result.output
     assert "messages_inserted=3" in result.output
 
-    store = SessionStore(db_path=home / ".index" / "sessions.db", dim=384)
+    store = SessionStore(db_path=cache_dir_for(home) / "sessions.db", dim=384)
     store.init_schema()
     query_vec = HashingEmbedder(dim=384).embed("second user turn with list content")
     hits = store.search_vec(query_vec, top_k=3)
@@ -117,7 +118,7 @@ def test_session_index_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypa
     actionable message rather than crash on the first vector insert.
     """
     home = _setup_home(tmp_path, monkeypatch)  # config uses test-hashing => 384-dim
-    db_path = home / ".index" / "sessions.db"
+    db_path = cache_dir_for(home) / "sessions.db"
 
     # Pre-build the index at a deliberately different dimension (8).
     store = SessionStore(db_path=db_path, dim=8)
@@ -151,7 +152,7 @@ def test_session_index_recreates_empty_stale_vec_table(tmp_path: Path, monkeypat
     the model's width and embedding proceeds.
     """
     home = _setup_home(tmp_path, monkeypatch)  # test-hashing => 384-dim
-    db_path = home / ".index" / "sessions.db"
+    db_path = cache_dir_for(home) / "sessions.db"
 
     # Pre-create an EMPTY index at a different width (no embeddings written).
     store = SessionStore(db_path=db_path, dim=8)
@@ -178,7 +179,7 @@ def test_search_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypatch) ->
     from rekol.cli_search import main as search_main
 
     home = _setup_home(tmp_path, monkeypatch)  # test-hashing => 384-dim
-    db_path = home / ".index" / "sessions.db"
+    db_path = cache_dir_for(home) / "sessions.db"
 
     # A populated index at a different width than the configured model.
     store = SessionStore(db_path=db_path, dim=8)
@@ -225,7 +226,7 @@ def test_session_index_embed_heals_a_no_embed_index(tmp_path: Path, monkeypatch)
     assert r2.exit_code == 0, r2.output
     assert "messages_embedded_repaired=3" in r2.output
 
-    store = SessionStore(db_path=home / ".index" / "sessions.db", dim=384)
+    store = SessionStore(db_path=cache_dir_for(home) / "sessions.db", dim=384)
     store.init_schema()
     query_vec = HashingEmbedder(dim=384).embed("second user turn with list content")
     hits = store.search_vec(query_vec, top_k=3)

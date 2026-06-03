@@ -34,6 +34,11 @@ rekol = "rekol.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+# Put tests/ on sys.path so shared test helpers (cache_helpers) import cleanly
+# regardless of the invocation cwd.
+pythonpath = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
