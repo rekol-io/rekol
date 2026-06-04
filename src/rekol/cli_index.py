@@ -6,6 +6,7 @@ import sys
 
 import click
 
+from rekol.cli_common import warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -37,6 +38,7 @@ def rebuild() -> None:
         index_dir=cfg.index_dir,
     )
     stats = idx.rebuild()
+    warn_skipped_files(stats)
     click.echo(
         f"indexed {stats.files_indexed} files "
         f"({stats.chunks_written} chunks); "
@@ -69,6 +71,7 @@ def update() -> None:
         index_dir=cfg.index_dir,
     )
     stats = idx.update()
+    warn_skipped_files(stats)
     click.echo(
         f"updated {stats.files_indexed} files, "
         f"removed {stats.files_removed}, "
