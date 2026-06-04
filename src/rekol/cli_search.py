@@ -57,6 +57,74 @@ def _review_tag(
     return ""
 
 
+def _warn_if_silently_empty(
+    result,
+    *,
+    query_text: str,
+    memory_store: IndexStore | None,
+    session_store: SessionStore | None,
+) -> None:
+    """Backstop for issue #18: never let search return a *silent* empty.
+
+    The never-silent invariant: search must not return zero results when the
+    index holds rows it should have matched. When a tier was queried, returned
+    no hits, yet its underlying store is non-empty and looks stale/inconsistent,
+    emit one actionable warning to stderr (not stdout, so ``--json`` output stays
+    clean) telling the user to rebuild. A genuinely-empty corpus, or a query that
+    truly has no matches, stays quiet — we only warn when data is present but
+    unreachable.
+    """
+    stale_tiers: list[str] = []
+
+    # Sessions: the exact #18 signature is an FTS index whose postings match the
+    # query but whose rowids are orphaned, so the JOIN in search drops them all.
+    if (
+        "sessions" in result.sources_queried
+        and not result.session_hits
+        and session_store is not None
+        and session_store.count_messages() > 0
+        and session_store.fts_index_is_stale(query_text)
+    ):
+        stale_tiers.append("session transcript")
+
+    # Curated memory: cosine search over a non-empty chunks table should always
+    # surface *something*. Zero curated hits while chunks exist and none were
+    # merely filtered (invalidated / not-yet-valid) means the index is stale or
+    # inconsistent rather than legitimately silent.
+    if (
+        "memory" in result.sources_queried
+        and not result.memory_hits
+        and result.memory_filtered_count == 0
+        and memory_store is not None
+        and _curated_chunk_count(memory_store) > 0
+    ):
+        stale_tiers.append("curated memory")
+
+    if not stale_tiers:
+        return
+    which = " and ".join(stale_tiers)
+    click.echo(
+        f"⚠ {which} index has data but returned 0 hits for this query — "
+        "the index looks stale or inconsistent. Rebuild it:\n"
+        "    rekol index rebuild && rekol session-index --full",
+        err=True,
+    )
+
+
+def _curated_chunk_count(memory_store: IndexStore) -> int:
+    """Total curated chunk rows, or 0 if the table can't be read.
+
+    A best-effort backstop probe: a malformed/old store that raises here is
+    itself a sign of trouble, but we don't want the probe to crash the search
+    command, so a read error is treated as "no reachable chunks".
+    """
+    try:
+        row = memory_store.conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()
+    except Exception:
+        return 0
+    return int(row["n"]) if row else 0
+
+
 def _relative_age(day: date, *, today: date) -> str:
     """Phrase the age of ``day`` relative to ``today`` (e.g. '3 weeks ago')."""
     days = (today - day).days
@@ -211,6 +279,12 @@ def main(
             sessions_top_k=top_k,
             config=cfg,
             include_invalidated=include_invalidated,
+        )
+        _warn_if_silently_empty(
+            result,
+            query_text=query_text,
+            memory_store=memory_store,
+            session_store=session_store,
         )
         review_today = date.today()
         for hit in result.memory_hits:
