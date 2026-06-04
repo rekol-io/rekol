@@ -14,7 +14,7 @@ import click
 import yaml
 
 from rekol.chunker import chunk_body
-from rekol.cli_common import guard_curated_schema
+from rekol.cli_common import guard_curated_schema, warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -217,6 +217,7 @@ def main(
         index_dir=cfg.index_dir,
     )
     stats = idx.update()
+    warn_skipped_files(stats)
     click.echo(f"indexed ({stats.files_indexed} updated)")
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .chunker import chunk_body
@@ -21,6 +21,11 @@ class IndexStats:
     files_skipped: int = 0
     files_removed: int = 0
     chunks_written: int = 0
+    # (file_path, reason) for every file skipped because its frontmatter failed
+    # validation. Carried out of the indexer so the CLI can name the offenders
+    # loudly instead of reporting a bare count — a silent skip that leaves the
+    # index empty is exactly what makes "search returns nothing" baffling.
+    skipped_files: list[tuple[str, str]] = field(default_factory=list)
 
 
 # Top-level layer dirs walked by the indexer.  Memory files in any of these
@@ -56,6 +61,19 @@ def _hash_file(path: Path) -> str:
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
+
+
+def _skip_reason(exc: ValidationError) -> str:
+    """Extract the human-readable reason from a ValidationError message.
+
+    ``parse_file`` raises ``ValidationError(f"{path}: <reason>")``; the path is
+    already carried separately in ``skipped_files``, so strip the leading
+    ``<path>: `` prefix and keep just the reason (e.g. ``missing required field
+    'name'``) for a compact, de-duplicated warning.
+    """
+    message = str(exc)
+    _, separator, tail = message.partition(": ")
+    return tail if separator else message
 
 
 class Indexer:
@@ -157,10 +175,12 @@ class Indexer:
                     content_hash=content_hash,
                 )
                 n = self._index_one(path)
-            except ValidationError:
-                # Roll back the files row so no orphan record remains.
+            except ValidationError as exc:
+                # Roll back the files row so no orphan record remains, and record
+                # WHY so the caller can warn loudly instead of a bare count.
                 self.store.delete_file(str(path))
                 stats.files_skipped += 1
+                stats.skipped_files.append((str(path), _skip_reason(exc)))
                 continue
             except Exception:
                 # Unexpected failure (embedder or store) — roll back and re-raise
@@ -193,10 +213,12 @@ class Indexer:
                     content_hash=current_hash,
                 )
                 n = self._index_one(path)
-            except ValidationError:
-                # Roll back the files row so no orphan record remains.
+            except ValidationError as exc:
+                # Roll back the files row so no orphan record remains, and record
+                # WHY so the caller can warn loudly instead of a bare count.
                 self.store.delete_file(str(path))
                 stats.files_skipped += 1
+                stats.skipped_files.append((str(path), _skip_reason(exc)))
                 continue
             except Exception:
                 # Unexpected failure (embedder or store) — roll back and re-raise

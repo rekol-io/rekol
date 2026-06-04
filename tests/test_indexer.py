@@ -166,6 +166,38 @@ def test_skips_files_with_bad_frontmatter(memory_root: Path) -> None:
     assert stats.files_skipped == 1
 
 
+def test_skipped_files_record_path_and_reason(memory_root: Path) -> None:
+    """#34: skips must be reportable, not just a count — carry path + reason so
+    the CLI can name the offender instead of leaving the user with a silent
+    near-empty index."""
+    missing_fm = memory_root / "topics" / "broken.md"
+    missing_fm.write_text("no frontmatter at all\n")
+    missing_name = memory_root / "topics" / "no-name.md"
+    missing_name.write_text("---\ndescription: d\ntype: topic\n---\n\nbody\n")
+    idx = _make_indexer(memory_root)
+    stats = idx.rebuild()
+
+    assert stats.files_skipped == 2
+    skipped = dict(stats.skipped_files)
+    assert str(missing_fm) in skipped
+    assert str(missing_name) in skipped
+    # The reason for the no-name file names the missing required field.
+    assert "name" in skipped[str(missing_name)]
+    # Reason is just the cause, not the path duplicated back in.
+    assert str(missing_name) not in skipped[str(missing_name)]
+
+
+def test_update_records_skipped_files(memory_root: Path) -> None:
+    """The incremental path (the auto-reindex hook target) reports skips too."""
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+    bad = memory_root / "topics" / "later-broken.md"
+    bad.write_text("---\nname: x\n---\n\nbody but no description or type\n")
+    stats = idx.update()
+    assert stats.files_skipped == 1
+    assert stats.skipped_files[0][0] == str(bad)
+
+
 def test_rebuild_rolls_back_file_on_embed_failure(memory_root: Path) -> None:
     """If the embedder raises after the files row is upserted, that file must be removed."""
 

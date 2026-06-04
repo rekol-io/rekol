@@ -426,6 +426,52 @@ class SessionStore:
             )
             self.conn.commit()
 
+    def fts_postings_match(self, query: str) -> int:
+        """Rows the FTS index alone matches for ``query`` (no JOIN to messages).
+
+        Counts postings directly in ``messages_fts`` so a caller can tell the
+        difference between "the keyword genuinely isn't in the corpus" and "the
+        FTS index holds matching postings but :meth:`search_fts` returned nothing
+        because the JOIN to ``messages`` dropped them" — the silent-empty stale
+        index of issue #18, where ``messages_fts MATCH '<term>'`` reports rows
+        yet search yields zero. Returns 0 when the query has no searchable
+        tokens (so callers don't mistake a defused query for a stale index).
+        """
+        match_query = build_fts_match(query)
+        if match_query is None:
+            return 0
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH ?",
+            (match_query,),
+        ).fetchone()
+        return int(row["n"])
+
+    def fts_index_is_stale(self, query: str) -> bool:
+        """True when the FTS index has postings for ``query`` that search can't reach.
+
+        The exact silent-empty signature from issue #18: a raw
+        ``messages_fts MATCH`` reports matching rows, but every one of those
+        FTS rowids is orphaned — it has no corresponding ``messages.id`` — so
+        the JOIN in :meth:`search_fts` drops them all and search returns 0 with
+        no error. Detecting it lets the read path raise a loud "rebuild" hint
+        instead of degrading to a silent empty.
+        """
+        match_query = build_fts_match(query)
+        if match_query is None:
+            return False
+        postings = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH ?",
+            (match_query,),
+        ).fetchone()["n"]
+        if postings == 0:
+            return False
+        reachable = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages_fts JOIN messages m "
+            "ON m.id = messages_fts.rowid WHERE messages_fts MATCH ?",
+            (match_query,),
+        ).fetchone()["n"]
+        return int(reachable) == 0
+
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.
 
