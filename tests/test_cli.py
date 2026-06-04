@@ -581,6 +581,37 @@ def test_search_has_include_invalidated_flag() -> None:
     assert "--include-invalidated" in res.output
 
 
+def test_index_rebuild_warns_loudly_about_skipped_files(tmp_path: Path, monkeypatch) -> None:
+    """#34: a file with missing required frontmatter must produce a visible
+    WARNING that names the file + reason, not just a count buried in the summary.
+    """
+    _seed_memory(tmp_path)
+    # A hand-authored file missing required name/description frontmatter.
+    (tmp_path / "topics" / "half-written.md").write_text(
+        "---\ntype: topic\n---\n\nI started a memory but never filled in the header.\n"
+    )
+    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+    runner = CliRunner()
+    result = runner.invoke(index_main, ["rebuild"])
+    assert result.exit_code == 0, result.output
+    # The loud per-file warning lands on stderr (kept off the stdout summary).
+    assert "⚠ skipped 1 file" in result.stderr
+    assert "half-written.md" in result.stderr
+    # The bare count still appears in the normal stdout summary, but the loud
+    # per-file warning is what makes the skip impossible to miss.
+    assert "skipped 1" in result.output
+
+
+def test_index_rebuild_quiet_when_nothing_skipped(tmp_path: Path, monkeypatch) -> None:
+    """No skip → no warning noise on stderr."""
+    _seed_memory(tmp_path)
+    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+    result = CliRunner().invoke(index_main, ["rebuild"])
+    assert result.exit_code == 0, result.output
+    # No per-file warning on stderr when there is nothing to skip.
+    assert "⚠" not in result.stderr
+
+
 def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
     import sqlite3
 

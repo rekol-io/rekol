@@ -18,7 +18,7 @@ from pathlib import Path
 import click
 import frontmatter
 
-from rekol.cli_common import guard_curated_schema
+from rekol.cli_common import guard_curated_schema, warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -90,7 +90,8 @@ def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
         chunk_max_bytes=cfg.chunk_max_bytes,
         index_dir=cfg.index_dir,
     )
-    idx.update()
+    stats = idx.update()
+    warn_skipped_files(stats)
 
 
 if __name__ == "__main__":
