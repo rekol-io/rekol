@@ -214,6 +214,7 @@ def main(
         store=store,
         embedder=embedder,
         chunk_max_bytes=cfg.chunk_max_bytes,
+        index_dir=cfg.index_dir,
     )
     stats = idx.update()
     click.echo(f"indexed ({stats.files_indexed} updated)")

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+from cache_helpers import cache_dir_for
 from rekol.review import find_overdue
 
 HOME = Path("/m")
@@ -56,8 +57,8 @@ def _seed_index(home, layer, name, updated):
     fp_path.write_text(
         f"---\nname: {name}\ndescription: d\ntype: knowledge\nupdated: {updated}\n---\nbody\n"
     )
-    idx = home / ".index"
-    idx.mkdir(exist_ok=True)
+    idx = cache_dir_for(home)
+    idx.mkdir(parents=True, exist_ok=True)
     store = IndexStore(db_path=idx / "index.db", dim=8, use_sqlite_vec=False)
     store.init_schema()
     fp = str(fp_path)
@@ -105,7 +106,7 @@ def test_review_confirm_bumps_updated(tmp_path, monkeypatch):
 def _legacy_index(home):
     import sqlite3
 
-    idx = home / ".index"
+    idx = cache_dir_for(home)
     idx.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(idx / "index.db")
     con.execute(

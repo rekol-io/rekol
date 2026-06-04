@@ -88,6 +88,7 @@ def main(file_path: str, reason: str, invalidated_at: str | None) -> None:
         store=store,
         embedder=embedder,
         chunk_max_bytes=cfg.chunk_max_bytes,
+        index_dir=cfg.index_dir,
     )
     idx.update()
 

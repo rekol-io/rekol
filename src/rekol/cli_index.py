@@ -34,6 +34,7 @@ def rebuild() -> None:
         store=store,
         embedder=embedder,
         chunk_max_bytes=cfg.chunk_max_bytes,
+        index_dir=cfg.index_dir,
     )
     stats = idx.rebuild()
     click.echo(
@@ -65,6 +66,7 @@ def update() -> None:
         store=store,
         embedder=embedder,
         chunk_max_bytes=cfg.chunk_max_bytes,
+        index_dir=cfg.index_dir,
     )
     stats = idx.update()
     click.echo(
