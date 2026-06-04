@@ -28,7 +28,7 @@ are table stakes done well, not the headline.
 
 ## Install (macOS)
 ```bash
-git clone https://github.com/leonkatz/rekol && cd rekol && ./install.sh
+git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh
 ```
 The installer asks where to keep your memory (default `~/rekol-memory`,
 press Enter to accept). It then sets up a venv, the `rekol` CLI, the Claude
@@ -59,7 +59,7 @@ you already have:
 
 ## Quickstart (fresh install)
 
-1. `git clone https://github.com/leonkatz/rekol && cd rekol && ./install.sh`
+1. `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`
    — answer the memory-folder prompt (or pre-set `REKOL_HOME`), then it seeds
    `template/`, builds the first index, and installs the hook + skill.
 2. `rekol init` — indexes any existing Claude Code history and offers to import
@@ -121,3 +121,6 @@ cleanly from that state.
 
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).
+
+## Contact
+Questions? **hello@rekol.io** · Security? **security@rekol.io** (see [SECURITY.md](./SECURITY.md)).
