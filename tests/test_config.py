@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -33,18 +34,98 @@ def test_load_config_raises_when_memory_home_missing(monkeypatch) -> None:
         load_config()
 
 
-def test_index_db_path_default_inside_memory_home(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
-    cfg = load_config()
-    assert cfg.index_db_path == tmp_path / ".index" / "index.db"
+def _expected_cache_dir(cache_home: Path, memory_home: Path) -> Path:
+    """Mirror config's cache-dir derivation so tests stay in lock-step with it."""
+    digest = hashlib.sha256(str(memory_home).encode()).hexdigest()[:16]
+    return cache_home / "rekol" / digest
 
 
-def test_config_exposes_sessions_db_path(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("MEMORY_HOME", str(tmp_path))
+def test_index_db_path_lives_in_cache_not_memory_home(tmp_path: Path, monkeypatch) -> None:
+    # SECURITY: the index DB must NOT live under $REKOL_HOME (a possibly-synced
+    # folder). It belongs in a local-only cache outside the memory home.
+    cache_home = tmp_path / "cache"
+    memory_home = tmp_path / "mem"
+    memory_home.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
     cfg = load_config()
-    assert cfg.sessions_db_path == tmp_path / ".index" / "sessions.db"
+    expected = _expected_cache_dir(cache_home, memory_home)
+    assert cfg.index_db_path == expected / "index.db"
+    # The path must not be inside the (potentially synced) memory home.
+    assert memory_home not in cfg.index_db_path.parents
+
+
+def test_sessions_db_path_lives_in_cache_not_memory_home(tmp_path: Path, monkeypatch) -> None:
+    cache_home = tmp_path / "cache"
+    memory_home = tmp_path / "mem"
+    memory_home.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
+    cfg = load_config()
+    expected = _expected_cache_dir(cache_home, memory_home)
+    assert cfg.sessions_db_path == expected / "sessions.db"
+    assert memory_home not in cfg.sessions_db_path.parents
     assert cfg.claude_projects_dir.name == "projects"
     assert cfg.session_search_enabled is True
+
+
+def test_index_dir_honours_xdg_cache_home(tmp_path: Path, monkeypatch) -> None:
+    cache_home = tmp_path / "xdgcache"
+    memory_home = tmp_path / "mem"
+    memory_home.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.setenv("REKOL_HOME", str(memory_home))
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
+    cfg = load_config()
+    assert cfg.index_dir == _expected_cache_dir(cache_home, memory_home)
+
+
+def test_index_dir_falls_back_to_dot_cache(tmp_path: Path, monkeypatch) -> None:
+    # With no XDG_CACHE_HOME, the cache root defaults to ~/.cache.
+    fake_home = tmp_path / "userhome"
+    fake_home.mkdir()
+    memory_home = tmp_path / "mem"
+    memory_home.mkdir()
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("REKOL_HOME", str(memory_home))
+    cfg = load_config()
+    assert cfg.index_dir == _expected_cache_dir(fake_home / ".cache", memory_home)
+
+
+def test_index_dir_hash_is_stable_and_distinct_per_memory_home(tmp_path: Path, monkeypatch) -> None:
+    cache_home = tmp_path / "cache"
+    home_a = tmp_path / "a"
+    home_b = tmp_path / "b"
+    home_a.mkdir()
+    home_b.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
+
+    monkeypatch.setenv("REKOL_HOME", str(home_a))
+    a1 = load_config().index_dir
+    a2 = load_config().index_dir  # stable across loads
+    assert a1 == a2
+
+    monkeypatch.setenv("REKOL_HOME", str(home_b))
+    b1 = load_config().index_dir
+    # Distinct memory homes must not collide in the cache.
+    assert a1 != b1
+
+
+def test_index_dir_override_via_env(tmp_path: Path, monkeypatch) -> None:
+    override = tmp_path / "custom-index-dir"
+    memory_home = tmp_path / "mem"
+    memory_home.mkdir()
+    monkeypatch.setenv("REKOL_HOME", str(memory_home))
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(override))
+    cfg = load_config()
+    assert cfg.index_dir == override
+    assert cfg.index_db_path == override / "index.db"
+    assert cfg.sessions_db_path == override / "sessions.db"
 
 
 def test_rekol_home_takes_precedence(monkeypatch) -> None:

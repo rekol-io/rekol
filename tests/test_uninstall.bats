@@ -77,6 +77,20 @@ run_uninstall_with_flags() {
         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" "$@"
 }
 
+# Reads the local-only INDEX_DIR install recorded in the manifest. The index now
+# lives in a cache OUTSIDE $REKOL_HOME (under the sandbox HOME's .cache), so the
+# tests resolve it from the same path install wrote rather than hard-coding the
+# hash. Echoes the path (empty if no manifest / no key).
+manifest_index_dir() {
+    local f="${REKOLH}/.install-logs/manifest.env" line
+    [[ -f "$f" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            INDEX_DIR=*) printf '%s' "${line#INDEX_DIR=}" ;;
+        esac
+    done < "$f"
+}
+
 # ---------------------------------------------------------------------------
 # --help / unknown-arg basics
 # ---------------------------------------------------------------------------
@@ -257,28 +271,109 @@ run_uninstall_with_flags() {
 }
 
 # ---------------------------------------------------------------------------
-# Index handling
+# Index handling — the index lives in a local cache OUTSIDE $REKOL_HOME
 # ---------------------------------------------------------------------------
-@test "default uninstall preserves the .index when run non-interactively without --purge-index" {
+@test "default uninstall preserves the index cache without --purge-index" {
     do_full_install
-    [ -f "${REKOLH}/.index/index.db" ]
+    cache="$(manifest_index_dir)"
+    [ -n "$cache" ]
+    [ -f "${cache}/index.db" ]
 
     run_uninstall --yes
     [ "$status" -eq 0 ]
 
-    # Without --purge-index, the derived index is preserved.
-    [ -d "${REKOLH}/.index" ]
+    # Without --purge-index, the derived index cache is preserved.
+    [ -d "${cache}" ]
 }
 
-@test "--purge-index removes .index but keeps markdown" {
+@test "--purge-index removes the index cache but keeps markdown" {
     do_full_install
-    [ -f "${REKOLH}/.index/index.db" ]
+    cache="$(manifest_index_dir)"
+    [ -n "$cache" ]
+    [ -f "${cache}/index.db" ]
 
     run_uninstall --yes --purge-index
     [ "$status" -eq 0 ]
 
+    # The local cache is gone...
+    [ ! -d "${cache}" ]
+    # ...and the markdown memory is untouched.
+    [ -f "${REKOLH}/always/identity.md" ]
+    grep -q "my precious memory" "${REKOLH}/always/identity.md"
+}
+
+# ---------------------------------------------------------------------------
+# SECURITY — a fresh install leaves NO derived/secrets-bearing state in
+# $REKOL_HOME: no *.db anywhere, and no in-tree .index/.
+# ---------------------------------------------------------------------------
+@test "fresh install keeps all DBs out of \$REKOL_HOME (security)" {
+    do_full_install
+    # No SQLite DB of any kind may sit under the (possibly-synced) memory home.
+    run find "${REKOLH}" -name '*.db'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # And there must be no in-tree .index/ directory at all.
     [ ! -d "${REKOLH}/.index" ]
-    # markdown still there.
+    # The DBs DO exist — in the local cache outside $REKOL_HOME.
+    cache="$(manifest_index_dir)"
+    [ -n "$cache" ]
+    [ -f "${cache}/index.db" ]
+    case "$cache" in
+        "${REKOLH}"/*) printf 'cache must be outside REKOL_HOME: %s\n' "$cache" >&2; return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# MIGRATION — an old in-tree $REKOL_HOME/.index/ is rebuilt into the cache and
+# the secrets-bearing in-tree copy is deleted; markdown is untouched; search
+# works after relocation; uninstall then removes the cache.
+# ---------------------------------------------------------------------------
+@test "install migrates a legacy in-tree .index/ into the cache and deletes it" {
+    # Seed user markdown the install must preserve.
+    mkdir -p "${REKOLH}/always"
+    printf -- '---\nname: id\ndescription: d\ntype: always\n---\nmy precious memory\n' \
+        > "${REKOLH}/always/identity.md"
+    # Pre-seed an OLD in-tree index (as a pre-relocation install left it),
+    # including a sessions.db that stands in for the secrets-bearing transcript DB.
+    mkdir -p "${REKOLH}/.index"
+    printf 'legacy-index-db\n'    > "${REKOLH}/.index/index.db"
+    printf 'legacy-sessions-db\n' > "${REKOLH}/.index/sessions.db"
+    md_hash_before="$(shasum "${REKOLH}/always/identity.md" | awk '{print $1}')"
+
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    [ "$status" -eq 0 ]
+
+    # The legacy in-tree index (and its sessions.db) is GONE from $REKOL_HOME.
+    [ ! -d "${REKOLH}/.index" ]
+    run find "${REKOLH}" -name '*.db'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    # It was rebuilt into the cache outside $REKOL_HOME.
+    cache="$(manifest_index_dir)"
+    [ -n "$cache" ]
+    [ -f "${cache}/index.db" ]
+    # And it's a freshly built DB, not the moved legacy placeholder file.
+    ! grep -q "legacy-index-db" "${cache}/index.db"
+
+    # Markdown is byte-for-byte untouched.
+    md_hash_after="$(shasum "${REKOLH}/always/identity.md" | awk '{print $1}')"
+    [ "$md_hash_before" = "$md_hash_after" ]
+
+    # Search works after relocation.
+    run env -u MEMORY_HOME REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${TOOLS_HOME}/.venv/bin/rekol" search "identity" --top 3
+    [ "$status" -eq 0 ]
+
+    # Uninstall removes the relocated cache.
+    run_uninstall --yes --purge-index
+    [ "$status" -eq 0 ]
+    [ ! -d "${cache}" ]
+    # Markdown still preserved through uninstall.
     [ -f "${REKOLH}/always/identity.md" ]
 }
 
@@ -299,7 +394,10 @@ run_uninstall_with_flags() {
     [ -e "${BIN_DIR}/rekol" ]
     [ -d "${SBHOME}/.claude/skills/rekol" ]
     [ -d "${TOOLS_HOME}/.venv" ]
-    [ -d "${REKOLH}/.index" ]
+    # The local index cache is untouched by a dry-run.
+    cache="$(manifest_index_dir)"
+    [ -n "$cache" ]
+    [ -d "${cache}" ]
 }
 
 # ---------------------------------------------------------------------------

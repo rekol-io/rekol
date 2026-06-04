@@ -5,6 +5,7 @@ from pathlib import Path
 import frontmatter
 from click.testing import CliRunner
 
+from cache_helpers import cache_dir_for
 from rekol.cli_capture import main as capture_main
 from rekol.cli_index import main as index_main
 from rekol.cli_invalidate import main as invalidate_main
@@ -35,9 +36,12 @@ def test_memory_index_rebuild_cli(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(index_main, ["rebuild"])
     assert result.exit_code == 0, result.output
     assert "indexed" in result.output.lower()
-    assert (tmp_path / ".index" / "index.db").exists()
-    assert (tmp_path / ".index" / "INDEX.md").exists()
-    # Root-level INDEX.md is no longer used; only MEMORY.md belongs at root
+    # Index + INDEX.md live in the local cache OUTSIDE the (possibly-synced) home.
+    cache = cache_dir_for(tmp_path)
+    assert (cache / "index.db").exists()
+    assert (cache / "INDEX.md").exists()
+    # Nothing derived under the memory home: no .index/, no root-level INDEX.md.
+    assert not (tmp_path / ".index").exists()
     assert not (tmp_path / "INDEX.md").exists()
 
 
@@ -354,7 +358,7 @@ def test_memory_capture_project_scoping(tmp_path: Path, monkeypatch) -> None:
     assert any("phase2.md" in hit["file_path"] for hit in data["memory"]), result.output
 
     # INDEX.md has a per-project section
-    index_md = (tmp_path / ".index" / "INDEX.md").read_text()
+    index_md = (cache_dir_for(tmp_path) / "INDEX.md").read_text()
     assert "## projects/" in index_md
     assert "### math-evolution-agent" in index_md
     assert "phase2.md" in index_md
@@ -582,8 +586,9 @@ def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setenv("REKOL_HOME", str(tmp_path))
     (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
-    idx = tmp_path / ".index"
-    idx.mkdir()
+    # Pre-seed an outdated-schema index at the CACHE location the CLI reads from.
+    idx = cache_dir_for(tmp_path)
+    idx.mkdir(parents=True)
     con = sqlite3.connect(idx / "index.db")
     con.execute(
         "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"
@@ -668,8 +673,9 @@ def test_capture_instructs_on_legacy_schema(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setenv("REKOL_HOME", str(tmp_path))
     (tmp_path / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
-    idx = tmp_path / ".index"
-    idx.mkdir()
+    # Pre-seed an outdated-schema index at the CACHE location the CLI reads from.
+    idx = cache_dir_for(tmp_path)
+    idx.mkdir(parents=True)
     con = sqlite3.connect(idx / "index.db")
     con.execute(
         "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT)"

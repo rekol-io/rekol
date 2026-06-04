@@ -18,13 +18,34 @@ setup() {
     unset REKOL_HOME || true
     TOOLS_HOME="${TESTROOT}/tools"
     BIN_DIR="${TESTROOT}/bin"
+    # SECURITY/test-hygiene: the index now lives in ${XDG_CACHE_HOME:-~/.cache}/
+    # rekol/<hash>. Sandbox XDG_CACHE_HOME so building the index in these tests
+    # writes ONLY under the throwaway TESTROOT and never pollutes the real
+    # ~/.cache. (HOME is left alone so the test-mode .zshrc check still verifies
+    # the real ~/.zshrc is untouched.)
+    export XDG_CACHE_HOME="${TESTROOT}/cache"
     # Resolve component dir relative to this test file
     COMPONENT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT
+    export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME
 }
 
 teardown() {
     rm -rf "${TESTROOT}"
+}
+
+# Reads the local-only INDEX_DIR install recorded in the manifest under the given
+# REKOL_HOME. The index lives in a cache OUTSIDE $REKOL_HOME, so tests resolve it
+# from the same path install wrote rather than hard-coding the hash. $1 = the
+# REKOL_HOME whose manifest to read. Echoes the path (empty if none).
+manifest_index_dir() {
+    local home="$1" f line
+    f="${home}/.install-logs/manifest.env"
+    [[ -f "$f" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            INDEX_DIR=*) printf '%s' "${line#INDEX_DIR=}" ;;
+        esac
+    done < "$f"
 }
 
 # ---------------------------------------------------------------------------
@@ -48,7 +69,7 @@ teardown() {
 # ---------------------------------------------------------------------------
 # Test 2 — real install seeds MEMORY_HOME and builds the index
 # ---------------------------------------------------------------------------
-@test "real install seeds MEMORY_HOME, builds index, creates INDEX.md" {
+@test "real install seeds MEMORY_HOME, builds index in the cache, creates INDEX.md" {
     run "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
         --bin-dir "${BIN_DIR}" \
@@ -66,14 +87,19 @@ teardown() {
     [ -f "${MEMORY_HOME}/rekol.config.yaml" ]
     [ ! -f "${MEMORY_HOME}/rekol.config.yaml.example" ]
 
-    # Index built
-    [ -f "${MEMORY_HOME}/.index/index.db" ]
+    # Index + INDEX.md built in the local cache OUTSIDE $REKOL_HOME, not in-tree.
+    cache="$(manifest_index_dir "${MEMORY_HOME}")"
+    [ -n "$cache" ]
+    [ -f "${cache}/index.db" ]
+    [ -f "${cache}/INDEX.md" ]
 
-    # INDEX.md regenerated under .index/ (not at root)
-    [ -f "${MEMORY_HOME}/.index/INDEX.md" ]
-
-    # .dropboxignore created
-    [ -f "${MEMORY_HOME}/.dropboxignore" ]
+    # SECURITY: nothing derived (and no .index/, no .dropboxignore) under the
+    # possibly-synced memory home.
+    [ ! -d "${MEMORY_HOME}/.index" ]
+    [ ! -f "${MEMORY_HOME}/.dropboxignore" ]
+    run find "${MEMORY_HOME}" -name '*.db'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -108,9 +134,10 @@ teardown() {
 # Test 3b — install writes a durable manifest recording the resolved paths
 # ---------------------------------------------------------------------------
 # The manifest is what makes uninstall deterministic: it records the resolved
-# TOOLS_HOME / BIN_DIR / REKOL_HOME so `uninstall.sh` (no flags) can find a custom
-# install. It lives at a STABLE path under REKOL_HOME (.install-logs/manifest.env,
-# NOT under the disposable .index/) and is overwritten — not appended — on rerun.
+# TOOLS_HOME / BIN_DIR / REKOL_HOME / INDEX_DIR so `uninstall.sh` (no flags) can
+# find a custom install AND its local index cache. It lives at a STABLE path
+# under REKOL_HOME (.install-logs/manifest.env) and is overwritten — not appended
+# — on rerun.
 @test "install writes the manifest with the resolved paths and overwrites on rerun" {
     "${COMPONENT_DIR}/install.sh" \
         --tools-home "${TOOLS_HOME}" \
@@ -123,6 +150,10 @@ teardown() {
     grep -q "^BIN_DIR=${BIN_DIR}$" "${MANIFEST}"
     grep -q "^REKOL_HOME=${MEMORY_HOME}$" "${MANIFEST}"
     grep -q "^SHIM=${BIN_DIR}/rekol$" "${MANIFEST}"
+    # The local index cache is recorded too, and points OUTSIDE $REKOL_HOME so
+    # uninstall can remove it. (It lands under the sandboxed XDG_CACHE_HOME.)
+    grep -q "^INDEX_DIR=${XDG_CACHE_HOME}/rekol/" "${MANIFEST}"
+    ! grep -q "^INDEX_DIR=${MEMORY_HOME}" "${MANIFEST}"
 
     # Rerun overwrites in place: exactly one manifest, still the right TOOLS_HOME.
     run "${COMPONENT_DIR}/install.sh" \
@@ -287,8 +318,12 @@ teardown() {
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
 
-  # Step 9.5: the backfill created the sessions index from the fixture history.
-  [ -f "$REKOLH/.index/sessions.db" ]
+  # Step 9.5: the backfill created the sessions index from the fixture history —
+  # in the local cache outside $REKOL_HOME (never in-tree).
+  cache="$(manifest_index_dir "$REKOLH")"
+  [ -n "$cache" ]
+  [ -f "$cache/sessions.db" ]
+  [ ! -d "$REKOLH/.index" ]
 }
 
 @test "install does not abort when the config omits git_track" {
@@ -310,8 +345,11 @@ teardown() {
       --no-hook --no-skill --no-shellrc \
       --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
   [ "$status" -eq 0 ]
-  # Got past Step 8.5 and built the curated index.
-  [ -f "$REKOLH/.index/index.db" ]
+  # Got past Step 8.5 and built the curated index — in the cache, not in-tree.
+  cache="$(manifest_index_dir "$REKOLH")"
+  [ -n "$cache" ]
+  [ -f "$cache/index.db" ]
+  [ ! -d "$REKOLH/.index" ]
   # git tracking stayed off (no key present, no repo initialised).
   [ ! -d "$REKOLH/.git" ]
 }
@@ -421,7 +459,7 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
-@test "install rebuilds (not just updates) when the existing index has a legacy schema" {
+@test "install migrates a legacy in-tree index into the cache with a fresh schema" {
   command -v jq >/dev/null 2>&1 || skip "jq required"
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 required"
 
@@ -433,8 +471,10 @@ teardown() {
     > "$REKOLH/rekol.config.yaml"
   printf -- '---\nname: id\ndescription: d\ntype: always\n---\nbody\n' \
     > "$REKOLH/always/identity.md"
-  # A legacy curated index: chunks table WITHOUT the timestamp columns. Step 9's
-  # `index update` must detect this, NOT abort the install, and rebuild instead.
+  # A legacy IN-TREE curated index: chunks table WITHOUT the timestamp columns,
+  # under $REKOL_HOME/.index/ as a pre-relocation install left it. Install must
+  # rebuild it into the cache (with the current schema) and delete the in-tree
+  # copy — without ever aborting.
   sqlite3 "$REKOLH/.index/index.db" \
     "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INT, content_hash TEXT, indexed_at INT); CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, line_start INT, line_end INT, text TEXT, tags_json TEXT, aliases_json TEXT, embedding BLOB);"
 
@@ -445,8 +485,14 @@ teardown() {
       --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
   [ "$status" -eq 0 ]
 
-  # Rebuilt (migrated): the chunks table now has the timestamp columns.
-  run sqlite3 "$REKOLH/.index/index.db" \
+  # The legacy in-tree index is gone (relocated + cleaned up).
+  [ ! -d "$REKOLH/.index" ]
+
+  # Rebuilt into the cache with the current schema (chunks has timestamp columns).
+  cache="$(manifest_index_dir "$REKOLH")"
+  [ -n "$cache" ]
+  [ -f "$cache/index.db" ]
+  run sqlite3 "$cache/index.db" \
     "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='created';"
   [ "$output" = "1" ]
 }

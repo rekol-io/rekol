@@ -7,6 +7,7 @@ keep working.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,39 @@ def resolve_memory_home() -> str | None:
     return os.environ.get("REKOL_HOME") or os.environ.get("MEMORY_HOME")
 
 
+def resolve_index_dir(memory_home: Path) -> Path:
+    """Resolve the local-only cache dir that holds all derived index state.
+
+    SECURITY: the index — including ``sessions.db``, which records every prompt
+    and assistant turn verbatim (and thus any pasted secrets) — must never live
+    inside ``$REKOL_HOME``. ``$REKOL_HOME`` is a user-chosen folder that may be
+    synced via Dropbox / iCloud / Google Drive / OneDrive / Syncthing / git; a
+    per-tool ignore file (the old ``.dropboxignore``) only protects Dropbox.
+    Relocating the index OUT of the synced tree into a machine-local cache kills
+    that whole class of exposure regardless of sync tool.
+
+    Resolution order:
+        1. ``$REKOL_INDEX_DIR`` — explicit override, used verbatim.
+        2. ``${XDG_CACHE_HOME:-~/.cache}/rekol/<hash>`` where ``<hash>`` is a
+           stable 16-hex-char SHA-256 of the resolved ``memory_home`` path, so
+           multiple ``REKOL_HOME`` roots get distinct, non-colliding caches.
+
+    Args:
+        memory_home: The resolved (expanded, absolute) memory-home path.
+
+    Returns:
+        The absolute index/cache directory path (not created here; the SQLite
+        stores ``mkdir(parents=True)`` their own parent on open).
+    """
+    override = os.environ.get("REKOL_INDEX_DIR")
+    if override:
+        return Path(os.path.expanduser(override))
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    cache_root = Path(os.path.expanduser(cache_home)) if cache_home else Path.home() / ".cache"
+    digest = hashlib.sha256(str(memory_home).encode()).hexdigest()[:16]
+    return cache_root / "rekol" / digest
+
+
 @dataclass
 class Config:
     """Resolved configuration for rekol.
@@ -70,22 +104,35 @@ class Config:
     temporal_confirm_interval_days: int
 
     @property
+    def index_dir(self) -> Path:
+        """Absolute path to the local-only cache dir holding all derived state.
+
+        Lives OUTSIDE ``$REKOL_HOME`` (in ``$XDG_CACHE_HOME``/``~/.cache``) so
+        the secrets-bearing ``sessions.db`` and the rest of the index never sit
+        in a sync-able folder. See :func:`resolve_index_dir`.
+        """
+        return resolve_index_dir(self.memory_home)
+
+    @property
     def index_db_path(self) -> Path:
-        """Absolute path to the SQLite index database.
+        """Absolute path to the SQLite curated-memory index database.
 
         Returns:
-            Path at ``$REKOL_HOME/.index/index.db``.
+            Path at ``<cache>/index.db`` (outside ``$REKOL_HOME``).
         """
-        return self.memory_home / ".index" / "index.db"
+        return self.index_dir / "index.db"
 
     @property
     def sessions_db_path(self) -> Path:
         """Absolute path to the SQLite sessions database (transcripts index).
 
+        ``sessions.db`` captures every prompt/assistant turn verbatim, so it is
+        kept in the local-only cache (outside ``$REKOL_HOME``) and never synced.
+
         Returns:
-            Path at ``$REKOL_HOME/.index/sessions.db``.
+            Path at ``<cache>/sessions.db`` (outside ``$REKOL_HOME``).
         """
-        return self.memory_home / ".index" / "sessions.db"
+        return self.index_dir / "sessions.db"
 
 
 def load_config() -> Config:

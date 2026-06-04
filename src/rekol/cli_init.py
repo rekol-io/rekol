@@ -56,8 +56,8 @@ def main(yes: bool) -> None:
         labels = ", ".join(c.label for c in cloud)
         click.echo(
             f"Detected cloud-sync folders ({labels}). REKOL_HOME can live in one so "
-            "your markdown syncs across devices — but keep the .index/ directory out "
-            "of sync (it is machine-specific and rebuildable)."
+            "your markdown syncs across devices — the index lives in a local cache "
+            "outside your memory folder, so syncing your memory never syncs the index."
         )
 
     # 4) Opt-in legacy migration (off by default).
