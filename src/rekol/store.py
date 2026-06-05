@@ -15,7 +15,11 @@ import numpy as np
 #     Bumped here because an index built by version 2 has no recorded provenance —
 #     we cannot tell which embedding model produced its vectors, so it cannot be
 #     trusted for a model-identity check and must be rebuilt (see Migration below).
-CURATED_SCHEMA_VERSION = 3
+# 4 = with the `files.name` column (the file's frontmatter `name`). INDEX.md is
+#     now derived from the store (C5) instead of a second filesystem walk, so the
+#     display name must live in the index. A version-3 index has no `name` column,
+#     so it is rebuilt rather than read with a missing field.
+CURATED_SCHEMA_VERSION = 4
 
 
 class CuratedSchemaOutdatedError(RuntimeError):
@@ -65,6 +69,7 @@ CREATE TABLE IF NOT EXISTS files (
     path          TEXT PRIMARY KEY,
     mtime         INTEGER NOT NULL,
     content_hash  TEXT NOT NULL,
+    name          TEXT NOT NULL DEFAULT '',
     indexed_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 """
@@ -224,6 +229,12 @@ class IndexStore:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(chunks)")}
         if "created" not in cols:
             return True
+        # The `files.name` column carries the display name INDEX.md derives (C5).
+        # A pre-versioning index without it cannot produce a faithful INDEX.md, so
+        # it needs a rebuild even when the metadata table happens to be present.
+        file_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(files)")}
+        if "name" not in file_cols:
+            return True
         # Pre-versioning index (user_version == 0) that nonetheless has the
         # timestamp columns: the absence of the metadata table means unknown
         # provenance, so it still needs a rebuild rather than a blind trust.
@@ -305,44 +316,84 @@ class IndexStore:
             dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows
         ]
 
-    def _upsert_file_no_commit(self, path: str, mtime: int, content_hash: str) -> None:
+    def _upsert_file_no_commit(
+        self, path: str, mtime: int, content_hash: str, *, name: str = ""
+    ) -> None:
         """Insert/update a file row WITHOUT committing.
 
         The commit is deferred so the caller can bundle the files-row write with
         the chunk writes into one transaction (see ``replace_file_and_chunks``).
         The invariant that depends on this: ``content_hash`` must not be visible
         to a future incremental run until the matching chunks have also landed.
+
+        ``name`` is the file's frontmatter display name, recorded so INDEX.md can
+        be derived from the store rather than a second filesystem walk (C5).
         """
         self.conn.execute(
-            "INSERT INTO files(path, mtime, content_hash) VALUES(?,?,?) "
+            "INSERT INTO files(path, mtime, content_hash, name) VALUES(?,?,?,?) "
             "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime, "
-            "content_hash=excluded.content_hash, "
+            "content_hash=excluded.content_hash, name=excluded.name, "
             "indexed_at=strftime('%s','now')",
-            (path, mtime, content_hash),
+            (path, mtime, content_hash, name),
         )
 
-    def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
-        """Insert or update a file's mtime, content hash, and indexed timestamp.
+    def upsert_file(self, path: str, mtime: int, content_hash: str, *, name: str = "") -> None:
+        """Insert or update a file's mtime, content hash, name, and indexed timestamp.
 
         Standalone committing wrapper. The indexing path does NOT use this — it
         goes through ``replace_file_and_chunks`` so the hash and chunks commit
         together. Kept for callers (and tests) that write a files row directly.
         """
-        self._upsert_file_no_commit(path, mtime, content_hash)
+        self._upsert_file_no_commit(path, mtime, content_hash, name=name)
         self.conn.commit()
 
     def get_file(self, path: str) -> dict[str, Any] | None:
         """Return the file row for ``path``, or None if it is not indexed."""
         row = self.conn.execute(
-            "SELECT path, mtime, content_hash, indexed_at FROM files WHERE path=?",
+            "SELECT path, mtime, content_hash, name, indexed_at FROM files WHERE path=?",
             (path,),
         ).fetchone()
         return dict(row) if row else None
 
     def all_files(self) -> list[dict[str, Any]]:
-        """Return every indexed file's path, mtime, and content hash."""
-        rows = self.conn.execute("SELECT path, mtime, content_hash FROM files").fetchall()
+        """Return every indexed file's path, mtime, content hash, and name."""
+        rows = self.conn.execute("SELECT path, mtime, content_hash, name FROM files").fetchall()
         return [dict(r) for r in rows]
+
+    def all_files_for_index_md(self) -> list[dict[str, Any]]:
+        """Return one record per indexed file for deriving INDEX.md (C5).
+
+        Each record carries ``path``, ``name`` (frontmatter display name), and the
+        file's ``tags`` / ``aliases`` (decoded from any one of its chunks — they
+        are identical across a file's chunks). Deriving INDEX.md from this instead
+        of re-walking and re-``parse_file``-ing the disk closes the TOCTOU window
+        where INDEX.md could disagree with the index it is supposed to describe:
+        a file the indexer skipped (bad frontmatter) is absent from the store, so
+        it is absent from INDEX.md too — by construction, not by a second guess.
+
+        A file whose chunks somehow carry no tag/alias rows still appears (with
+        empty lists), so it is never silently dropped from the listing.
+        """
+        rows = self.conn.execute(
+            "SELECT f.path AS path, f.name AS name, "
+            "       (SELECT c.tags_json FROM chunks c WHERE c.file_path = f.path LIMIT 1) "
+            "         AS tags_json, "
+            "       (SELECT c.aliases_json FROM chunks c WHERE c.file_path = f.path LIMIT 1) "
+            "         AS aliases_json "
+            "FROM files f "
+            "ORDER BY f.path"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                dict(
+                    path=r["path"],
+                    name=r["name"],
+                    tags=json.loads(r["tags_json"]) if r["tags_json"] else [],
+                    aliases=json.loads(r["aliases_json"]) if r["aliases_json"] else [],
+                )
+            )
+        return out
 
     def delete_file(self, path: str) -> None:
         """Delete a file row; its chunks are removed via ON DELETE CASCADE."""
@@ -427,6 +478,7 @@ class IndexStore:
         content_hash: str,
         chunks: list[dict[str, Any]],
         *,
+        name: str = "",
         created: str | None = None,
         updated: str | None = None,
         valid_from: str | None = None,
@@ -450,7 +502,7 @@ class IndexStore:
         file-seen marker only after the messages+embeddings commit.
         """
         with self.conn:
-            self._upsert_file_no_commit(path, mtime, content_hash)
+            self._upsert_file_no_commit(path, mtime, content_hash, name=name)
             self._replace_chunks_no_commit(
                 path,
                 chunks,

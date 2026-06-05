@@ -75,6 +75,54 @@ def test_session_index_incremental_is_idempotent(tmp_path: Path, monkeypatch) ->
     assert "files_skipped_unchanged=1" in result.output
 
 
+def test_session_index_leaves_fts_in_sync_after_full(tmp_path: Path, monkeypatch) -> None:
+    """C5 (FTS-at-build): a --full reingest rebuilds the FTS index from `messages`,
+    so the on-disk index is consistent — no orphaned postings, no unindexed rows.
+    """
+    home = _setup_home(tmp_path, monkeypatch)
+    runner = CliRunner()
+    assert runner.invoke(cli_main, ["--full"]).exit_code == 0
+
+    store = SessionStore(db_path=cache_dir_for(home) / "sessions.db", dim=384)
+    store.init_schema()
+    try:
+        orphaned, unindexed = store.fts_consistency()
+        assert (orphaned, unindexed) == (0, 0)
+        assert store.fts_is_in_sync() is True
+    finally:
+        store.close()
+
+
+def test_session_index_keeps_fts_in_sync_after_incremental(tmp_path: Path, monkeypatch) -> None:
+    """C5: an incremental ingest of a brand-new file relies on the sync triggers to
+    keep FTS current — the new messages must be indexed, not just inserted.
+    """
+    home = _setup_home(tmp_path, monkeypatch)
+    runner = CliRunner()
+    assert runner.invoke(cli_main, ["--full"]).exit_code == 0
+
+    # Add a second transcript and ingest it incrementally (no --full rebuild).
+    projects = tmp_path / "fake-projects" / "proj-b"
+    projects.mkdir(parents=True)
+    (projects / "session.jsonl").write_text(
+        '{"parentUuid":null,"type":"user","message":{"role":"user",'
+        '"content":"a fresh incremental message about kubernetes"},'
+        '"uuid":"inc-1","timestamp":"2026-04-24T01:29:01.303Z",'
+        '"sessionId":"inc-s","cwd":"/tmp/repoX"}\n'
+    )
+    res = runner.invoke(cli_main, ["--incremental"])
+    assert res.exit_code == 0, res.output
+
+    store = SessionStore(db_path=cache_dir_for(home) / "sessions.db", dim=384)
+    store.init_schema()
+    try:
+        assert store.fts_is_in_sync() is True
+        # The incrementally-added message is reachable by keyword (trigger fired).
+        assert len(store.search_fts("kubernetes", top_k=5)) == 1
+    finally:
+        store.close()
+
+
 def test_session_index_embeds_by_default(tmp_path: Path, monkeypatch) -> None:
     """Embedding is on by default, so a full ingest must populate the vector
     index — transcript search is semantic, not keyword-only.

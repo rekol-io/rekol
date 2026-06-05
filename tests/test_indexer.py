@@ -126,6 +126,74 @@ def test_rebuild_writes_INDEX_md(memory_root: Path) -> None:
     assert not (memory_root / "INDEX.md").exists()
 
 
+def test_index_md_derives_from_store_not_a_second_disk_walk(memory_root: Path) -> None:
+    """C5: INDEX.md is derived from the just-built store, so it lists exactly the
+    files (and names/tags/aliases) the index holds — never a second, possibly
+    divergent, filesystem walk.
+
+    We assert this by mutating the FILE ON DISK after the index is built and
+    regenerating INDEX.md directly: the regenerated content must reflect the
+    STORE (the old name/tags), not the freshly-edited disk file.
+    """
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+    index_md = (memory_root / ".index" / "INDEX.md").read_text()
+    # The store's recorded name + tag + alias for prometheus.md show up.
+    assert "Prometheus" in index_md
+    assert "`prometheus`" in index_md  # tag
+    assert "`prom`" in index_md  # alias
+
+    # Now change the on-disk file's frontmatter name/tag, but do NOT re-index.
+    prom = memory_root / "topics" / "prometheus.md"
+    prom.write_text(
+        "---\nname: RenamedOnDisk\ndescription: test\ntype: topic\n"
+        "tags: ['disk-only-tag']\naliases: ['disk-only-alias']\n---\n\nbody\n"
+    )
+    idx._write_index_md()
+    regenerated = (memory_root / ".index" / "INDEX.md").read_text()
+    # Derived from the STORE: the disk-only edits must NOT appear; the indexed
+    # name/tag/alias must persist.
+    assert "RenamedOnDisk" not in regenerated
+    assert "disk-only-tag" not in regenerated
+    assert "disk-only-alias" not in regenerated
+    assert "Prometheus" in regenerated
+
+
+def test_index_md_omits_files_skipped_at_index_time(memory_root: Path) -> None:
+    """C5: a file the indexer skips (bad frontmatter) is absent from the store and
+    therefore consistently absent from INDEX.md — no second walk re-discovers it.
+    """
+    bad = memory_root / "topics" / "broken.md"
+    bad.write_text("---\nname: ShouldNotAppear\n---\n\nbody but missing description/type\n")
+    idx = _make_indexer(memory_root)
+    stats = idx.rebuild()
+    assert stats.files_skipped == 1
+
+    index_md = (memory_root / ".index" / "INDEX.md").read_text()
+    # The skipped file is in neither the store nor INDEX.md.
+    assert "ShouldNotAppear" not in index_md
+    assert "broken.md" not in index_md
+    indexed_paths = {f["path"] for f in idx.store.all_files()}
+    assert str(bad) not in indexed_paths
+
+
+def test_index_md_projects_grouping_from_store(memory_root: Path) -> None:
+    """C5: project-scoped files (projects/<slug>/<layer>/*.md) still group by slug
+    when INDEX.md is derived from the store."""
+    proj = memory_root / "projects" / "acme" / "topics" / "deploy.md"
+    proj.parent.mkdir(parents=True, exist_ok=True)
+    proj.write_text(
+        "---\nname: AcmeDeploy\ndescription: how acme deploys\ntype: topic\n"
+        "tags: ['deploy']\naliases: []\n---\n\n# Deploy\n\nSteps here.\n"
+    )
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+    index_md = (memory_root / ".index" / "INDEX.md").read_text()
+    assert "## projects/" in index_md
+    assert "### acme" in index_md
+    assert "AcmeDeploy" in index_md
+
+
 def test_rebuild_removes_legacy_root_INDEX_md(memory_root: Path) -> None:
     """A pre-existing root-level INDEX.md from older installs must be cleaned
     up so Claude does not speculatively read 6KB of pointers as memory."""
