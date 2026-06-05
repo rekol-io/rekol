@@ -548,7 +548,7 @@ log_journal "SYMLINK ${local_autoreindex_dst} -> ${local_autoreindex_src}"
 # Step 7C — PostToolUse auto-reindex hook merge into settings.json
 # =============================================================================
 # Wires the auto-reindex script (Step 7B) into Claude Code's PostToolUse event
-# with matcher "Write|Edit".  Every time the agent edits a file under
+# with matcher "Write|Edit|MultiEdit".  Every time the agent edits a file under
 # $REKOL_HOME, the script fires `rekol index update` asynchronously so the
 # vector DB stays in sync without per-edit latency.
 #
