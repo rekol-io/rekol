@@ -387,6 +387,36 @@ def test_user_version_bump_triggers_migration(tmp_path: Path) -> None:
         s.close()
 
 
+def test_init_schema_does_not_restamp_version_on_existing_db(tmp_path: Path) -> None:
+    """Review fix: opening an OLDER index must not re-stamp user_version to the
+    current value. If it did, needs_schema_migration would report a confusing
+    "stored=current" while the column backstop still (correctly) forces a rebuild,
+    and the file's recorded version would be silently wrong. init_schema stamps
+    the version only when CREATING a fresh schema (no files table yet).
+    """
+    db = tmp_path / "old.db"
+    s = IndexStore(db_path=db, dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        s.init_schema()  # fresh DB → stamped to current
+        assert int(s.conn.execute("PRAGMA user_version").fetchone()[0]) == CURATED_SCHEMA_VERSION
+        # Simulate an index left by an older schema: roll the stamp back.
+        s.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION - 1}")
+        s.conn.commit()
+    finally:
+        s.close()
+
+    # Reopen (the files table now exists) and init_schema again: it must NOT bump
+    # the version back up, so the migration check still sees the true old version.
+    reopened = IndexStore(db_path=db, dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        reopened.init_schema()
+        stored = int(reopened.conn.execute("PRAGMA user_version").fetchone()[0])
+        assert stored == CURATED_SCHEMA_VERSION - 1
+        assert reopened.needs_schema_migration() is True
+    finally:
+        reopened.close()
+
+
 def test_index_missing_metadata_table_needs_rebuild(tmp_path: Path) -> None:
     """TDD (c): a pre-C4 index (timestamp columns present, NO metadata table,
     user_version 0 = pre-versioning) is unknown provenance → needs a rebuild.

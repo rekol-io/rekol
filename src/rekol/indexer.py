@@ -230,6 +230,19 @@ class Indexer:
             tmp_store.close()
             self.store.conn.close()
             os.replace(tmp_db, live_db)
+            # A concurrent reader (e.g. `rekol search`) holding index.db-wal open
+            # blocks our close()'s checkpoint, so the OLD -wal/-shm sidecars can
+            # survive the swap. Left in place, SQLite would replay those stale
+            # frames onto the freshly-swapped-in DB on the next open → silent
+            # corruption. The temp DB was checkpointed clean on close (all of its
+            # data lives in the main file), so these sidecars belong only to the
+            # old index — delete them. A reader that still holds them open keeps
+            # its now-unlinked inodes, so its view stays consistent until it closes.
+            for _sidecar in (
+                live_db.with_name(live_db.name + "-wal"),
+                live_db.with_name(live_db.name + "-shm"),
+            ):
+                _sidecar.unlink(missing_ok=True)
         except BaseException:
             # Any failure (embed error, kill-injected exception, swap error)
             # leaves the live index untouched. Drop the partial temp DB and make
