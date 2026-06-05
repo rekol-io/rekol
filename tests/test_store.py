@@ -3,7 +3,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from rekol.store import IndexStore
+from rekol.store import (
+    CURATED_SCHEMA_VERSION,
+    IndexModelMismatchError,
+    IndexStore,
+)
 
 
 @pytest.fixture()
@@ -264,6 +268,148 @@ def test_replace_file_and_chunks_is_atomic(store: IndexStore, tmp_path: Path) ->
     surviving = store.all_chunks_for_file(str(p))
     assert len(surviving) == 1
     assert surviving[0]["heading"] == "orig"
+
+
+# --------------------------- C4: index identity -----------------------------
+
+
+def _seed_one_chunk(store: IndexStore, path: str) -> None:
+    """Write a single file + chunk so the index is non-empty and stamped."""
+    v = np.zeros(8, dtype=np.float32)
+    v[0] = 1.0
+    store.replace_file_and_chunks(
+        path,
+        mtime=1,
+        content_hash="h",
+        chunks=[
+            dict(heading="A", line_start=1, line_end=2, text="a", tags=[], aliases=[], embedding=v),
+        ],
+    )
+
+
+def test_init_schema_creates_metadata_table(tmp_path: Path) -> None:
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        s.init_schema()
+        assert "metadata" in s.list_tables()
+        assert s.get_metadata("schema_version") == str(CURATED_SCHEMA_VERSION)
+        assert s.get_metadata("embedding_model") == "m-a"
+        assert s.get_metadata("embedding_dim") == "8"
+    finally:
+        s.close()
+
+
+def test_user_version_stamped_to_current(store: IndexStore) -> None:
+    version = store.conn.execute("PRAGMA user_version").fetchone()[0]
+    assert int(version) == CURATED_SCHEMA_VERSION
+
+
+def test_writes_keep_identity_current(tmp_path: Path) -> None:
+    """C4: a write stamps/keeps the embedding identity in metadata."""
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        s.init_schema()
+        _seed_one_chunk(s, str(tmp_path / "x.md"))
+        assert s.get_metadata("embedding_model") == "m-a"
+        assert s.get_metadata("embedding_dim") == "8"
+    finally:
+        s.close()
+
+
+def test_check_model_identity_passes_on_match(tmp_path: Path) -> None:
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        s.init_schema()
+        _seed_one_chunk(s, str(tmp_path / "x.md"))
+        # Same model + dim → no raise.
+        s.check_model_identity("m-a", 8)
+    finally:
+        s.close()
+
+
+def test_search_after_model_change_raises_not_wrong_results(tmp_path: Path) -> None:
+    """TDD (a): build an index with one model, then a different configured model
+    must raise the loud mismatch error rather than serve confidently-wrong hits.
+    """
+    db = tmp_path / "i.db"
+    builder = IndexStore(db_path=db, dim=8, use_sqlite_vec=False, embedding_model="model-a")
+    try:
+        builder.init_schema()
+        _seed_one_chunk(builder, str(tmp_path / "x.md"))
+    finally:
+        builder.close()
+
+    # Reopen as a different configured model (same dim) — the search-path guard.
+    reader = IndexStore(db_path=db, dim=8, use_sqlite_vec=False, embedding_model="model-b")
+    try:
+        reader.init_schema()
+        # init must NOT have overwritten the recorded identity (that would mask
+        # the mismatch). The stored model is still the one that built the index.
+        assert reader.get_metadata("embedding_model") == "model-a"
+        with pytest.raises(IndexModelMismatchError) as excinfo:
+            reader.check_model_identity("model-b", 8)
+        assert excinfo.value.stored_model == "model-a"
+        assert excinfo.value.wanted_model == "model-b"
+    finally:
+        reader.close()
+
+
+def test_check_model_identity_detects_dim_change(tmp_path: Path) -> None:
+    db = tmp_path / "i.db"
+    builder = IndexStore(db_path=db, dim=8, use_sqlite_vec=False, embedding_model="model-a")
+    try:
+        builder.init_schema()
+        _seed_one_chunk(builder, str(tmp_path / "x.md"))
+    finally:
+        builder.close()
+    reader = IndexStore(db_path=db, dim=16, use_sqlite_vec=False, embedding_model="model-a")
+    try:
+        reader.init_schema()
+        with pytest.raises(IndexModelMismatchError) as excinfo:
+            reader.check_model_identity("model-a", 16)
+        assert excinfo.value.stored_dim == 8
+        assert excinfo.value.wanted_dim == 16
+    finally:
+        reader.close()
+
+
+def test_user_version_bump_triggers_migration(tmp_path: Path) -> None:
+    """TDD (b): an index whose user_version is below current → needs migration."""
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False, embedding_model="m-a")
+    try:
+        s.init_schema()
+        assert s.needs_schema_migration() is False
+        # Simulate an index stamped by an older schema version.
+        s.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION - 1}")
+        s.conn.commit()
+        assert s.needs_schema_migration() is True
+    finally:
+        s.close()
+
+
+def test_index_missing_metadata_table_needs_rebuild(tmp_path: Path) -> None:
+    """TDD (c): a pre-C4 index (timestamp columns present, NO metadata table,
+    user_version 0 = pre-versioning) is unknown provenance → needs a rebuild.
+    """
+    db = tmp_path / "legacy.db"
+    s = IndexStore(db_path=db, dim=8, use_sqlite_vec=False)
+    try:
+        # Build a version-2-shaped index by hand: chunks WITH the timestamp
+        # columns but no metadata table, and user_version left at 0.
+        s.conn.executescript(
+            "CREATE TABLE files (path TEXT PRIMARY KEY, mtime INTEGER, content_hash TEXT, "
+            "indexed_at INTEGER);"
+            "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT, heading TEXT, "
+            "line_start INTEGER, line_end INTEGER, text TEXT, tags_json TEXT, aliases_json TEXT, "
+            "created TEXT, updated TEXT, valid_from TEXT, invalidated_at TEXT, embedding BLOB);"
+        )
+        s.conn.commit()
+        assert "metadata" not in s.list_tables()
+        assert int(s.conn.execute("PRAGMA user_version").fetchone()[0]) == 0
+        # Unknown provenance must be treated as needs-rebuild, never silently trusted.
+        assert s.needs_schema_migration() is True
+    finally:
+        s.close()
 
 
 def test_distinct_file_timestamps_one_row_per_file(store: IndexStore, tmp_path: Path) -> None:
