@@ -634,6 +634,37 @@ def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
     assert "rekol index rebuild" in res.output
 
 
+def test_search_loud_on_model_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """C4 end-to-end: an index built by one model, then queried with a different
+    configured model, must raise the loud rebuild error (exit 2) — never serve
+    confidently-wrong results from a mixed-model index.
+    """
+    import sqlite3
+
+    _seed_memory(tmp_path)
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    runner = CliRunner()
+    assert runner.invoke(index_main, ["rebuild"]).exit_code == 0
+
+    # Simulate "the embedding_model in config changed" by rewriting the recorded
+    # provenance to a model the index was NOT built with (same dim).
+    db_path = cache_dir_for(tmp_path) / "index.db"
+    con = sqlite3.connect(db_path)
+    con.execute("UPDATE metadata SET value='some-other-model' WHERE key='embedding_model'")
+    con.commit()
+    con.close()
+
+    res = runner.invoke(search_main, ["prometheus", "--source", "memory"])
+    assert res.exit_code == 2, res.output
+    assert "rekol index rebuild" in res.output
+    assert "some-other-model" in res.output
+
+    # The update path must refuse for the same reason (no silent mixed-model append).
+    upd = runner.invoke(index_main, ["update"])
+    assert upd.exit_code == 2, upd.output
+    assert "rekol index rebuild" in upd.output
+
+
 def test_overdue_durable_tag_helper() -> None:
     import datetime as dt
     from pathlib import Path

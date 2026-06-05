@@ -23,6 +23,7 @@ EXPECTED_COMMANDS = {
     "session-index",
     "import",
     "init",
+    "doctor",
 }
 
 HIDDEN_COMMANDS = {"_hook"}  # registered but hidden from --help

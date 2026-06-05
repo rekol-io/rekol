@@ -29,7 +29,7 @@ from rekol.embeddings import get_embedder
 from rekol.ranking import _as_date, _layer_of
 from rekol.search_combined import Source, search_all
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
-from rekol.store import IndexStore
+from rekol.store import IndexModelMismatchError, IndexStore
 
 
 def _format_session_timestamp(ts_unix: int) -> str:
@@ -245,7 +245,9 @@ def main(
     session_store: SessionStore | None = None
     if source in ("memory", "all"):
         # init_schema() so a missing DB doesn't crash the CLI on first run
-        memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+        memory_store = IndexStore(
+            db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+        )
         memory_store.init_schema()
         if memory_store.needs_schema_migration():
             memory_store.close()
@@ -254,6 +256,15 @@ def main(
                 err=True,
             )
             sys.exit(1)
+        # Identity guard: searching an index built by a DIFFERENT embedding model
+        # returns confidently-wrong nearest neighbours (the #22 emptiness backstop
+        # can't catch this — the wrong results aren't empty). Fail loudly instead.
+        try:
+            memory_store.check_model_identity(cfg.embedding_model, embedder.dim)
+        except IndexModelMismatchError as exc:
+            memory_store.close()
+            click.echo(str(exc), err=True)
+            sys.exit(2)
     if source in ("sessions", "all") and cfg.session_search_enabled:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()

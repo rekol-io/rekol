@@ -148,6 +148,10 @@ class SessionStore:
         try:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode = WAL;")
+            # busy_timeout (C3): WAL alone still lets a writer hold the DB lock
+            # briefly during commit; without a timeout a concurrent reader/writer
+            # fails immediately with "database is locked". 30s matches IndexStore.
+            self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
             self._vec_loaded = False
             if use_sqlite_vec:
@@ -471,6 +475,87 @@ class SessionStore:
             (match_query,),
         ).fetchone()["n"]
         return int(reachable) == 0
+
+    def fts_consistency(self) -> tuple[int, int]:
+        """Return ``(orphaned_postings, unindexed_messages)`` for a health check.
+
+        Because ``messages_fts`` is an FTS5 *external-content* table, a plain
+        ``SELECT ... FROM messages_fts`` reads column values straight from the
+        content table (``messages``) and so can NEVER reveal a desync — it always
+        mirrors the content table. The actual inverted index lives separately; the
+        only way to inspect *which* rowids it really indexes is the ``fts5vocab``
+        shadow table. We build a transient ``fts5vocab('messages_fts','instance')``
+        view, take the DISTINCT ``doc`` (= indexed rowid) set, and diff it against
+        the ``messages`` rowids:
+
+          * ``orphaned_postings`` — rowids the FTS index holds that no longer
+            resolve to a message. These are the exact #18 silent-empty cause: a
+            raw ``MATCH`` reports rows, but the JOIN to ``messages`` drops them.
+          * ``unindexed_messages`` — message rowids the FTS index never indexed
+            (e.g. inserted while the sync triggers were absent), so a keyword that
+            is in the corpus returns nothing.
+
+        Both are zero on a healthy, in-sync index. Query-independent, so ``doctor``
+        and the post-``--full`` verification can use it without guessing a probe
+        term (unlike the per-query :meth:`fts_index_is_stale`).
+        """
+        message_rowids = {
+            int(r["id"]) for r in self.conn.execute("SELECT id FROM messages").fetchall()
+        }
+        # fts5vocab is a built-in FTS5 module; the 'instance' table exposes one row
+        # per (term, doc, col, offset), where 'doc' is the indexed rowid. A unique
+        # transient name avoids colliding with anything; dropped in the finally.
+        vocab_table = "_rekol_fts_vocab_check"
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {vocab_table} "
+            f"USING fts5vocab('messages_fts', 'instance')"
+        )
+        try:
+            indexed_rowids = {
+                int(r["doc"])
+                for r in self.conn.execute(f"SELECT DISTINCT doc FROM {vocab_table}").fetchall()
+            }
+        finally:
+            self.conn.execute(f"DROP TABLE IF EXISTS {vocab_table}")
+        orphaned = len(indexed_rowids - message_rowids)
+        unindexed = len(message_rowids - indexed_rowids)
+        return orphaned, unindexed
+
+    def fts_is_in_sync(self) -> bool:
+        """True when the FTS inverted index exactly matches the ``messages`` rows.
+
+        A build-time / health invariant: the external-content FTS5 index is kept
+        current by the ``messages_ai/ad/au`` triggers, but a DB created before
+        those triggers existed (or one whose ``messages`` table was rewritten with
+        the triggers dropped) can hold orphaned postings and/or leave real rows
+        unindexed. :meth:`fts_consistency` catches both; in sync means neither.
+
+        NOTE: a message that legitimately has no indexable tokens (e.g. content
+        that tokenises to nothing) would never appear in the vocab, so this is a
+        strict "every message contributes at least one posting" check — true for
+        the transcript corpus, where empty content is filtered before insert.
+        """
+        orphaned, unindexed = self.fts_consistency()
+        return orphaned == 0 and unindexed == 0
+
+    def rebuild_fts(self) -> None:
+        """Rebuild the external-content FTS5 index from ``messages`` (C5).
+
+        FTS5 external-content tables support a special ``'rebuild'`` command that
+        discards the current FTS index and repopulates it from the content table
+        (``messages``). Running it makes the FTS index exactly match ``messages``,
+        so any drift (stale/orphaned postings, or rows the triggers never indexed
+        because they predate the triggers) is healed at build time. The triggers
+        keep it in sync on every subsequent write; this is the belt-and-suspenders
+        that turns the #22 read-time staleness check into a backstop rather than
+        the only guard.
+
+        Idempotent and cheap relative to a message reingest (no re-embedding, no
+        file I/O), so it is safe to run unconditionally at the end of a ``--full``
+        reingest.
+        """
+        with self.conn:
+            self.conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
 
     def search_fts(self, query: str, top_k: int = 5) -> list[dict]:
         """FTS5 keyword search.
