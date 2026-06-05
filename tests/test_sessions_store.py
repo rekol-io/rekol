@@ -341,3 +341,107 @@ def test_files_seen_skip_logic(tmp_path: Path) -> None:
     assert store.should_skip_file("/tmp/a.jsonl", 101, 500) is False
     assert store.should_skip_file("/tmp/a.jsonl", 100, 501) is False
     store.close()
+
+
+# --------------------------- C5: FTS build-time sync ---------------------------
+
+
+def _drop_fts_triggers(store: SessionStore) -> None:
+    """Drop the FTS sync triggers, mimicking a DB created before they existed."""
+    store.conn.executescript(
+        "DROP TRIGGER IF EXISTS messages_ai;"
+        "DROP TRIGGER IF EXISTS messages_ad;"
+        "DROP TRIGGER IF EXISTS messages_au;"
+    )
+    store.conn.commit()
+
+
+def test_fts_in_sync_on_healthy_index(tmp_path: Path) -> None:
+    """A normally-built index keeps FTS in sync via triggers: no orphaned postings,
+    no unindexed messages."""
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    for i in range(5):
+        store.insert_message(_make_msg(uuid=f"u{i}", session="s1", line=i) | {"content": f"m {i}"})
+    orphaned, unindexed = store.fts_consistency()
+    assert (orphaned, unindexed) == (0, 0)
+    assert store.fts_is_in_sync() is True
+    store.close()
+
+
+def test_fts_out_of_sync_detected_when_triggers_absent(tmp_path: Path) -> None:
+    """A DB whose triggers were dropped before inserts leaves messages unindexed —
+    fts_consistency reports them (the precondition for the #18 silent-empty).
+    """
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    _drop_fts_triggers(store)
+    for i in range(5):
+        store.insert_message(_make_msg(uuid=f"u{i}", session="s1", line=i) | {"content": f"m {i}"})
+    orphaned, unindexed = store.fts_consistency()
+    assert orphaned == 0  # never indexed in the first place
+    assert unindexed == 5  # every message missing from the inverted index
+    assert store.fts_is_in_sync() is False
+    store.close()
+
+
+def test_fts_consistency_detects_orphaned_postings(tmp_path: Path) -> None:
+    """The exact #18 signature: postings survive for rowids that no longer resolve
+    to a message. fts_consistency must count them as orphaned."""
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    for i in range(5):
+        store.insert_message(
+            _make_msg(uuid=f"u{i}", session="s1", line=i) | {"content": f"uninstall {i}"}
+        )
+    # Drop triggers, wipe messages (so the FTS delete trigger never runs), then
+    # reinsert under fresh autoincrement ids the FTS index has never seen.
+    _drop_fts_triggers(store)
+    store.conn.execute("DELETE FROM messages")
+    store.conn.commit()
+    for i in range(5):
+        store.conn.execute(
+            "INSERT INTO messages(session_id, message_uuid, parent_uuid, role, content, "
+            "cwd, timestamp_iso, timestamp_unix, jsonl_path, line_number) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "s2",
+                f"v{i}",
+                None,
+                "user",
+                f"uninstall {i}",
+                "/tmp",
+                "2026-01-01T00:00:00Z",
+                1,
+                "/f",
+                i,
+            ),
+        )
+    store.conn.commit()
+    orphaned, unindexed = store.fts_consistency()
+    assert orphaned == 5  # postings for the deleted rowids
+    assert unindexed == 5  # the reinserted rows were never indexed
+    assert store.fts_is_in_sync() is False
+    store.close()
+
+
+def test_rebuild_fts_heals_desync(tmp_path: Path) -> None:
+    """rebuild_fts repopulates the external-content FTS index from `messages`, so a
+    desynced index becomes consistent and search reaches every row again."""
+    store = SessionStore(db_path=tmp_path / "s.db", dim=384)
+    store.init_schema()
+    _drop_fts_triggers(store)
+    for i in range(5):
+        store.insert_message(
+            _make_msg(uuid=f"u{i}", session="s1", line=i)
+            | {"content": f"uninstall rekol number {i}"}
+        )
+    assert store.fts_is_in_sync() is False
+    assert store.search_fts("uninstall", top_k=5) == []  # silent-empty before heal
+
+    store.rebuild_fts()
+
+    assert store.fts_is_in_sync() is True
+    hits = store.search_fts("uninstall", top_k=5)
+    assert len(hits) == 5  # every row now reachable
+    store.close()
