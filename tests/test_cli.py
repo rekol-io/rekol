@@ -782,3 +782,53 @@ def test_session_timestamp_renders_local_date(monkeypatch) -> None:
     finally:
         monkeypatch.undo()
         time.tzset()
+
+
+def test_update_skips_cleanly_when_index_write_lock_held(tmp_path: Path, monkeypatch) -> None:
+    """#24: a hook-fired `update` that cannot get the index-write lock (a rebuild
+    holds it) skips cleanly — exit 0, a notice, and NO index mutation — then
+    indexes the change normally once the lock frees. This is the serialization
+    that stops a concurrent update's commit from being discarded by a rebuild swap.
+    """
+    import fcntl
+    import os
+
+    from rekol.config import load_config
+    from rekol.index_lock import index_lock_path
+    from rekol.store import IndexStore
+
+    _seed_memory(tmp_path)
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    runner = CliRunner()
+    assert runner.invoke(index_main, ["rebuild"]).exit_code == 0
+
+    prom = tmp_path / "topics" / "prometheus.md"
+    prom.write_text(prom.read_text() + "\n\nlock-skip-sentinel\n")
+    cfg = load_config()
+
+    def _chunk_text() -> str:
+        store = IndexStore(
+            db_path=cfg.index_db_path, dim=384, use_sqlite_vec=False, embedding_model="test-hashing"
+        )
+        try:
+            return "\n".join(c["text"] for c in store.all_chunks_for_file(str(prom)))
+        finally:
+            store.close()
+
+    # Hold the index-write lock (as a running rebuild would), then run `update`.
+    fd = os.open(str(index_lock_path(cfg.index_dir)), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        result = runner.invoke(index_main, ["update"])
+        assert result.exit_code == 0, result.output
+        assert "in progress" in result.output.lower()
+        # Nothing was written while the lock was held.
+        assert "lock-skip-sentinel" not in _chunk_text()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    # Lock free: the same update now indexes the change.
+    result2 = runner.invoke(index_main, ["update"])
+    assert result2.exit_code == 0, result2.output
+    assert "lock-skip-sentinel" in _chunk_text()
