@@ -30,9 +30,12 @@ def rebuild() -> None:
     store = IndexStore(
         db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
     )
-    # reset (not just init) so a pre-timestamp/pre-metadata index gains the new
-    # schema and is re-stamped with this model's identity from scratch.
-    store.reset_schema()
+    # NB: do NOT reset_schema() here. The rebuild builds the new index into a
+    # temp DB from scratch (fresh schema + this model's identity stamp) and
+    # atomically swaps it over index.db. Wiping the live DB first would re-open
+    # the very hole C2 closes — a kill mid-rebuild would leave an EMPTY live
+    # index. A swapped-in DB always carries the current schema and identity, so
+    # an old/legacy index is fully replaced by the swap, not by a pre-wipe.
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,

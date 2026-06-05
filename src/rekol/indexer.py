@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,7 +98,7 @@ class Indexer:
         # fall back to the legacy in-tree location for backward compatibility.
         self.index_dir = Path(index_dir) if index_dir is not None else self.memory_root / ".index"
 
-    def _index_one(self, path: Path, content_hash: str) -> int:
+    def _index_one(self, path: Path, content_hash: str, store: IndexStore | None = None) -> int:
         """Parse, embed, and atomically write a single file's row + chunks.
 
         Embedding (the slow, failure-prone step) happens BEFORE the store is
@@ -106,9 +107,17 @@ class Indexer:
         via ``replace_file_and_chunks`` — the hash never advances ahead of the
         chunks, so a crash mid-write re-indexes cleanly next run (the #18 fix).
 
+        Args:
+            path: The memory ``.md`` file to parse, embed, and index.
+            content_hash: Pre-computed content hash to stamp on the files row.
+            store: Where to write. Defaults to the live ``self.store``; the atomic
+                rebuild passes the side-built temp store so the live index is never
+                touched until the swap.
+
         Returns:
             Number of chunk rows written.
         """
+        store = store if store is not None else self.store
         mf = parse_file(path)
         mtime = int(path.stat().st_mtime)
         chunks = chunk_body(mf.body, max_bytes=self.chunk_max_bytes)
@@ -146,7 +155,7 @@ class Indexer:
                 )
                 for i, c in enumerate(chunks)
             ]
-        self.store.replace_file_and_chunks(
+        store.replace_file_and_chunks(
             str(path),
             mtime,
             content_hash,
@@ -158,29 +167,80 @@ class Indexer:
         )
         return len(records)
 
+    def _stale_temp_dbs(self, live_db: Path) -> list[Path]:
+        """Temp DBs (incl. their SQLite sidecars) left by a prior killed rebuild."""
+        return sorted(live_db.parent.glob(live_db.name + ".tmp-*"))
+
     def rebuild(self) -> IndexStats:
-        """Drop all existing index data and reindex every file from scratch."""
+        """Reindex every file from scratch via an atomic temp-DB build + swap.
+
+        C2 (#index-integrity): instead of wiping the LIVE ``index.db`` and
+        re-adding files one-by-one (a kill in the middle would leave the live
+        index EMPTY), build the whole new index into a temp DB next to the real
+        one and ``os.replace`` it over ``index.db`` only once it is complete.
+
+        Why this is crash-safe:
+          * The temp DB sits in the SAME cache dir as the live DB, so the swap is
+            a same-filesystem ``os.replace`` — atomic on POSIX and Windows.
+          * The live ``index.db`` is never touched until that single replace, so a
+            kill (or an embed failure) anywhere during the build leaves the OLD
+            index fully intact and queryable.
+          * The temp DB is built through the same ``replace_file_and_chunks`` path
+            as everything else, so it ends up with the C4 ``metadata`` identity
+            stamp and the correct ``user_version`` — the swapped-in file is a
+            complete, valid, identity-stamped index.
+        """
         stats = IndexStats()
-        for f in self.store.all_files():
-            self.store.delete_file(f["path"])
-        for path in _iter_memory_files(self.memory_root):
-            try:
-                content_hash = _hash_file(path)
-                # One atomic write per file: hash + chunks commit together, so a
-                # crash never leaves a new hash with stale/missing chunks (#18).
-                n = self._index_one(path, content_hash)
-            except ValidationError as exc:
-                # parse_file fails before any store write, so there is nothing to
-                # roll back; just record WHY so the caller can warn loudly
-                # instead of leaving the user a silent near-empty index.
-                stats.files_skipped += 1
-                stats.skipped_files.append((str(path), _skip_reason(exc)))
-                continue
-            # An embed/store failure inside the atomic write rolls itself back
-            # (the `with conn:` block) and propagates — nothing was committed for
-            # this file, so there is no orphan files row to clean up.
-            stats.files_indexed += 1
-            stats.chunks_written += n
+        live_db = self.store.db_path
+        # Clean up any temp DB a previously-killed rebuild left behind so they
+        # neither accumulate nor get mistaken for the live index.
+        for stale in self._stale_temp_dbs(live_db):
+            stale.unlink()
+
+        tmp_db = live_db.with_name(f"{live_db.name}.tmp-{os.getpid()}")
+        # Mirror the live store's config so the swapped-in DB is built by the
+        # same model/dim/vec settings (and thus carries the matching identity).
+        tmp_store = IndexStore(
+            db_path=tmp_db,
+            dim=self.store.dim,
+            use_sqlite_vec=self.store.use_sqlite_vec,
+            embedding_model=self.store.embedding_model,
+        )
+        try:
+            tmp_store.init_schema()
+            for path in _iter_memory_files(self.memory_root):
+                try:
+                    content_hash = _hash_file(path)
+                    # One atomic write per file into the TEMP store; hash + chunks
+                    # commit together (#18). The live index is untouched.
+                    n = self._index_one(path, content_hash, store=tmp_store)
+                except ValidationError as exc:
+                    # parse_file fails before any store write, so there is nothing
+                    # to roll back; record WHY so the caller can warn loudly
+                    # instead of leaving the user a silent near-empty index.
+                    stats.files_skipped += 1
+                    stats.skipped_files.append((str(path), _skip_reason(exc)))
+                    continue
+                stats.files_indexed += 1
+                stats.chunks_written += n
+            # Build succeeded. Close BOTH connections before the swap so neither
+            # holds an open handle/sidecar across the replace, then atomically
+            # move the complete temp DB over the live one.
+            tmp_store.close()
+            self.store.conn.close()
+            os.replace(tmp_db, live_db)
+        except BaseException:
+            # Any failure (embed error, kill-injected exception, swap error)
+            # leaves the live index untouched. Drop the partial temp DB and make
+            # sure the live store is usable again before propagating.
+            tmp_store.close()
+            for leftover in self._stale_temp_dbs(live_db):
+                leftover.unlink()
+            self.store.reopen()
+            raise
+        # Re-attach the live store to the freshly-swapped-in file (the old handle
+        # now points at the unlinked inode), then derive INDEX.md from disk.
+        self.store.reopen()
         self._write_index_md()
         return stats
 

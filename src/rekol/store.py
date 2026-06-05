@@ -117,6 +117,9 @@ class IndexStore:
         self.db_path = Path(db_path)
         self.dim = dim
         self.embedding_model = embedding_model
+        # Retained so the atomic rebuild (indexer.rebuild) can build a temp store
+        # with the SAME vec-extension intent as this one, then swap it in.
+        self.use_sqlite_vec = use_sqlite_vec
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         try:
@@ -124,6 +127,26 @@ class IndexStore:
             self.conn.execute("PRAGMA foreign_keys = ON;")
             self._vec_loaded = False
             if use_sqlite_vec:
+                self._try_load_vec()
+        except Exception:
+            self.conn.close()
+            raise
+
+    def reopen(self) -> None:
+        """Close and re-open the connection against the current ``db_path``.
+
+        Used after an atomic rebuild ``os.replace``-swaps a freshly-built DB over
+        ``db_path``: the old file handle points at the now-unlinked inode, so the
+        caller's live store must re-attach to the swapped-in file to see the new
+        content. Mirrors the connection setup in ``__init__``.
+        """
+        self.conn.close()
+        self.conn = sqlite3.connect(self.db_path)
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON;")
+            self._vec_loaded = False
+            if self.use_sqlite_vec:
                 self._try_load_vec()
         except Exception:
             self.conn.close()
