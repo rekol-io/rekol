@@ -124,6 +124,13 @@ class IndexStore:
         self.conn = sqlite3.connect(self.db_path)
         try:
             self.conn.row_factory = sqlite3.Row
+            # WAL + busy_timeout (C3): the PostToolUse auto-reindex writer runs
+            # in the background while a `search` reader may be live on the same
+            # index. WAL lets readers proceed during a write; busy_timeout makes
+            # a writer wait out a transient lock instead of crashing with
+            # "database is locked". Mirrors SessionStore.
+            self.conn.execute("PRAGMA journal_mode = WAL;")
+            self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
             self._vec_loaded = False
             if use_sqlite_vec:
@@ -144,6 +151,11 @@ class IndexStore:
         self.conn = sqlite3.connect(self.db_path)
         try:
             self.conn.row_factory = sqlite3.Row
+            # Re-apply the concurrency pragmas (C3): journal_mode is persisted on
+            # the file, but busy_timeout is per-connection, so a fresh connection
+            # after the atomic-rebuild swap needs it set again.
+            self.conn.execute("PRAGMA journal_mode = WAL;")
+            self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
             self._vec_loaded = False
             if self.use_sqlite_vec:

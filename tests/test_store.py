@@ -444,3 +444,110 @@ def test_distinct_file_timestamps_one_row_per_file(store: IndexStore, tmp_path: 
     )
     rows = store.distinct_file_timestamps()
     assert len([r for r in rows if r["file_path"] == str(p)]) == 1
+
+
+# --------------------------- C3: concurrency ---------------------------
+
+
+def test_index_opens_in_wal_mode(tmp_path: Path) -> None:
+    """The curated index must run in WAL so the background auto-reindex writer
+    and a concurrent search reader don't block each other to failure (C3).
+    """
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False)
+    try:
+        mode = s.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert str(mode).lower() == "wal"
+    finally:
+        s.close()
+
+
+def test_index_sets_busy_timeout(tmp_path: Path) -> None:
+    """A 30s busy_timeout lets a reader wait out a writer's lock instead of
+    raising 'database is locked' immediately (C3).
+    """
+    s = IndexStore(db_path=tmp_path / "i.db", dim=8, use_sqlite_vec=False)
+    try:
+        timeout_ms = int(s.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        assert timeout_ms == 30000
+    finally:
+        s.close()
+
+
+def test_reopen_preserves_wal_and_busy_timeout(tmp_path: Path) -> None:
+    """The atomic-rebuild swap reopens the connection; the concurrency pragmas
+    must survive the reopen, not just the first open.
+    """
+    db = tmp_path / "i.db"
+    s = IndexStore(db_path=db, dim=8, use_sqlite_vec=False)
+    s.init_schema()
+    try:
+        s.reopen()
+        mode = s.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        timeout_ms = int(s.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        assert str(mode).lower() == "wal"
+        assert timeout_ms == 30000
+    finally:
+        s.close()
+
+
+def test_concurrent_reader_and_writer_do_not_lock(tmp_path: Path) -> None:
+    """A separate connection reading the same index while a writer commits in a
+    loop must never raise 'database is locked'. WAL + busy_timeout is what makes
+    this hold — the auto-reindex writer and a live search reader overlap in
+    production (C3).
+    """
+    import threading
+
+    db = tmp_path / "i.db"
+    writer = IndexStore(db_path=db, dim=8, use_sqlite_vec=False)
+    writer.init_schema()
+    p = tmp_path / "a.md"
+    p.write_text("x")
+    writer.upsert_file(path=str(p), mtime=1, content_hash="h0")
+
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def read_loop() -> None:
+        # Open the reader's own IndexStore INSIDE the thread: this models the
+        # real production case (the search reader is a separate connection/
+        # process from the background auto-reindex writer) and avoids SQLite's
+        # cross-thread guard. Without WAL + busy_timeout this loop would raise
+        # "database is locked" as the writer commits.
+        reader = IndexStore(db_path=db, dim=8, use_sqlite_vec=False)
+        try:
+            while not stop.is_set():
+                reader.conn.execute("SELECT COUNT(*) FROM files").fetchone()
+        except Exception as exc:  # noqa: BLE001 — surface ANY lock error to the test
+            errors.append(exc)
+        finally:
+            reader.close()
+
+    t = threading.Thread(target=read_loop)
+    t.start()
+    try:
+        for i in range(50):
+            v = np.zeros(8, dtype=np.float32)
+            v[0] = 1.0
+            writer.replace_file_and_chunks(
+                str(p),
+                mtime=i,
+                content_hash=f"h{i}",
+                chunks=[
+                    dict(
+                        heading=None,
+                        line_start=1,
+                        line_end=1,
+                        text="a",
+                        tags=[],
+                        aliases=[],
+                        embedding=v,
+                    )
+                ],
+            )
+    finally:
+        stop.set()
+        t.join()
+        writer.close()
+
+    assert errors == [], f"concurrent read raised: {errors!r}"

@@ -10,6 +10,18 @@ import pytest
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
 
+def test_sessions_store_sets_busy_timeout(tmp_path: Path) -> None:
+    """SessionStore already runs in WAL; it must also set a 30s busy_timeout so
+    a concurrent reader waits out a writer's lock instead of failing (C3).
+    """
+    store = SessionStore(db_path=tmp_path / "sessions.db", dim=384)
+    try:
+        timeout_ms = int(store.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        assert timeout_ms == 30000
+    finally:
+        store.close()
+
+
 def test_init_schema_creates_expected_tables(tmp_path: Path) -> None:
     store = SessionStore(db_path=tmp_path / "sessions.db", dim=384)
     store.init_schema()

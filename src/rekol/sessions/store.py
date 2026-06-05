@@ -148,6 +148,10 @@ class SessionStore:
         try:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode = WAL;")
+            # busy_timeout (C3): WAL alone still lets a writer hold the DB lock
+            # briefly during commit; without a timeout a concurrent reader/writer
+            # fails immediately with "database is locked". 30s matches IndexStore.
+            self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
             self._vec_loaded = False
             if use_sqlite_vec:
