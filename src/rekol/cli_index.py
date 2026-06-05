@@ -9,6 +9,7 @@ import click
 from rekol.cli_common import warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
+from rekol.index_lock import IndexBusyError, index_lock_path, index_write_lock
 from rekol.indexer import Indexer
 from rekol.store import IndexModelMismatchError, IndexStore
 
@@ -44,7 +45,13 @@ def rebuild() -> None:
         index_dir=cfg.index_dir,
     )
     try:
-        stats = idx.rebuild()
+        # Serialize against a concurrent hook-fired `update` (#24): hold the
+        # index-write lock across the whole build+swap so an `update` can't write
+        # to the old index.db inode that the swap is about to discard. We wait
+        # (blocking) for any in-flight update to finish first; the lock releases
+        # automatically on process death, so it can never wedge.
+        with index_write_lock(index_lock_path(cfg.index_dir), blocking=True):
+            stats = idx.rebuild()
         warn_skipped_files(stats)
         click.echo(
             f"indexed {stats.files_indexed} files "
@@ -92,13 +99,26 @@ def update() -> None:
         index_dir=cfg.index_dir,
     )
     try:
-        stats = idx.update()
-        warn_skipped_files(stats)
-        click.echo(
-            f"updated {stats.files_indexed} files, "
-            f"removed {stats.files_removed}, "
-            f"skipped {stats.files_skipped}"
-        )
+        # Skip cleanly if a rebuild (or another update) holds the index-write
+        # lock (#24): the running writer already covers these changes, and the
+        # next update reconciles anything edited during the window. Skipping —
+        # not blocking — is correct here because this command is what the
+        # background auto-reindex hook runs; a blocked hook process must not hang.
+        try:
+            with index_write_lock(index_lock_path(cfg.index_dir), blocking=False):
+                stats = idx.update()
+                warn_skipped_files(stats)
+                click.echo(
+                    f"updated {stats.files_indexed} files, "
+                    f"removed {stats.files_removed}, "
+                    f"skipped {stats.files_skipped}"
+                )
+        except IndexBusyError:
+            click.echo(
+                "another rekol index operation is in progress — skipping this "
+                "update; the running operation will cover these changes.",
+                err=True,
+            )
     finally:
         store.close()
 
