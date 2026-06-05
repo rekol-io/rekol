@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,61 +98,69 @@ class Indexer:
         # fall back to the legacy in-tree location for backward compatibility.
         self.index_dir = Path(index_dir) if index_dir is not None else self.memory_root / ".index"
 
-    def _index_one(self, path: Path) -> int:
-        """Parse, embed, and write chunks for a single file.
+    def _index_one(self, path: Path, content_hash: str, store: IndexStore | None = None) -> int:
+        """Parse, embed, and atomically write a single file's row + chunks.
 
-        The ``files`` row MUST already exist (via ``upsert_file``) before this
-        is called — the ``chunks`` table has a FK constraint on ``files.path``.
+        Embedding (the slow, failure-prone step) happens BEFORE the store is
+        touched, so a parse/embed error leaves the index completely untouched.
+        The files-row hash and the chunks are then written in ONE transaction
+        via ``replace_file_and_chunks`` — the hash never advances ahead of the
+        chunks, so a crash mid-write re-indexes cleanly next run (the #18 fix).
+
+        Args:
+            path: The memory ``.md`` file to parse, embed, and index.
+            content_hash: Pre-computed content hash to stamp on the files row.
+            store: Where to write. Defaults to the live ``self.store``; the atomic
+                rebuild passes the side-built temp store so the live index is never
+                touched until the swap.
 
         Returns:
             Number of chunk rows written.
         """
+        store = store if store is not None else self.store
         mf = parse_file(path)
+        mtime = int(path.stat().st_mtime)
         chunks = chunk_body(mf.body, max_bytes=self.chunk_max_bytes)
         if not chunks:
             # Still register the file with one fallback chunk so it's
             # discoverable by search even when the body is empty.
             fallback_text = f"{mf.name}: {mf.description}"
             vec = self.embedder.embed(fallback_text)
-            self.store.replace_chunks_for_file(
-                str(path),
-                [
-                    dict(
-                        heading=None,
-                        line_start=1,
-                        line_end=1,
-                        text=fallback_text,
-                        tags=mf.tags,
-                        aliases=mf.aliases,
-                        embedding=vec,
-                    )
-                ],
-                created=mf.created,
-                updated=mf.updated,
-                valid_from=mf.valid_from,
-                invalidated_at=mf.invalidated_at,
-            )
-            return 1
-        # Prefix each chunk with the file name to give the embedder more context:
-        # improves retrieval when the user's query mentions the topic but the
-        # chunk body itself doesn't repeat the name.
-        texts = [f"{mf.name}\n{c.text}" for c in chunks]
-        vecs = self.embedder.embed_batch(texts)
-        records = [
-            dict(
-                heading=c.heading,
-                line_start=c.line_start,
-                line_end=c.line_end,
-                text=c.text,
-                tags=mf.tags,
-                aliases=mf.aliases,
-                embedding=vecs[i],
-            )
-            for i, c in enumerate(chunks)
-        ]
-        self.store.replace_chunks_for_file(
+            records = [
+                dict(
+                    heading=None,
+                    line_start=1,
+                    line_end=1,
+                    text=fallback_text,
+                    tags=mf.tags,
+                    aliases=mf.aliases,
+                    embedding=vec,
+                )
+            ]
+        else:
+            # Prefix each chunk with the file name to give the embedder more
+            # context: improves retrieval when the user's query mentions the
+            # topic but the chunk body itself doesn't repeat the name.
+            texts = [f"{mf.name}\n{c.text}" for c in chunks]
+            vecs = self.embedder.embed_batch(texts)
+            records = [
+                dict(
+                    heading=c.heading,
+                    line_start=c.line_start,
+                    line_end=c.line_end,
+                    text=c.text,
+                    tags=mf.tags,
+                    aliases=mf.aliases,
+                    embedding=vecs[i],
+                )
+                for i, c in enumerate(chunks)
+            ]
+        store.replace_file_and_chunks(
             str(path),
+            mtime,
+            content_hash,
             records,
+            name=mf.name,
             created=mf.created,
             updated=mf.updated,
             valid_from=mf.valid_from,
@@ -159,37 +168,93 @@ class Indexer:
         )
         return len(records)
 
+    def _stale_temp_dbs(self, live_db: Path) -> list[Path]:
+        """Temp DBs (incl. their SQLite sidecars) left by a prior killed rebuild."""
+        return sorted(live_db.parent.glob(live_db.name + ".tmp-*"))
+
     def rebuild(self) -> IndexStats:
-        """Drop all existing index data and reindex every file from scratch."""
+        """Reindex every file from scratch via an atomic temp-DB build + swap.
+
+        C2 (#index-integrity): instead of wiping the LIVE ``index.db`` and
+        re-adding files one-by-one (a kill in the middle would leave the live
+        index EMPTY), build the whole new index into a temp DB next to the real
+        one and ``os.replace`` it over ``index.db`` only once it is complete.
+
+        Why this is crash-safe:
+          * The temp DB sits in the SAME cache dir as the live DB, so the swap is
+            a same-filesystem ``os.replace`` — atomic on POSIX and Windows.
+          * The live ``index.db`` is never touched until that single replace, so a
+            kill (or an embed failure) anywhere during the build leaves the OLD
+            index fully intact and queryable.
+          * The temp DB is built through the same ``replace_file_and_chunks`` path
+            as everything else, so it ends up with the C4 ``metadata`` identity
+            stamp and the correct ``user_version`` — the swapped-in file is a
+            complete, valid, identity-stamped index.
+        """
         stats = IndexStats()
-        for f in self.store.all_files():
-            self.store.delete_file(f["path"])
-        for path in _iter_memory_files(self.memory_root):
-            # Validate frontmatter before touching the DB.
-            try:
-                content_hash = _hash_file(path)
-                # Insert the files row first: chunks FK requires its parent to exist.
-                self.store.upsert_file(
-                    path=str(path),
-                    mtime=int(path.stat().st_mtime),
-                    content_hash=content_hash,
-                )
-                n = self._index_one(path)
-            except ValidationError as exc:
-                # Roll back the files row so no orphan record remains, and record
-                # WHY so the caller can warn loudly instead of a bare count.
-                self.store.delete_file(str(path))
-                stats.files_skipped += 1
-                stats.skipped_files.append((str(path), _skip_reason(exc)))
-                continue
-            except Exception:
-                # Unexpected failure (embedder or store) — roll back and re-raise
-                # so the caller sees the error rather than silently leaving a
-                # ghost files row with no chunks.
-                self.store.delete_file(str(path))
-                raise
-            stats.files_indexed += 1
-            stats.chunks_written += n
+        live_db = self.store.db_path
+        # Clean up any temp DB a previously-killed rebuild left behind so they
+        # neither accumulate nor get mistaken for the live index.
+        for stale in self._stale_temp_dbs(live_db):
+            stale.unlink()
+
+        tmp_db = live_db.with_name(f"{live_db.name}.tmp-{os.getpid()}")
+        # Mirror the live store's config so the swapped-in DB is built by the
+        # same model/dim/vec settings (and thus carries the matching identity).
+        tmp_store = IndexStore(
+            db_path=tmp_db,
+            dim=self.store.dim,
+            use_sqlite_vec=self.store.use_sqlite_vec,
+            embedding_model=self.store.embedding_model,
+        )
+        try:
+            tmp_store.init_schema()
+            for path in _iter_memory_files(self.memory_root):
+                try:
+                    content_hash = _hash_file(path)
+                    # One atomic write per file into the TEMP store; hash + chunks
+                    # commit together (#18). The live index is untouched.
+                    n = self._index_one(path, content_hash, store=tmp_store)
+                except ValidationError as exc:
+                    # parse_file fails before any store write, so there is nothing
+                    # to roll back; record WHY so the caller can warn loudly
+                    # instead of leaving the user a silent near-empty index.
+                    stats.files_skipped += 1
+                    stats.skipped_files.append((str(path), _skip_reason(exc)))
+                    continue
+                stats.files_indexed += 1
+                stats.chunks_written += n
+            # Build succeeded. Close BOTH connections before the swap so neither
+            # holds an open handle/sidecar across the replace, then atomically
+            # move the complete temp DB over the live one.
+            tmp_store.close()
+            self.store.conn.close()
+            os.replace(tmp_db, live_db)
+            # A concurrent reader (e.g. `rekol search`) holding index.db-wal open
+            # blocks our close()'s checkpoint, so the OLD -wal/-shm sidecars can
+            # survive the swap. Left in place, SQLite would replay those stale
+            # frames onto the freshly-swapped-in DB on the next open → silent
+            # corruption. The temp DB was checkpointed clean on close (all of its
+            # data lives in the main file), so these sidecars belong only to the
+            # old index — delete them. A reader that still holds them open keeps
+            # its now-unlinked inodes, so its view stays consistent until it closes.
+            for _sidecar in (
+                live_db.with_name(live_db.name + "-wal"),
+                live_db.with_name(live_db.name + "-shm"),
+            ):
+                _sidecar.unlink(missing_ok=True)
+        except BaseException:
+            # Any failure (embed error, kill-injected exception, swap error)
+            # leaves the live index untouched. Drop the partial temp DB and make
+            # sure the live store is usable again before propagating.
+            tmp_store.close()
+            for leftover in self._stale_temp_dbs(live_db):
+                leftover.unlink()
+            self.store.reopen()
+            raise
+        # Re-attach the live store to the freshly-swapped-in file (the old handle
+        # now points at the unlinked inode), then derive INDEX.md from disk.
+        self.store.reopen()
         self._write_index_md()
         return stats
 
@@ -206,26 +271,22 @@ class Indexer:
                 # File unchanged — skip re-embedding to save time and cost.
                 continue
             try:
-                # Insert/update the files row before writing chunks (FK constraint).
-                self.store.upsert_file(
-                    path=str(path),
-                    mtime=int(path.stat().st_mtime),
-                    content_hash=current_hash,
-                )
-                n = self._index_one(path)
+                # One atomic write per file: hash + chunks commit together, so a
+                # crash never leaves a new hash with stale/missing chunks (#18).
+                n = self._index_one(path, current_hash)
             except ValidationError as exc:
-                # Roll back the files row so no orphan record remains, and record
-                # WHY so the caller can warn loudly instead of a bare count.
-                self.store.delete_file(str(path))
+                # parse_file fails before any store write — nothing to roll back.
+                # But if this path was previously indexed and its frontmatter has
+                # now broken, drop the stale entry so search never serves chunks
+                # under a hash that no longer matches the file on disk.
+                if prev is not None:
+                    self.store.delete_file(str(path))
                 stats.files_skipped += 1
                 stats.skipped_files.append((str(path), _skip_reason(exc)))
                 continue
-            except Exception:
-                # Unexpected failure (embedder or store) — roll back and re-raise
-                # so the caller sees the error rather than silently leaving a
-                # ghost files row with no chunks.
-                self.store.delete_file(str(path))
-                raise
+            # An embed/store failure inside the atomic write rolls itself back,
+            # leaving the OLD hash + OLD chunks intact (this file is re-tried
+            # next run), and propagates so the caller sees the error.
             stats.files_indexed += 1
             stats.chunks_written += n
         for old_path in list(existing.keys()):
@@ -236,12 +297,18 @@ class Indexer:
         return stats
 
     def _write_index_md(self) -> None:  # noqa: C901  # complex but stable; refactor tracked separately
-        """Regenerate ``INDEX.md``: tag → files, alias → file, per-layer listing.
+        """Regenerate ``INDEX.md`` FROM THE STORE: tag → files, alias → file, listing.
 
         Groups files by their top-level directory name (``always``, ``when``,
         ``topics``, ``knowledge``) rather than by the ``type`` frontmatter field.
         The directory names are intentionally plural (e.g. ``topics/``), while
         the type field value is singular (``topic``).
+
+        C5: the source is :meth:`IndexStore.all_files_for_index_md` — the
+        just-built index — NOT a second filesystem walk + re-``parse_file``. This
+        eliminates the TOCTOU drift where INDEX.md could disagree with the index
+        (a file skipped at index time for bad frontmatter is absent from the
+        store, hence absent from INDEX.md, by construction) and halves the I/O.
 
         Written into ``self.index_dir`` — the local-only cache outside
         ``$REKOL_HOME`` — so it is treated as derived state and never synced.
@@ -254,23 +321,21 @@ class Indexer:
         # Project-scoped memories grouped by slug → list of (name, rel_path).
         per_project: dict[str, list[tuple[str, str]]] = {}
 
-        for path in _iter_memory_files(self.memory_root):
-            try:
-                mf = parse_file(path)
-            except ValidationError:
-                continue
-            rel = str(path.relative_to(self.memory_root))
-            for t in mf.tags:
+        for record in self.store.all_files_for_index_md():
+            # ``path`` was stored as ``str(path)`` (absolute) by the indexer.
+            rel = str(Path(record["path"]).relative_to(self.memory_root))
+            name = record["name"]
+            for t in record["tags"]:
                 tag_to_files.setdefault(t, []).append(rel)
-            for a in mf.aliases:
+            for a in record["aliases"]:
                 alias_to_file[a] = rel
             parts = Path(rel).parts
             if parts and parts[0] == PROJECTS_DIR and len(parts) >= 3:
                 # projects/<slug>/<layer>/<file>.md
                 slug = parts[1]
-                per_project.setdefault(slug, []).append((mf.name, rel))
+                per_project.setdefault(slug, []).append((name, rel))
             elif parts and parts[0] in per_layer_by_dir:
-                per_layer_by_dir[parts[0]].append((mf.name, rel))
+                per_layer_by_dir[parts[0]].append((name, rel))
 
         lines: list[str] = ["# Memory Index", ""]
         lines.append("*Auto-generated by `memory-index`. Do not edit by hand.*")

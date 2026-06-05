@@ -548,7 +548,7 @@ log_journal "SYMLINK ${local_autoreindex_dst} -> ${local_autoreindex_src}"
 # Step 7C — PostToolUse auto-reindex hook merge into settings.json
 # =============================================================================
 # Wires the auto-reindex script (Step 7B) into Claude Code's PostToolUse event
-# with matcher "Write|Edit".  Every time the agent edits a file under
+# with matcher "Write|Edit|MultiEdit".  Every time the agent edits a file under
 # $REKOL_HOME, the script fires `rekol index update` asynchronously so the
 # vector DB stays in sync without per-edit latency.
 #
@@ -562,15 +562,25 @@ if [[ "$DO_HOOK" == "1" ]]; then
     say "jq not found; printing PostToolUse snippet — merge manually into ${SETTINGS_JSON}"
     cat "${SNIPPET_PTU}"
   else
-    HAS_PTU_HOOK="$(
-      jq --slurpfile snip "${SNIPPET_PTU}" '
+    # State of the existing PostToolUse wiring for our command:
+    #   absent  — command not wired at all                    → append the snippet
+    #   stale   — command wired but matcher lacks MultiEdit    → upgrade matcher
+    #   current — command wired with a MultiEdit matcher       → no-op
+    # The old check keyed ONLY on the command, so a re-install was a no-op for any
+    # user who already had the pre-MultiEdit "Write|Edit" matcher — the MultiEdit
+    # coverage fix never reached them. Detect the stale matcher and repair it.
+    PTU_STATE="$(
+      jq -r --slurpfile snip "${SNIPPET_PTU}" '
         (.hooks.PostToolUse // []) as $cur
         | ($snip[0].hooks.PostToolUse[0].hooks[0].command) as $cmd
-        | any($cur[]; .hooks // [] | any(.command == $cmd))
-      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+        | [ $cur[] | select(.hooks // [] | any(.command == $cmd)) ] as $matching
+        | if ($matching | length) == 0 then "absent"
+          elif ($matching | any((.matcher // "") | contains("MultiEdit"))) then "current"
+          else "stale" end
+      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'absent'
     )"
 
-    if [[ "$HAS_PTU_HOOK" == "true" ]]; then
+    if [[ "$PTU_STATE" == "current" ]]; then
       say "PostToolUse auto-reindex hook already present — no-op"
     else
       # Independent backup for this step (Step 7's backup predates the env
@@ -580,10 +590,20 @@ if [[ "$DO_HOOK" == "1" ]]; then
       log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_ptu_backup}"
 
       local_tmp="${SETTINGS_JSON}.tmp.$$"
-      run "jq --slurpfile snip '${SNIPPET_PTU}' \
-        '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + \$snip[0].hooks.PostToolUse)' \
-        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "MERGED PostToolUse auto-reindex hook into ${SETTINGS_JSON}"
+      if [[ "$PTU_STATE" == "stale" ]]; then
+        say "PostToolUse auto-reindex matcher is outdated — upgrading to include MultiEdit"
+        run "jq --slurpfile snip '${SNIPPET_PTU}' \
+          '(\$snip[0].hooks.PostToolUse[0].hooks[0].command) as \$cmd \
+           | (\$snip[0].hooks.PostToolUse[0].matcher) as \$want \
+           | .hooks.PostToolUse |= map(if (.hooks // [] | any(.command == \$cmd)) then .matcher = \$want else . end)' \
+          '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+        log_journal "UPGRADED PostToolUse auto-reindex matcher in ${SETTINGS_JSON}"
+      else
+        run "jq --slurpfile snip '${SNIPPET_PTU}' \
+          '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + \$snip[0].hooks.PostToolUse)' \
+          '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+        log_journal "MERGED PostToolUse auto-reindex hook into ${SETTINGS_JSON}"
+      fi
     fi
   fi
 fi

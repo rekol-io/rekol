@@ -105,6 +105,14 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             stats = ingest_directory(
                 projects_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
             )
+            # FTS-at-build (C5): a --full reingest is the authoritative "make the
+            # index correct" path, so rebuild the external-content FTS5 index from
+            # `messages` afterwards. This heals any drift (orphaned postings, or
+            # rows that predate the sync triggers) so the #22 read-time staleness
+            # check becomes belt-and-suspenders rather than the only guard. The
+            # incremental path relies on the triggers, which fire on every insert.
+            if mode_full:
+                store.rebuild_fts()
             # Self-heal: embed any messages that lack an embedding. Catches indices
             # built FTS-only or with --no-embed, which the mtime skip gate would
             # otherwise leave keyword-only forever. No-op (cheap count guard) once
