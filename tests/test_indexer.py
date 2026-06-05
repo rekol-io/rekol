@@ -1,10 +1,11 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from rekol.embeddings import HashingEmbedder
 from rekol.indexer import Indexer
-from rekol.store import IndexStore
+from rekol.store import CURATED_SCHEMA_VERSION, IndexStore
 
 
 def _write(
@@ -277,3 +278,179 @@ def test_failed_write_does_not_advance_hash_so_update_retries(memory_root: Path)
     assert reindexed["content_hash"] != original_hash
 
     idx.store.close()
+
+
+# --------------------------- C2: atomic rebuild ---------------------------
+
+
+def _searchable_paths(store: IndexStore, embedder: HashingEmbedder) -> set[str]:
+    """Run a real search against ``store`` and return the file paths it surfaces.
+
+    Used by the interrupt tests to prove the live index is not just non-empty in
+    the ``files`` table but actually *queryable* — chunks + vectors are present
+    and a cosine search returns hits.
+    """
+    vec = embedder.embed("alex senior engineer prometheus repos")
+    hits = store.search(np.asarray(vec, dtype=np.float32), top_k=10)
+    return {h["file_path"] for h in hits}
+
+
+def test_killed_rebuild_leaves_old_index_intact_and_searchable(memory_root: Path) -> None:
+    """C2: a rebuild that dies partway must leave the OLD ``index.db`` untouched
+    and still searchable — never an empty/partial index.
+
+    Today's wipe-then-readd rebuild would, on a kill, leave the live DB empty.
+    The fix builds the new index into a temp DB next to the real one and only
+    ``os.replace``-swaps it in once it is complete; a crash before the swap is
+    a no-op on the live file. This test simulates the kill by raising partway
+    through the per-file build (a flaky embedder), then asserts the live index
+    still contains the original three files and returns them from search.
+    """
+    db_path = memory_root / ".index" / "index.db"
+    store = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    store.init_schema()
+    emb = HashingEmbedder(dim=384)
+    idx = Indexer(memory_root=memory_root, store=store, embedder=emb)
+
+    # First, a clean rebuild so the live index has real, searchable content.
+    idx.rebuild()
+    original_files = {f["path"] for f in store.all_files()}
+    assert len(original_files) == 3
+    before = _searchable_paths(store, emb)
+    assert before == original_files
+
+    # Now change a file so a second rebuild would produce DIFFERENT content, and
+    # add a brand-new file whose presence in the (post-kill) index would prove
+    # the swap leaked through.
+    prom = memory_root / "topics" / "prometheus.md"
+    prom.write_text(prom.read_text().replace("IaC repo", "the brand new sentinel location"))
+
+    class KillMidRebuild(HashingEmbedder):
+        """Raise on the SECOND file embedded to mimic a kill mid-rebuild."""
+
+        def __init__(self) -> None:
+            super().__init__(dim=384)
+            self._files_seen = 0
+
+        def embed_batch(self, texts):  # type: ignore[no-untyped-def]
+            self._files_seen += 1
+            if self._files_seen >= 2:
+                raise RuntimeError("simulated kill mid-rebuild")
+            return super().embed_batch(texts)
+
+        def embed(self, text):  # type: ignore[no-untyped-def]
+            return super().embed(text)
+
+    idx.embedder = KillMidRebuild()
+    with pytest.raises(RuntimeError, match="simulated kill mid-rebuild"):
+        idx.rebuild()
+
+    # The live index must be UNCHANGED: same three files, all still searchable,
+    # and crucially still carrying the OLD content (no sentinel text leaked in).
+    assert {f["path"] for f in store.all_files()} == original_files
+    assert _searchable_paths(store, emb) == original_files
+    chunk_text = "\n".join(c["text"] for c in store.all_chunks_for_file(str(prom)))
+    assert "sentinel" not in chunk_text
+    assert "IaC repo" in chunk_text
+    store.close()
+
+
+def test_killed_rebuild_via_failed_swap_leaves_old_index(memory_root: Path, monkeypatch) -> None:
+    """C2: even if the build of the temp DB SUCCEEDS but the ``os.replace`` swap
+    dies (power loss exactly at the swap), the old ``index.db`` must survive.
+
+    Simulates the kill by making ``os.replace`` raise; asserts the live index is
+    still the original content and a leftover temp DB does not become the live one.
+    """
+    import rekol.indexer as indexer_mod
+
+    db_path = memory_root / ".index" / "index.db"
+    store = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    store.init_schema()
+    emb = HashingEmbedder(dim=384)
+    idx = Indexer(memory_root=memory_root, store=store, embedder=emb)
+    idx.rebuild()
+    original_files = {f["path"] for f in store.all_files()}
+    assert len(original_files) == 3
+
+    prom = memory_root / "topics" / "prometheus.md"
+    prom.write_text(prom.read_text().replace("IaC repo", "sentinel-after-swap-fail"))
+
+    def boom(src, dst):  # type: ignore[no-untyped-def]
+        raise OSError("simulated power loss at swap")
+
+    monkeypatch.setattr(indexer_mod.os, "replace", boom)
+    with pytest.raises(OSError, match="simulated power loss at swap"):
+        idx.rebuild()
+
+    # Old index intact and searchable; no sentinel text leaked through.
+    assert {f["path"] for f in store.all_files()} == original_files
+    assert _searchable_paths(store, emb) == original_files
+    chunk_text = "\n".join(c["text"] for c in store.all_chunks_for_file(str(prom)))
+    assert "sentinel-after-swap-fail" not in chunk_text
+    store.close()
+
+
+def test_successful_rebuild_atomically_swaps_new_content_and_stamps_identity(
+    memory_root: Path,
+) -> None:
+    """C2: a clean rebuild atomically replaces the live index with the NEW content
+    and the swapped-in DB is a complete, valid, identity-stamped index (C4 carried
+    through): metadata embedding_model/dim + the correct ``user_version``.
+    """
+    db_path = memory_root / ".index" / "index.db"
+    store = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    store.init_schema()
+    emb = HashingEmbedder(dim=384)
+    idx = Indexer(memory_root=memory_root, store=store, embedder=emb)
+    idx.rebuild()
+
+    # Add a new file, then rebuild — the swapped-in DB must contain it.
+    new_file = memory_root / "knowledge" / "sentinel.md"
+    new_file.parent.mkdir(parents=True, exist_ok=True)
+    new_file.write_text(
+        "---\nname: Sentinel\ndescription: a brand new note\ntype: knowledge\n"
+        "tags: []\naliases: []\n---\n\n# Sentinel\n\nUnique marker text here.\n"
+    )
+    stats = idx.rebuild()
+    assert stats.files_indexed == 4
+
+    paths = {f["path"] for f in store.all_files()}
+    assert str(new_file) in paths
+
+    # The swapped-in DB is identity-stamped (C4) and schema-versioned correctly.
+    assert store.get_metadata("embedding_model") == "hash-1"
+    assert store.get_metadata("embedding_dim") == "384"
+    assert store.get_metadata("schema_version") == str(CURATED_SCHEMA_VERSION)
+    user_version = int(store.conn.execute("PRAGMA user_version").fetchone()[0])
+    assert user_version == CURATED_SCHEMA_VERSION
+    # A configured-model identity check passes against the swapped-in DB.
+    store.check_model_identity("hash-1", 384)
+    # The new file is actually searchable through the swapped-in store.
+    vec = emb.embed("unique marker sentinel")
+    hits = store.search(np.asarray(vec, dtype=np.float32), top_k=5)
+    assert any(h["file_path"] == str(new_file) for h in hits)
+    store.close()
+
+
+def test_rebuild_cleans_up_stale_temp_db(memory_root: Path) -> None:
+    """C2: a temp DB left behind by a previously-killed rebuild must be removed on
+    the next rebuild, not accumulate or get mistaken for the live index.
+    """
+    db_path = memory_root / ".index" / "index.db"
+    store = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    store.init_schema()
+    idx = Indexer(memory_root=memory_root, store=store, embedder=HashingEmbedder(dim=384))
+
+    # Plant a stale temp file mimicking a killed rebuild's leftover.
+    stale = db_path.with_name(db_path.name + ".tmp-999999")
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("garbage from a dead rebuild")
+
+    idx.rebuild()
+
+    # No temp files survive a completed rebuild.
+    leftovers = list(db_path.parent.glob("index.db.tmp-*"))
+    assert leftovers == [], f"stale temp files left behind: {leftovers}"
+    assert not stale.exists()
+    store.close()
