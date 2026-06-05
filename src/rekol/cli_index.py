@@ -10,7 +10,7 @@ from rekol.cli_common import warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
-from rekol.store import IndexStore
+from rekol.store import IndexModelMismatchError, IndexStore
 
 
 @click.group()
@@ -27,8 +27,11 @@ def rebuild() -> None:
     """
     cfg = load_config()
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
-    # reset (not just init) so a pre-timestamp index gains the new columns.
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
+    # reset (not just init) so a pre-timestamp/pre-metadata index gains the new
+    # schema and is re-stamped with this model's identity from scratch.
     store.reset_schema()
     idx = Indexer(
         memory_root=cfg.memory_home,
@@ -55,14 +58,26 @@ def update() -> None:
     """
     cfg = load_config()
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     if store.needs_schema_migration():
+        store.close()
         click.echo(
             "curated index schema is out of date — run `rekol index rebuild`",
             err=True,
         )
         sys.exit(1)
+    # Identity guard: an incremental update must NOT append vectors from a
+    # different model into an index built by another, which would silently mix
+    # incompatible vectors and return confidently-wrong search results.
+    try:
+        store.check_model_identity(cfg.embedding_model, embedder.dim)
+    except IndexModelMismatchError as exc:
+        store.close()
+        click.echo(str(exc), err=True)
+        sys.exit(2)
     idx = Indexer(
         memory_root=cfg.memory_home,
         store=store,
