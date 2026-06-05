@@ -175,6 +175,27 @@ def test_doctor_flags_stale_schema(tmp_path: Path, monkeypatch) -> None:
     assert "rekol index rebuild" in result.output
 
 
+def test_doctor_reports_corrupt_index_as_problem_not_crash(tmp_path: Path, monkeypatch) -> None:
+    """A corrupt curated index must surface as a clean PROBLEM with a rebuild
+    remedy — never an uncaught sqlite3.DatabaseError traceback. doctor is the tool
+    a user runs WHEN memory looks broken, so it must diagnose corruption, not add
+    to it.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    # Overwrite the real DB with bytes that are not a SQLite database at all.
+    cfg.index_db_path.write_bytes(b"this is not a sqlite database\n" * 8)
+
+    result = CliRunner().invoke(doctor_main, [])
+    assert result.exit_code == 1, result.output
+    # A crash would set result.exception to the DatabaseError; a clean diagnosis
+    # exits via sys.exit(1) (SystemExit) with the finding printed.
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    assert "corrupt" in result.output.lower()
+    assert "rekol index rebuild" in result.output
+
+
 def test_doctor_flags_session_fts_desync(tmp_path: Path, monkeypatch) -> None:
     """A healthy curated index but a desynced session FTS → exit 1 with the
     session remedy."""

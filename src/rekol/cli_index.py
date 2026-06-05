@@ -43,13 +43,16 @@ def rebuild() -> None:
         chunk_max_bytes=cfg.chunk_max_bytes,
         index_dir=cfg.index_dir,
     )
-    stats = idx.rebuild()
-    warn_skipped_files(stats)
-    click.echo(
-        f"indexed {stats.files_indexed} files "
-        f"({stats.chunks_written} chunks); "
-        f"skipped {stats.files_skipped}"
-    )
+    try:
+        stats = idx.rebuild()
+        warn_skipped_files(stats)
+        click.echo(
+            f"indexed {stats.files_indexed} files "
+            f"({stats.chunks_written} chunks); "
+            f"skipped {stats.files_skipped}"
+        )
+    finally:
+        store.close()
 
 
 @main.command()
@@ -88,13 +91,16 @@ def update() -> None:
         chunk_max_bytes=cfg.chunk_max_bytes,
         index_dir=cfg.index_dir,
     )
-    stats = idx.update()
-    warn_skipped_files(stats)
-    click.echo(
-        f"updated {stats.files_indexed} files, "
-        f"removed {stats.files_removed}, "
-        f"skipped {stats.files_skipped}"
-    )
+    try:
+        stats = idx.update()
+        warn_skipped_files(stats)
+        click.echo(
+            f"updated {stats.files_indexed} files, "
+            f"removed {stats.files_removed}, "
+            f"skipped {stats.files_skipped}"
+        )
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

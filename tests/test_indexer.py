@@ -267,8 +267,14 @@ def test_update_records_skipped_files(memory_root: Path) -> None:
     assert stats.skipped_files[0][0] == str(bad)
 
 
-def test_rebuild_rolls_back_file_on_embed_failure(memory_root: Path) -> None:
-    """If the embedder raises after the files row is upserted, that file must be removed."""
+def test_rebuild_embed_failure_leaves_live_index_untouched(memory_root: Path) -> None:
+    """C2: an embed failure mid-rebuild discards the temp DB and leaves the LIVE
+    index untouched — the half-built file never reaches the live store.
+
+    (The C1 per-file rollback of a partial write to the LIVE store is covered by
+    ``test_replace_file_and_chunks_is_atomic`` in ``test_store.py``; this test
+    proves the *rebuild* never touches the live store until the atomic swap.)
+    """
 
     class FlakyEmbedder(HashingEmbedder):
         def __init__(self, fail_on_name: str) -> None:
@@ -345,6 +351,51 @@ def test_failed_write_does_not_advance_hash_so_update_retries(memory_root: Path)
     assert reindexed is not None
     assert reindexed["content_hash"] != original_hash
 
+    idx.store.close()
+
+
+def test_update_embed_failure_does_not_advance_hash(memory_root: Path) -> None:
+    """C1 on the incremental path, injected at the EMBEDDER (not the store): if
+    the embedder raises while ``update()`` re-indexes a CHANGED file, no atomic
+    write commits, so the stored content_hash stays at the OLD value. The next
+    ``update()`` therefore re-detects the change and retries rather than skipping
+    the file forever (the #18 silent-drop). Complements
+    ``test_failed_write_does_not_advance_hash_so_update_retries``, which injects
+    the failure one layer lower (at ``replace_file_and_chunks``).
+    """
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+
+    prom = memory_root / "topics" / "prometheus.md"
+    prom_path = str(prom)
+    original = idx.store.get_file(prom_path)
+    assert original is not None
+    original_hash = original["content_hash"]
+
+    # Change the file so update() will re-embed it, then make the embedder blow up
+    # on exactly this file's chunks (its text contains "Prometheus").
+    prom.write_text(prom.read_text() + "\n\nAn edit that changes the hash.\n")
+    real_embed_batch = idx.embedder.embed_batch
+
+    def boom(texts):  # type: ignore[no-untyped-def]
+        if any("Prometheus" in t for t in texts):
+            raise RuntimeError("simulated embedder failure")
+        return real_embed_batch(texts)
+
+    idx.embedder.embed_batch = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        idx.update()
+
+    # Hash unchanged: the embed failed before the atomic write, so nothing landed.
+    after = idx.store.get_file(prom_path)
+    assert after is not None
+    assert after["content_hash"] == original_hash
+
+    # Recovery: with the embedder healthy again, the still-mismatched file is
+    # re-indexed rather than silently skipped.
+    idx.embedder.embed_batch = real_embed_batch  # type: ignore[method-assign]
+    stats = idx.update()
+    assert stats.files_indexed == 1
     idx.store.close()
 
 
@@ -457,6 +508,61 @@ def test_killed_rebuild_via_failed_swap_leaves_old_index(memory_root: Path, monk
     chunk_text = "\n".join(c["text"] for c in store.all_chunks_for_file(str(prom)))
     assert "sentinel-after-swap-fail" not in chunk_text
     store.close()
+
+
+def test_rebuild_with_concurrent_reader_swaps_in_new_content(memory_root: Path) -> None:
+    """C2 + concurrency (review #1): a rebuild while another connection holds
+    ``index.db-wal`` open must still swap in the NEW content for fresh readers.
+
+    A concurrent reader (e.g. ``rekol search``) blocks the checkpoint that
+    ``close()`` would otherwise do, so the OLD -wal/-shm sidecars survive the
+    ``os.replace``. If they are left in place, SQLite replays those stale frames
+    onto the freshly-swapped-in DB on the next open → the new content silently
+    disappears (or the DB is corrupt). rebuild() deletes the stale sidecars after
+    the swap; this test proves a brand-new independent reader opened after the
+    rebuild sees the NEW content, not the old.
+    """
+    db_path = memory_root / ".index" / "index.db"
+    store = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    store.init_schema()
+    emb = HashingEmbedder(dim=384)
+    idx = Indexer(memory_root=memory_root, store=store, embedder=emb)
+    idx.rebuild()  # initial state — prometheus.md still says "IaC repo"
+
+    prom = memory_root / "topics" / "prometheus.md"
+
+    # A concurrent reader holding an OPEN read snapshot (BEGIN + SELECT, never
+    # committed) pins the WAL and blocks the checkpoint that close() would use to
+    # drain it — exactly a `rekol search` overlapping the rebuild.
+    reader = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    reader.conn.execute("BEGIN")
+    reader.conn.execute("SELECT COUNT(*) FROM files").fetchone()
+
+    # Put un-checkpointed frames into the LIVE wal via an incremental update; the
+    # held snapshot stops them from being checkpointed away. These are the stale
+    # frames that would be replayed onto the swapped-in DB if not cleaned up.
+    prom.write_text(prom.read_text().replace("IaC repo", "intermediate-content"))
+    idx.update()
+
+    # Full rebuild swaps in DIFFERENT content. close() can't drain the wal (reader
+    # snapshot), so the stale -wal survives the os.replace.
+    prom.write_text(prom.read_text().replace("intermediate-content", "wal-sidecar-sentinel"))
+    idx.rebuild()
+
+    # A brand-new independent reader (the corruption victim in the finding) must
+    # see the NEW content — proving no stale WAL was replayed over the swap.
+    fresh = IndexStore(db_path=db_path, dim=384, use_sqlite_vec=False, embedding_model="hash-1")
+    try:
+        chunk_text = "\n".join(c["text"] for c in fresh.all_chunks_for_file(str(prom)))
+        assert "wal-sidecar-sentinel" in chunk_text
+        assert "intermediate-content" not in chunk_text
+        assert "IaC repo" not in chunk_text
+        assert _searchable_paths(fresh, emb)  # queryable, not corrupt
+    finally:
+        fresh.close()
+        reader.conn.execute("ROLLBACK")
+        reader.close()
+        store.close()
 
 
 def test_successful_rebuild_atomically_swaps_new_content_and_stamps_identity(

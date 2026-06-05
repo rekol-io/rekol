@@ -99,12 +99,27 @@ if command -v flock >/dev/null 2>&1; then
 else
     # Portable fallback (macOS has no flock): atomic mkdir is the classic POSIX
     # mutex. `mkdir` of an existing dir fails atomically, so only one invocation
-    # wins the lock; the rest exit 0. The winner removes the lockdir on exit
-    # (even on crash) via the trap so a killed reindex can't wedge the lock.
+    # wins the lock; the rest exit 0. The EXIT trap removes the lockdir on normal
+    # exit and on handled signals — but NOT on SIGKILL (kill -9 / OOM kill), which
+    # would otherwise leave a stale lockdir wedging every future reindex. So if
+    # mkdir fails, reclaim the lock when its recorded holder PID is provably dead.
     lockdir="${lockfile%.lock}.lockd"
+    pidfile="${lockdir}/holder.pid"
     (
-        mkdir "$lockdir" 2>/dev/null || exit 0
-        trap 'rmdir "$lockdir" 2>/dev/null || true' EXIT
+        if ! mkdir "$lockdir" 2>/dev/null; then
+            holder="$(cat "$pidfile" 2>/dev/null || true)"
+            # Reclaim ONLY a lock whose holder is gone. A missing/empty pidfile
+            # means the holder is mid-acquisition (won mkdir, not yet written its
+            # PID) — treat as live and skip, so we never rm a running reindex.
+            if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+                rm -rf "$lockdir" 2>/dev/null || true
+                mkdir "$lockdir" 2>/dev/null || exit 0
+            else
+                exit 0
+            fi
+        fi
+        printf '%s' "$$" >"$pidfile"
+        trap 'rm -rf "$lockdir" 2>/dev/null || true' EXIT
         run_reindex
     ) </dev/null &
     disown $! 2>/dev/null || true

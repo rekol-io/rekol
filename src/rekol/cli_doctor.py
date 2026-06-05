@@ -19,6 +19,7 @@ the whole point is to be the tool you reach for when things look broken.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,7 +100,23 @@ def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
         )
         return findings
 
-    store = IndexStore(db_path=db_path, dim=embedder.dim, embedding_model=cfg.embedding_model)
+    # Opening or querying a corrupt index.db raises sqlite3.DatabaseError ("file
+    # is not a database" / "disk image is malformed"). doctor is the tool a user
+    # reaches for when memory looks broken, so a corrupt index must surface as a
+    # clean PROBLEM with a rebuild remedy — never a traceback. The open itself can
+    # raise (the constructor runs pragmas), so it is guarded separately.
+    try:
+        store = IndexStore(db_path=db_path, dim=embedder.dim, embedding_model=cfg.embedding_model)
+    except sqlite3.DatabaseError as exc:
+        findings.append(
+            Finding(
+                label="curated index",
+                status=Status.PROBLEM,
+                detail=f"index file is unreadable or corrupt ({exc})",
+                remedy="rekol index rebuild",
+            )
+        )
+        return findings
     try:
         # Schema version + migration need.
         if store.needs_schema_migration():
@@ -206,6 +223,16 @@ def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
                 detail=_format_last_indexed(last_indexed),
             )
         )
+    except sqlite3.DatabaseError as exc:
+        # Corruption surfaced mid-inspection (a query hit a malformed page).
+        findings.append(
+            Finding(
+                label="curated index",
+                status=Status.PROBLEM,
+                detail=f"index file is corrupt ({exc})",
+                remedy="rekol index rebuild",
+            )
+        )
     finally:
         store.close()
     return findings
@@ -236,7 +263,18 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
         )
         return findings
 
-    store = SessionStore(db_path=db_path, dim=embedder.dim)
+    try:
+        store = SessionStore(db_path=db_path, dim=embedder.dim)
+    except sqlite3.DatabaseError as exc:
+        findings.append(
+            Finding(
+                label="session index",
+                status=Status.PROBLEM,
+                detail=f"sessions DB is unreadable or corrupt ({exc})",
+                remedy="rekol session-index --full",
+            )
+        )
+        return findings
     try:
         store.init_schema()
         message_count = store.count_messages()
@@ -298,6 +336,15 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
                     detail=f"keyword index in sync with {message_count} messages",
                 )
             )
+    except sqlite3.DatabaseError as exc:
+        findings.append(
+            Finding(
+                label="session index",
+                status=Status.PROBLEM,
+                detail=f"sessions DB is corrupt ({exc})",
+                remedy="rekol session-index --full",
+            )
+        )
     finally:
         store.close()
     return findings

@@ -184,24 +184,29 @@ class IndexStore:
     def init_schema(self) -> None:
         """Create the files, chunks, and metadata tables if they do not yet exist.
 
-        ``user_version`` is stamped to :data:`CURATED_SCHEMA_VERSION` so a future
-        run can detect an outdated schema by pragma alone (see
-        :meth:`needs_schema_migration`). The ``schema_version`` row in
-        ``metadata`` is stamped too.
+        The version + identity stamp is written ONLY when the schema is being
+        created fresh (no ``files`` table yet). Opening an existing — possibly
+        older — DB must NOT re-stamp ``user_version``: doing so would overwrite a
+        stale-but-truthful version with the current one, so
+        :meth:`needs_schema_migration` would report a confusing "stored=N,
+        current=N" while the column backstop still (correctly) forces a rebuild,
+        and the file's recorded version would be silently wrong. A genuine upgrade
+        happens via :meth:`rebuild` (a fresh temp DB), never in place here.
 
-        The embedding identity is stamped only when (a) a model name was supplied
-        AND (b) no identity is already recorded. This is deliberate: overwriting
-        an existing identity here would erase the very evidence
+        For the same reason the embedding identity is stamped only on a fresh DB:
+        overwriting an existing identity would erase the evidence
         :meth:`check_model_identity` relies on to detect a model swap, turning a
         loud mismatch into a silent-wrong index. The write path
-        (:meth:`replace_file_and_chunks`) is what keeps the identity *current*
-        once a (re)build actually produces new vectors.
+        (:meth:`replace_file_and_chunks`) keeps the identity *current* once a
+        (re)build actually produces new vectors.
         """
+        is_fresh = "files" not in self.list_tables()
         self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS + SCHEMA_METADATA)
-        self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
-        self._set_metadata_no_commit("schema_version", str(CURATED_SCHEMA_VERSION))
-        if self.embedding_model is not None and self.get_metadata("embedding_model") is None:
-            self.stamp_identity_no_commit(self.embedding_model, self.dim)
+        if is_fresh:
+            self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
+            self._set_metadata_no_commit("schema_version", str(CURATED_SCHEMA_VERSION))
+            if self.embedding_model is not None and self.get_metadata("embedding_model") is None:
+                self.stamp_identity_no_commit(self.embedding_model, self.dim)
         self.conn.commit()
 
     def list_tables(self) -> list[str]:
