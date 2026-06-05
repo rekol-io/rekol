@@ -97,60 +97,59 @@ class Indexer:
         # fall back to the legacy in-tree location for backward compatibility.
         self.index_dir = Path(index_dir) if index_dir is not None else self.memory_root / ".index"
 
-    def _index_one(self, path: Path) -> int:
-        """Parse, embed, and write chunks for a single file.
+    def _index_one(self, path: Path, content_hash: str) -> int:
+        """Parse, embed, and atomically write a single file's row + chunks.
 
-        The ``files`` row MUST already exist (via ``upsert_file``) before this
-        is called — the ``chunks`` table has a FK constraint on ``files.path``.
+        Embedding (the slow, failure-prone step) happens BEFORE the store is
+        touched, so a parse/embed error leaves the index completely untouched.
+        The files-row hash and the chunks are then written in ONE transaction
+        via ``replace_file_and_chunks`` — the hash never advances ahead of the
+        chunks, so a crash mid-write re-indexes cleanly next run (the #18 fix).
 
         Returns:
             Number of chunk rows written.
         """
         mf = parse_file(path)
+        mtime = int(path.stat().st_mtime)
         chunks = chunk_body(mf.body, max_bytes=self.chunk_max_bytes)
         if not chunks:
             # Still register the file with one fallback chunk so it's
             # discoverable by search even when the body is empty.
             fallback_text = f"{mf.name}: {mf.description}"
             vec = self.embedder.embed(fallback_text)
-            self.store.replace_chunks_for_file(
-                str(path),
-                [
-                    dict(
-                        heading=None,
-                        line_start=1,
-                        line_end=1,
-                        text=fallback_text,
-                        tags=mf.tags,
-                        aliases=mf.aliases,
-                        embedding=vec,
-                    )
-                ],
-                created=mf.created,
-                updated=mf.updated,
-                valid_from=mf.valid_from,
-                invalidated_at=mf.invalidated_at,
-            )
-            return 1
-        # Prefix each chunk with the file name to give the embedder more context:
-        # improves retrieval when the user's query mentions the topic but the
-        # chunk body itself doesn't repeat the name.
-        texts = [f"{mf.name}\n{c.text}" for c in chunks]
-        vecs = self.embedder.embed_batch(texts)
-        records = [
-            dict(
-                heading=c.heading,
-                line_start=c.line_start,
-                line_end=c.line_end,
-                text=c.text,
-                tags=mf.tags,
-                aliases=mf.aliases,
-                embedding=vecs[i],
-            )
-            for i, c in enumerate(chunks)
-        ]
-        self.store.replace_chunks_for_file(
+            records = [
+                dict(
+                    heading=None,
+                    line_start=1,
+                    line_end=1,
+                    text=fallback_text,
+                    tags=mf.tags,
+                    aliases=mf.aliases,
+                    embedding=vec,
+                )
+            ]
+        else:
+            # Prefix each chunk with the file name to give the embedder more
+            # context: improves retrieval when the user's query mentions the
+            # topic but the chunk body itself doesn't repeat the name.
+            texts = [f"{mf.name}\n{c.text}" for c in chunks]
+            vecs = self.embedder.embed_batch(texts)
+            records = [
+                dict(
+                    heading=c.heading,
+                    line_start=c.line_start,
+                    line_end=c.line_end,
+                    text=c.text,
+                    tags=mf.tags,
+                    aliases=mf.aliases,
+                    embedding=vecs[i],
+                )
+                for i, c in enumerate(chunks)
+            ]
+        self.store.replace_file_and_chunks(
             str(path),
+            mtime,
+            content_hash,
             records,
             created=mf.created,
             updated=mf.updated,
@@ -165,29 +164,21 @@ class Indexer:
         for f in self.store.all_files():
             self.store.delete_file(f["path"])
         for path in _iter_memory_files(self.memory_root):
-            # Validate frontmatter before touching the DB.
             try:
                 content_hash = _hash_file(path)
-                # Insert the files row first: chunks FK requires its parent to exist.
-                self.store.upsert_file(
-                    path=str(path),
-                    mtime=int(path.stat().st_mtime),
-                    content_hash=content_hash,
-                )
-                n = self._index_one(path)
+                # One atomic write per file: hash + chunks commit together, so a
+                # crash never leaves a new hash with stale/missing chunks (#18).
+                n = self._index_one(path, content_hash)
             except ValidationError as exc:
-                # Roll back the files row so no orphan record remains, and record
-                # WHY so the caller can warn loudly instead of a bare count.
-                self.store.delete_file(str(path))
+                # parse_file fails before any store write, so there is nothing to
+                # roll back; just record WHY so the caller can warn loudly
+                # instead of leaving the user a silent near-empty index.
                 stats.files_skipped += 1
                 stats.skipped_files.append((str(path), _skip_reason(exc)))
                 continue
-            except Exception:
-                # Unexpected failure (embedder or store) — roll back and re-raise
-                # so the caller sees the error rather than silently leaving a
-                # ghost files row with no chunks.
-                self.store.delete_file(str(path))
-                raise
+            # An embed/store failure inside the atomic write rolls itself back
+            # (the `with conn:` block) and propagates — nothing was committed for
+            # this file, so there is no orphan files row to clean up.
             stats.files_indexed += 1
             stats.chunks_written += n
         self._write_index_md()
@@ -206,26 +197,22 @@ class Indexer:
                 # File unchanged — skip re-embedding to save time and cost.
                 continue
             try:
-                # Insert/update the files row before writing chunks (FK constraint).
-                self.store.upsert_file(
-                    path=str(path),
-                    mtime=int(path.stat().st_mtime),
-                    content_hash=current_hash,
-                )
-                n = self._index_one(path)
+                # One atomic write per file: hash + chunks commit together, so a
+                # crash never leaves a new hash with stale/missing chunks (#18).
+                n = self._index_one(path, current_hash)
             except ValidationError as exc:
-                # Roll back the files row so no orphan record remains, and record
-                # WHY so the caller can warn loudly instead of a bare count.
-                self.store.delete_file(str(path))
+                # parse_file fails before any store write — nothing to roll back.
+                # But if this path was previously indexed and its frontmatter has
+                # now broken, drop the stale entry so search never serves chunks
+                # under a hash that no longer matches the file on disk.
+                if prev is not None:
+                    self.store.delete_file(str(path))
                 stats.files_skipped += 1
                 stats.skipped_files.append((str(path), _skip_reason(exc)))
                 continue
-            except Exception:
-                # Unexpected failure (embedder or store) — roll back and re-raise
-                # so the caller sees the error rather than silently leaving a
-                # ghost files row with no chunks.
-                self.store.delete_file(str(path))
-                raise
+            # An embed/store failure inside the atomic write rolls itself back,
+            # leaving the OLD hash + OLD chunks intact (this file is re-tried
+            # next run), and propagates so the caller sees the error.
             stats.files_indexed += 1
             stats.chunks_written += n
         for old_path in list(existing.keys()):

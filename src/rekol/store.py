@@ -116,8 +116,14 @@ class IndexStore:
             dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows
         ]
 
-    def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
-        """Insert or update a file's mtime, content hash, and indexed timestamp."""
+    def _upsert_file_no_commit(self, path: str, mtime: int, content_hash: str) -> None:
+        """Insert/update a file row WITHOUT committing.
+
+        The commit is deferred so the caller can bundle the files-row write with
+        the chunk writes into one transaction (see ``replace_file_and_chunks``).
+        The invariant that depends on this: ``content_hash`` must not be visible
+        to a future incremental run until the matching chunks have also landed.
+        """
         self.conn.execute(
             "INSERT INTO files(path, mtime, content_hash) VALUES(?,?,?) "
             "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime, "
@@ -125,6 +131,15 @@ class IndexStore:
             "indexed_at=strftime('%s','now')",
             (path, mtime, content_hash),
         )
+
+    def upsert_file(self, path: str, mtime: int, content_hash: str) -> None:
+        """Insert or update a file's mtime, content hash, and indexed timestamp.
+
+        Standalone committing wrapper. The indexing path does NOT use this — it
+        goes through ``replace_file_and_chunks`` so the hash and chunks commit
+        together. Kept for callers (and tests) that write a files row directly.
+        """
+        self._upsert_file_no_commit(path, mtime, content_hash)
         self.conn.commit()
 
     def get_file(self, path: str) -> dict[str, Any] | None:
@@ -146,7 +161,7 @@ class IndexStore:
         self.conn.execute("DELETE FROM files WHERE path=?", (path,))
         self.conn.commit()
 
-    def replace_chunks_for_file(
+    def _replace_chunks_no_commit(
         self,
         file_path: str,
         chunks: list[dict[str, Any]],
@@ -156,7 +171,13 @@ class IndexStore:
         valid_from: str | None = None,
         invalidated_at: str | None = None,
     ) -> None:
-        """Replace a file's chunks; the four file-level timestamps go on each row."""
+        """Delete-and-reinsert a file's chunks WITHOUT committing.
+
+        The commit is deferred so the caller can bundle this with the files-row
+        upsert into one transaction (see ``replace_file_and_chunks``). If the
+        inserts fail partway, the enclosing ``with conn:`` rolls the whole thing
+        back — the old chunks AND the old hash survive intact.
+        """
         cur = self.conn.cursor()
         cur.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
         for c in chunks:
@@ -182,7 +203,73 @@ class IndexStore:
                     emb.tobytes(),
                 ),
             )
+
+    def replace_chunks_for_file(
+        self,
+        file_path: str,
+        chunks: list[dict[str, Any]],
+        *,
+        created: str | None = None,
+        updated: str | None = None,
+        valid_from: str | None = None,
+        invalidated_at: str | None = None,
+    ) -> None:
+        """Replace a file's chunks; the four file-level timestamps go on each row.
+
+        Standalone committing wrapper. The indexing path does NOT use this — it
+        goes through ``replace_file_and_chunks`` so chunks commit together with
+        the files-row hash. Kept for callers (and tests) that already hold a
+        files row and only want to (re)write its chunks.
+        """
+        self._replace_chunks_no_commit(
+            file_path,
+            chunks,
+            created=created,
+            updated=updated,
+            valid_from=valid_from,
+            invalidated_at=invalidated_at,
+        )
         self.conn.commit()
+
+    def replace_file_and_chunks(
+        self,
+        path: str,
+        mtime: int,
+        content_hash: str,
+        chunks: list[dict[str, Any]],
+        *,
+        created: str | None = None,
+        updated: str | None = None,
+        valid_from: str | None = None,
+        invalidated_at: str | None = None,
+    ) -> None:
+        """Atomically (re)write a file's identity row AND its chunks in ONE txn.
+
+        This is the single write path the indexer uses per file. The files-row
+        UPSERT, the chunk DELETE, and the chunk INSERTs all run inside one
+        ``with self.conn:`` block, so they commit together or not at all.
+
+        Why this matters (the #18 root cause): ``content_hash`` is the marker an
+        incremental ``update()`` uses to decide "unchanged → skip". If the hash
+        were committed before the chunks landed, a crash/kill in between would
+        leave a files row advertising the NEW hash but with STALE or MISSING
+        chunks — and the next run would skip it forever (silent corruption).
+        Bundling them means a mid-write crash rolls back to the OLD hash + OLD
+        chunks, which the next run sees as "changed" and cleanly re-indexes.
+
+        Mirrors ``sessions/ingest.py::ingest_file``, which already records the
+        file-seen marker only after the messages+embeddings commit.
+        """
+        with self.conn:
+            self._upsert_file_no_commit(path, mtime, content_hash)
+            self._replace_chunks_no_commit(
+                path,
+                chunks,
+                created=created,
+                updated=updated,
+                valid_from=valid_from,
+                invalidated_at=invalidated_at,
+            )
 
     def all_chunks_for_file(self, file_path: str) -> list[dict[str, Any]]:
         """Return all chunks for a file, with tags and aliases decoded from JSON."""

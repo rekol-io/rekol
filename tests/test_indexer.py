@@ -226,3 +226,54 @@ def test_rebuild_rolls_back_file_on_embed_failure(memory_root: Path) -> None:
     prom_path = str(memory_root / "topics" / "prometheus.md")
     assert store.get_file(prom_path) is None
     store.close()
+
+
+def test_failed_write_does_not_advance_hash_so_update_retries(memory_root: Path) -> None:
+    """C1 (#18 root): a crash while writing a CHANGED file must NOT advance its
+    content_hash. If it did, the next incremental ``update()`` would see the new
+    hash, decide "unchanged", and skip the file forever — leaving stale/missing
+    chunks behind. This test simulates the crash by failing the atomic store
+    write for one file, then asserts the next update() re-indexes that file.
+    """
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+
+    prom = memory_root / "topics" / "prometheus.md"
+    prom_path = str(prom)
+    original = idx.store.get_file(prom_path)
+    assert original is not None
+    original_hash = original["content_hash"]
+
+    # Edit the file so update() will try to re-index it.
+    prom.write_text(prom.read_text() + "\n\nAn edit that changes the hash.\n")
+
+    # Simulate a crash/kill during the chunk write for this one file: the atomic
+    # method raises *after* it would have upserted the new hash. Because the
+    # whole write is one transaction, the raise must roll the hash back too.
+    real_replace = idx.store.replace_file_and_chunks
+
+    def boom(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == prom_path:
+            raise RuntimeError("simulated crash mid-write")
+        return real_replace(path, *args, **kwargs)
+
+    idx.store.replace_file_and_chunks = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        idx.update()
+
+    # The hash must be unchanged — the failed write left the OLD hash in place.
+    after_crash = idx.store.get_file(prom_path)
+    assert after_crash is not None
+    assert after_crash["content_hash"] == original_hash
+
+    # Restore the real method and run update() again: because the on-disk file
+    # no longer matches the stored (old) hash, the file is RE-INDEXED rather than
+    # silently skipped — proving the crash was retried cleanly.
+    idx.store.replace_file_and_chunks = real_replace  # type: ignore[method-assign]
+    stats = idx.update()
+    assert stats.files_indexed == 1
+    reindexed = idx.store.get_file(prom_path)
+    assert reindexed is not None
+    assert reindexed["content_hash"] != original_hash
+
+    idx.store.close()
