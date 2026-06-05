@@ -212,6 +212,60 @@ def test_search_returns_timestamps_and_cosine_score(store: IndexStore, tmp_path:
     assert h["created"] == "2026-01-01" and h["invalidated_at"] == "2026-03-01"
 
 
+def test_replace_file_and_chunks_is_atomic(store: IndexStore, tmp_path: Path) -> None:
+    """C1 (#18 root): the combined file-row + chunks write is ONE transaction.
+
+    Seed a file at hash ``old`` with one chunk, then attempt
+    ``replace_file_and_chunks`` to hash ``new`` where the SECOND chunk is
+    malformed (no ``line_start``) so the INSERT loop raises *after* the files
+    UPSERT and the chunk DELETE have already run inside the transaction. If the
+    write were not atomic we would be left with hash ``new`` and zero/partial
+    chunks — the exact silent-corruption #18 caused. The assertion proves the
+    whole thing rolled back: hash is still ``old`` and the old chunk survives.
+    """
+    p = tmp_path / "topics" / "atomic.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("dummy")
+    good = np.ones(8, dtype=np.float32)
+    store.replace_file_and_chunks(
+        str(p),
+        mtime=1,
+        content_hash="old",
+        chunks=[
+            dict(
+                heading="orig",
+                line_start=1,
+                line_end=2,
+                text="orig",
+                tags=[],
+                aliases=[],
+                embedding=good,
+            ),
+        ],
+    )
+
+    malformed_chunks = [
+        dict(
+            heading="new1", line_start=1, line_end=2, text="n1", tags=[], aliases=[], embedding=good
+        ),
+        # Missing line_start → int(c["line_start"]) raises KeyError mid-INSERT,
+        # *after* the files UPSERT (to hash "new") and the chunk DELETE.
+        dict(heading="new2", line_end=2, text="n2", tags=[], aliases=[], embedding=good),
+    ]
+    with pytest.raises(KeyError):
+        store.replace_file_and_chunks(str(p), mtime=2, content_hash="new", chunks=malformed_chunks)
+
+    # The hash must NOT have advanced — the transaction rolled back entirely.
+    rec = store.get_file(str(p))
+    assert rec is not None
+    assert rec["content_hash"] == "old"
+    assert rec["mtime"] == 1
+    # The original chunk must still be present (DELETE rolled back too).
+    surviving = store.all_chunks_for_file(str(p))
+    assert len(surviving) == 1
+    assert surviving[0]["heading"] == "orig"
+
+
 def test_distinct_file_timestamps_one_row_per_file(store: IndexStore, tmp_path: Path) -> None:
     p = tmp_path / "topics" / "multi.md"
     p.parent.mkdir(parents=True)
