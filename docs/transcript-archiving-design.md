@@ -76,7 +76,7 @@ New config keys (`config.py` `DEFAULTS` + `Config` + `load_config`):
 |---|---|---|
 | `archive_enabled` | `true` | Master on/off for the archive sink. The off-switch. |
 | `archive_dir` | `null` | Explicit archive path; `null` → resolve default. |
-| `exclude_paths` | `[]` | Glob list of project/cwd paths never archived/indexed (forward). |
+| `exclude_paths` | `[]` | Glob list matched against a session's **real cwd** (e.g. `/Users/x/secret`), NOT Claude Code's URL-encoded slug; matching sessions are never archived/indexed. |
 
 **`resolve_archive_dir()`** (mirrors `resolve_index_dir`):
 1. `REKOL_ARCHIVE_DIR` env (verbatim, expanded)
@@ -91,7 +91,7 @@ New config keys (`config.py` `DEFAULTS` + `Config` + `load_config`):
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `config.resolve_archive_dir()` + `archive_dir` property + new keys | path + flag resolution | env, config |
-| `config.path_is_excluded(path, patterns)` + `.rekolignore` discovery | the exclude matcher (shared foundation; full #5 reuses it later) | stdlib `fnmatch`/`pathlib` |
+| `config.path_is_excluded(path, patterns)` + `.rekolignore` discovery | the exclude matcher (shared foundation; full #5 reuses it later). Callers pass the session's **real cwd** (read from the transcript / index rows), NOT Claude Code's URL-encoded slug — so a natural pattern like `*/secret/*` matches the project the user worked in. | stdlib `fnmatch`/`pathlib` |
 | `sessions/archive.py` | the archive sink — **DB-free**, pure file ops + JSON manifest | filesystem only |
 | `cli_archive.py` → `rekol archive` | manual sync; `--from-index` backfill; `--prune`/`--clear` manual retention | archive.py, config |
 | `cli_session_index.py` (edit) | archive-sync first, then ingest **from the archive**; soft-fail → live | archive.py |
@@ -102,7 +102,8 @@ New config keys (`config.py` `DEFAULTS` + `Config` + `load_config`):
 
 - `archive_directory(live_root, archive_dir, exclude_patterns) -> ArchiveStats`
   — reconcile the archive to *(live ∩ not-excluded)*: copy new/changed non-excluded files,
-  remove already-archived files that now match an exclude, skip unchanged via manifest.
+  remove already-archived files that now match an exclude, skip unchanged via manifest. Exclude
+  matches each file's **real cwd** (read from the `.jsonl`), not the slug folder.
 - `archive_file(live_path, archive_path, manifest) -> ArchiveFileResult`
   — the copy-if-changed primitive + divergence guard.
 - `backfill_from_index(store, archive_dir, exclude_patterns) -> BackfillStats`
@@ -156,9 +157,24 @@ Organizing principle — **deletion difficulty**:
 > Hard/risky-to-delete (the index = FTS5 + vec) → forward-looking only; purge is a separate
 > deferred feature.
 
-- **Forward:** archive-sync and backfill skip any path matching `exclude_paths` /
+**Matching target — the REAL cwd, NOT the slug.** `exclude_paths` / `.rekolignore` globs are
+matched against the session's actual working directory (e.g. `/Users/x/secret`), read from the
+transcript rows — never against Claude Code's URL-encoded project folder name
+(`-Users-x-secret`). Matching the slug would silently break a natural pattern like `*/secret/*`,
+which never contains a literal `/secret/` segment in the encoded form. Concretely:
+
+- **Forward (archive-sync):** read the first message row's `cwd` from each live `.jsonl` and
+  match the excludes against that cwd.
+- **Retroactive (archive-sync sweep):** read each already-archived file's `cwd` and match
+  against that — symmetric with the forward check.
+- **Backfill:** match against the session's `cwd` from the indexed `sessions.db` rows.
+
+All three match the real cwd, so a single pattern behaves identically across forward,
+retroactive, and backfill paths (this removes the forward/retroactive asymmetry).
+
+- **Forward:** archive-sync and backfill skip any session whose cwd matches `exclude_paths` /
   `.rekolignore`. Excluded sessions are never copied/reconstructed.
-- **Retroactive (archive only):** archive-sync `rm`s any already-archived file that now
+- **Retroactive (archive only):** archive-sync `rm`s any already-archived file whose cwd now
   matches an exclude — a safe flat-file delete in rekol's own folder.
 - **Index follows for free:** because the index rebuilds *from* the archive, excluded
   content drops out of `sessions.db` on the next full rebuild — no destructive DB surgery.
@@ -231,7 +247,8 @@ This is the reusable foundation (config + matcher) plus one consumer (archive-sy
   data-loss bug itself.)
 - **Integration:** soft-fail — unwritable archive dir → still ingests from live, exit 0.
 - **Integration:** exclude — excluded project never archived; an already-archived file that
-  becomes excluded is removed on next sync; backfill skips excluded.
+  becomes excluded is removed on next sync; backfill skips excluded. Asserted on the **real cwd**
+  (a slug-only pattern must NOT exclude; a cwd-shaped pattern must).
 - **Integration:** backfill auto-once — marker guards re-run; the notice line is emitted once.
 - **`doctor`** archive line; **bats** `install.sh --no-archive` / `--archive-dir`; **bats**
   `uninstall.sh` preserves the archive by default and removes it with `--purge-archive`.
