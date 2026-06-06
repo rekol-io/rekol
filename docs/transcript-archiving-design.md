@@ -176,9 +176,16 @@ This is the reusable foundation (config + matcher) plus one consumer (archive-sy
   No bare `except`.
 - **Hook soft-fail.** Consistent with the other hook subcommands: a broken archive step
   exits 0 and never stalls a session.
-- **Locking.** Wrap the whole `session-index` op (archive + ingest) under the existing index
-  lock (#24/#25). Archive-sync writes flat files (no `sessions.db` lock contention); the only
-  residual race — a `--full` rebuild reading the archive while a SessionEnd writes a new file
+- **Locking.** `session-index` writes `sessions.db`, a **separate** database from the curated
+  `index.db`. The existing `index_write_lock` (#24/#25) guards the *curated* index's
+  rebuild↔update — it exists specifically because the curated rebuild does an atomic temp-DB
+  swap — and **must NOT be reused here**: coupling the two would let a curated rebuild block
+  transcript indexing (and vice versa) for no correctness benefit. `sessions.db` concurrency
+  is already handled at the SQLite layer (WAL + 30s `busy_timeout`), and archive-sync only
+  writes flat files (idempotent reconcile; the bash `auto-reindex.sh` mutex already coalesces
+  hook bursts). If two concurrent `session-index` runs ever need serializing, add a
+  **dedicated** `.session-index.lock` — never the curated lock — but that is YAGNI for v1.
+  Residual race — a `--full` rebuild reading the archive while a SessionEnd writes a new file
   — merely defers the newest session to the next incremental run. Acceptable; documented.
 
 ## Install / uninstall / docs
