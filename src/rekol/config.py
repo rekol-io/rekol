@@ -81,6 +81,45 @@ def resolve_index_dir(memory_home: Path) -> Path:
     return cache_root / "rekol" / digest
 
 
+def resolve_archive_dir(config_archive_dir: str | None) -> Path:
+    """Resolve the durable, rekol-owned transcript archive directory.
+
+    Unlike :func:`resolve_index_dir`, the archive is **machine-level** — NOT
+    hashed per ``$REKOL_HOME``. Transcripts come from ``~/.claude/projects``
+    regardless of which memory home is active, so one archive per machine is
+    correct; splitting per-home would only duplicate the same transcripts.
+
+    SECURITY: the archive holds verbatim prompts (and any pasted secrets), so it
+    defaults to a LOCAL, non-synced, non-cache location — the same posture that
+    moved ``sessions.db`` out of ``$REKOL_HOME`` (#10/#13). It lives under
+    ``XDG_DATA_HOME`` (durable) rather than ``XDG_CACHE_HOME`` (disposable),
+    because it is the source of truth a rebuild reads from, not a rebuildable
+    cache.
+
+    Resolution order:
+        1. ``$REKOL_ARCHIVE_DIR`` — explicit override, used verbatim (expanded).
+        2. ``config_archive_dir`` — the ``archive_dir`` config key, if set.
+        3. ``${XDG_DATA_HOME:-~/.local/share}/rekol/archive``.
+
+    Args:
+        config_archive_dir: The raw ``archive_dir`` config value, or ``None``.
+
+    Returns:
+        The absolute archive directory path (not created here; the archive
+        module ``mkdir(parents=True)``s it on first write).
+    """
+    override = os.environ.get("REKOL_ARCHIVE_DIR")
+    if override:
+        return Path(os.path.expanduser(override))
+    if config_archive_dir:
+        return Path(os.path.expanduser(config_archive_dir))
+    data_home = os.environ.get("XDG_DATA_HOME")
+    data_root = (
+        Path(os.path.expanduser(data_home)) if data_home else Path.home() / ".local" / "share"
+    )
+    return data_root / "rekol" / "archive"
+
+
 @dataclass
 class Config:
     """Resolved configuration for rekol.
@@ -145,6 +184,15 @@ class Config:
             Path at ``<cache>/sessions.db`` (outside ``$REKOL_HOME``).
         """
         return self.index_dir / "sessions.db"
+
+    @property
+    def archive_dir(self) -> Path:
+        """Absolute path to the durable transcript archive (see resolve_archive_dir).
+
+        Machine-level and NOT synced by default; holds verbatim transcripts.
+        Resolved lazily so an env override is honored at call time.
+        """
+        return resolve_archive_dir(self.archive_dir_raw)
 
 
 def load_config() -> Config:
