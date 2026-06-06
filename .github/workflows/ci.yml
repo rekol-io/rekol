@@ -4,9 +4,24 @@ on:
     branches: [main]
   pull_request:
 
+# ⚠️ TEMPORARY (pre-launch, 2026-06) — self-hosted runner.
+# GitHub-hosted Actions minutes are exhausted for the month, so the gate runs on a
+# self-hosted Docker/Linux runner on the maintainer's machine (self-hosted minutes
+# are free and don't count against the quota).
+#
+# 🚨 REVERT BEFORE THE REPO GOES PUBLIC. A self-hosted runner on a PUBLIC repo lets a
+#    malicious fork PR run arbitrary code on the maintainer's machine. Launch sequence:
+#      1. deregister the runner, AND
+#      2. restore the hosted config below (`runs-on: macos-latest` + the `ubuntu-latest`
+#         portability job),
+#      3. THEN flip the repo public.
+#    (Public repos get unlimited hosted Actions, so the runner isn't needed after launch.)
+#    On revert, consider business's hygiene note: default the hosted gate to ubuntu and
+#    gate macOS to release tags.
+
 jobs:
   test:
-    runs-on: macos-latest
+    runs-on: [self-hosted, linux]   # TEMP: was `macos-latest` — see header / revert before public
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,17 +39,10 @@ jobs:
         run: pytest -q
       - name: bats install-script test
         run: |
-          brew install bats-core
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats jq
           bats tests/test_install.bats
 
-  linux:
-    # Portability signal only — not a merge gate yet (macOS is the supported tier).
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -e ".[dev]"
-      - run: pytest -q
+  # NOTE: the separate `ubuntu-latest` portability job is dropped during the self-hosted
+  # window — the gate now runs on Linux natively (self-hosted), which covers it. Restore
+  # it (and `runs-on: macos-latest` above) when reverting before the public flip.
