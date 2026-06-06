@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rekol.config import load_config, resolve_archive_dir
+from rekol.config import (
+    load_config,
+    load_rekolignore_patterns,
+    path_is_excluded,
+    resolve_archive_dir,
+)
 
 
 def test_archive_keys_have_documented_defaults(tmp_path: Path, monkeypatch) -> None:
@@ -69,3 +74,30 @@ def test_config_archive_dir_property_uses_resolver(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     cfg = load_config()
     assert cfg.archive_dir == tmp_path / "xdg" / "rekol" / "archive"
+
+
+def test_path_is_excluded_matches_glob() -> None:
+    patterns = ["*/secret-project/*", "*/clientwork/*"]
+    assert path_is_excluded("/Users/x/code/secret-project/run.py", patterns) is True
+    assert path_is_excluded("/Users/x/code/clientwork/notes.md", patterns) is True
+    assert path_is_excluded("/Users/x/code/public/app.py", patterns) is False
+
+
+def test_path_is_excluded_empty_patterns_excludes_nothing() -> None:
+    assert path_is_excluded("/anything/at/all", []) is False
+
+
+def test_path_is_excluded_matches_bare_segment() -> None:
+    # A bare name like "secret-project" should match a path containing that
+    # segment, so users don't have to write the full glob.
+    assert path_is_excluded("/Users/x/secret-project/a.py", ["secret-project"]) is True
+
+
+def test_load_rekolignore_reads_patterns_skipping_comments(tmp_path: Path) -> None:
+    (tmp_path / ".rekolignore").write_text("# a comment\n*/secret/*\n\n  */private/*  \n")
+    patterns = load_rekolignore_patterns(tmp_path)
+    assert patterns == ["*/secret/*", "*/private/*"]
+
+
+def test_load_rekolignore_absent_returns_empty(tmp_path: Path) -> None:
+    assert load_rekolignore_patterns(tmp_path) == []

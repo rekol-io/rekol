@@ -7,6 +7,7 @@ keep working.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 from dataclasses import dataclass
@@ -118,6 +119,57 @@ def resolve_archive_dir(config_archive_dir: str | None) -> Path:
         Path(os.path.expanduser(data_home)) if data_home else Path.home() / ".local" / "share"
     )
     return data_root / "rekol" / "archive"
+
+
+def path_is_excluded(path: str, patterns: list[str]) -> bool:
+    """True when ``path`` matches any exclude glob in ``patterns``.
+
+    The shared exclude matcher — the reusable foundation for #5; the archive
+    sink is its first consumer. Matching is over the path's STRING form with
+    ``fnmatch`` (case-sensitive, ``*`` spans any characters incl. ``/`` since we
+    match the whole path, not per-segment). A bare segment like
+    ``secret-project`` is matched anywhere in the path by also testing
+    ``*/<pattern>/*`` and ``*<pattern>*``, so users need not always write a full
+    glob.
+
+    Empty ``patterns`` excludes nothing (the default — nothing is excluded until
+    the user opts in).
+    """
+    for pattern in patterns:
+        if fnmatch.fnmatch(path, pattern):
+            return True
+        # A bare segment (no glob chars) should still match anywhere in the path
+        # so a user can write `secret-project` instead of `*/secret-project/*`.
+        if "*" not in pattern and "?" not in pattern:
+            if fnmatch.fnmatch(path, f"*/{pattern}/*") or fnmatch.fnmatch(path, f"*{pattern}*"):
+                return True
+    return False
+
+
+def load_rekolignore_patterns(root: Path) -> list[str]:
+    """Read ``<root>/.rekolignore`` (gitignore-style) into a pattern list.
+
+    Honored IN ADDITION to ``exclude_paths`` from config. Blank lines and lines
+    starting with ``#`` are skipped; each remaining line is stripped of
+    surrounding whitespace and used as an ``fnmatch`` glob. A missing file
+    yields an empty list (no error — absence means "ignore nothing here").
+    """
+    ignore_file = root / ".rekolignore"
+    if not ignore_file.is_file():
+        return []
+    patterns: list[str] = []
+    # OSError (permission, race) must not crash a sync — an unreadable ignore
+    # file degrades to "no extra patterns", logged by the caller, never fatal.
+    try:
+        text = ignore_file.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    return patterns
 
 
 @dataclass
