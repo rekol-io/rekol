@@ -28,6 +28,10 @@ DEFAULTS: dict = dict(
     temporal_recency_halflife_days=180,
     temporal_recency_exempt_layers=["always", "knowledge"],
     temporal_confirm_interval_days=180,
+    # --- Durable transcript archive (#8) ---
+    archive_enabled=True,  # default-ON: we disclose at install, not opt-in
+    archive_dir=None,  # None → resolve_archive_dir() picks the XDG default
+    exclude_paths=[],  # glob patterns for project/cwd paths never archived/indexed
 )
 
 
@@ -102,6 +106,14 @@ class Config:
     temporal_recency_halflife_days: float
     temporal_recency_exempt_layers: list[str]
     temporal_confirm_interval_days: int
+    archive_enabled: bool
+    exclude_paths: list[str]
+    # NOTE: the RESOLVED archive_dir is intentionally NOT a stored field — it is
+    # resolved lazily via the archive_dir property (mirrors index_dir), so an env
+    # override is honored at call time rather than frozen at load time. We store
+    # only the RAW config value here (no leading underscore — this is a public
+    # dataclass field; the resolved value comes from the property).
+    archive_dir_raw: str | None
 
     @property
     def index_dir(self) -> Path:
@@ -184,4 +196,7 @@ def load_config() -> Config:
         temporal_recency_halflife_days=float(data["temporal_recency_halflife_days"]),
         temporal_recency_exempt_layers=list(data["temporal_recency_exempt_layers"]),
         temporal_confirm_interval_days=int(data["temporal_confirm_interval_days"]),
+        archive_enabled=bool(data["archive_enabled"]),
+        exclude_paths=list(data["exclude_paths"]),
+        archive_dir_raw=(str(data["archive_dir"]) if data["archive_dir"] is not None else None),
     )
