@@ -903,7 +903,7 @@ if [[ -f "${STALE_DBIGNORE}" ]] \
   if [[ "$DRY_RUN" == "1" ]]; then
     say "DRY-RUN: rm ${STALE_DBIGNORE} (stale: index no longer in-tree)"
   else
-    say "removing stale ${STALE_DBIGNORE} (the index no longer lives in $REKOL_HOME)"
+    say "removing stale ${STALE_DBIGNORE} (the index no longer lives in ${RESOLVED_HOME})"
     rm -f "${STALE_DBIGNORE}"
     log_journal "REMOVED stale ${STALE_DBIGNORE}"
   fi
