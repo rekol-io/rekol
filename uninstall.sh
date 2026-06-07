@@ -17,6 +17,10 @@
 #   --dry-run       print what would change; touch nothing
 #   --purge-index   also delete the rebuildable index (local cache + any legacy
 #                   in-tree $REKOL_HOME/.index/); off by default
+#   --purge-archive also delete the durable transcript archive; off by default.
+#                   The archive holds verbatim transcripts and there is no export
+#                   in v1, so deletion is IRREVERSIBLE — preserved unless asked.
+#                   (Your markdown memory under $REKOL_HOME is never touched.)
 #   --yes           non-interactive; assume "yes" to prompts (e.g. CI/scripts)
 #   --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
 #   --bin-dir P     override default ~/bin (where the rekol shim lives)
@@ -45,6 +49,7 @@ readonly ZSHRC="$HOME/.zshrc"
 # to manifest, then default". A flag sets the value AND its *_FROM_FLAG marker.
 DRY_RUN=0
 PURGE_INDEX=0
+PURGE_ARCHIVE=0
 ASSUME_YES=0
 TOOLS_HOME=""
 BIN_DIR=""
@@ -61,7 +66,7 @@ usage() {
   cat <<'EOF'
 rekol uninstall — cleanly remove rekol, preserving your markdown memory.
 
-Usage: ./uninstall.sh [--dry-run] [--purge-index] [--yes]
+Usage: ./uninstall.sh [--dry-run] [--purge-index] [--purge-archive] [--yes]
                       [--tools-home PATH] [--bin-dir PATH] [--help]
 
 What it removes:
@@ -77,19 +82,26 @@ What it PRESERVES:
     *.md, *.config.yaml, the local git repo) — your data, never deleted
   - the derived index (local cache outside $REKOL_HOME, plus any legacy in-tree
     .index/) unless you pass --purge-index (or confirm the prompt)
+  - the durable transcript archive (verbatim sessions on local disk) unless you
+    pass --purge-archive (or confirm the prompt). There is no export in v1, so
+    deletion is irreversible — preserved by default, never silently removed.
 
 Path discovery: the venv (tools-home) and shim (bin-dir) are resolved by
 precedence — explicit --tools-home/--bin-dir flags, else the install manifest at
 $REKOL_HOME/.install-logs/manifest.env, else the built-in defaults. The local
 index cache is read from the manifest's INDEX_DIR (or recomputed from the venv
-if still present). So a custom install is found automatically; you only need the
-flags if the manifest is gone. If a path cannot be confirmed (no manifest,
+if still present); the durable archive is read from the manifest's ARCHIVE_DIR
+(REKOL_ARCHIVE_DIR wins, or the venv's resolver). So a custom install is found
+automatically; you only need the flags if the manifest is gone. If a path cannot
+be confirmed (no manifest,
 default missing), it is reported at the end as a possible leftover instead of
 being silently skipped.
 
 Flags:
   --dry-run       print what would change; touch nothing
   --purge-index   also delete the rebuildable index (cache + legacy in-tree)
+  --purge-archive also delete the durable transcript archive (irreversible; no
+                  export in v1). Your markdown memory is kept either way.
   --yes           non-interactive; assume "yes" to prompts
   --tools-home P  override the venv home (else manifest, else ~/.local/share/rekol)
   --bin-dir P     override the shim dir (else manifest, else ~/bin)
@@ -136,6 +148,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)      DRY_RUN=1;              shift ;;
     --purge-index)  PURGE_INDEX=1;          shift ;;
+    --purge-archive) PURGE_ARCHIVE=1;       shift ;;
     --yes|-y)       ASSUME_YES=1;           shift ;;
     --tools-home)   TOOLS_HOME="$2"; TOOLS_HOME_FROM_FLAG=1; shift 2 ;;
     --bin-dir)      BIN_DIR="$2";    BIN_DIR_FROM_FLAG=1;    shift 2 ;;
@@ -174,13 +187,14 @@ note_leftover()  { LEFTOVERS+=("$1"); }
 #   2. the install manifest ($REKOL_HOME/.install-logs/manifest.env)
 #   3. built-in defaults (~/.local/share/rekol, ~/bin)
 # The manifest is parsed SAFELY: we read KEY=value lines and whitelist the keys
-# (TOOLS_HOME, BIN_DIR) — never `source` it, so a tampered manifest cannot run
-# code. We track whether each value came from the manifest so the report step can
-# distinguish a confirmed path from a guessed default.
+# (TOOLS_HOME, BIN_DIR, INDEX_DIR, ARCHIVE_DIR) — never `source` it, so a tampered
+# manifest cannot run code. We track whether each value came from the manifest so
+# the report step can distinguish a confirmed path from a guessed default.
 MANIFEST_FILE="${RESOLVED_HOME:+${RESOLVED_HOME}/.install-logs/manifest.env}"
 MANIFEST_TOOLS_HOME=""
 MANIFEST_BIN_DIR=""
 MANIFEST_INDEX_DIR=""
+MANIFEST_ARCHIVE_DIR=""
 MANIFEST_FOUND=0
 
 # Reads one whitelisted KEY's value from the manifest. Only the exact keys passed
@@ -202,6 +216,7 @@ if [[ -n "$MANIFEST_FILE" && -f "$MANIFEST_FILE" ]]; then
   MANIFEST_TOOLS_HOME="$(manifest_value TOOLS_HOME "$MANIFEST_FILE")"
   MANIFEST_BIN_DIR="$(manifest_value BIN_DIR "$MANIFEST_FILE")"
   MANIFEST_INDEX_DIR="$(manifest_value INDEX_DIR "$MANIFEST_FILE")"
+  MANIFEST_ARCHIVE_DIR="$(manifest_value ARCHIVE_DIR "$MANIFEST_FILE")"
 fi
 
 # TOOLS_HOME: flag wins; else manifest; else default. Track the source so the
@@ -251,6 +266,35 @@ elif [[ -n "$RESOLVED_HOME" && -x "${TOOLS_HOME}/.venv/bin/python" ]]; then
   [[ -n "$INDEX_DIR" ]] && INDEX_DIR_SOURCE="venv"
 fi
 readonly INDEX_DIR INDEX_DIR_SOURCE
+
+# --- Resolve the durable transcript archive to (optionally) remove ---
+# SECURITY/data: the archive is a machine-level copy of verbatim transcripts in a
+# durable, non-cache location (${XDG_DATA_HOME:-~/.local/share}/rekol/archive by
+# default). It is PRESERVED by default; only --purge-archive (or the confirm
+# prompt in Step 6c) removes it. Resolution (highest precedence first):
+#   1. $REKOL_ARCHIVE_DIR — explicit override (matches the runtime resolver)
+#   2. the manifest's recorded ARCHIVE_DIR (exact path install resolved)
+#   3. the still-present venv's resolve_archive_dir(None) — the XDG default
+# The resolver is machine-level (NOT hashed per REKOL_HOME), so it takes no home.
+# Resolve this BEFORE Step 3 removes the venv. If unresolved, ARCHIVE_DIR stays
+# empty and Step 6c reports it as a possible leftover when a purge was requested.
+ARCHIVE_DIR=""
+ARCHIVE_DIR_SOURCE="unknown"
+if [[ -n "${REKOL_ARCHIVE_DIR:-}" ]]; then
+  ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}"
+  ARCHIVE_DIR_SOURCE="env"
+elif [[ -n "$MANIFEST_ARCHIVE_DIR" ]]; then
+  ARCHIVE_DIR="$MANIFEST_ARCHIVE_DIR"
+  ARCHIVE_DIR_SOURCE="manifest"
+elif [[ -x "${TOOLS_HOME}/.venv/bin/python" ]]; then
+  ARCHIVE_DIR="$(
+    "${TOOLS_HOME}/.venv/bin/python" -c \
+      'from rekol.config import resolve_archive_dir; print(resolve_archive_dir(None))' \
+      2>/dev/null || true
+  )"
+  [[ -n "$ARCHIVE_DIR" ]] && ARCHIVE_DIR_SOURCE="venv"
+fi
+readonly ARCHIVE_DIR ARCHIVE_DIR_SOURCE
 
 say "rekol uninstall — preserving your markdown memory; removing the tooling."
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -519,6 +563,34 @@ fi
 # under the same gate; only the .index/ dir, never other $REKOL_HOME content.
 if [[ -n "$RESOLVED_HOME" ]]; then
   purge_index_dir "${RESOLVED_HOME}/.index" "legacy in-tree vector index"
+fi
+
+# 6c — the durable transcript archive. Preserved by default; verbatim transcripts
+# argue for cleanup, but "it's yours / no export in v1" means deletion is
+# irreversible — so prompt (or require --purge-archive), never silently nuke.
+# Markdown under $REKOL_HOME is never touched here either way.
+if [[ -n "$ARCHIVE_DIR" && -d "$ARCHIVE_DIR" ]]; then
+  if [[ "$PURGE_ARCHIVE" == "1" ]]; then
+    say "removing transcript archive ${ARCHIVE_DIR} (--purge-archive)"
+    run "rm -rf '${ARCHIVE_DIR}'"
+    note_removed "transcript archive ${ARCHIVE_DIR}"
+  elif [[ "$ASSUME_YES" == "1" ]]; then
+    say "keeping transcript archive ${ARCHIVE_DIR} (--yes does not purge it; pass --purge-archive)"
+    note_preserved "transcript archive ${ARCHIVE_DIR}"
+  elif confirm "Also delete the durable transcript archive at ${ARCHIVE_DIR}? Irreversible (no export in v1); your markdown is kept either way."; then
+    say "removing transcript archive ${ARCHIVE_DIR}"
+    run "rm -rf '${ARCHIVE_DIR}'"
+    note_removed "transcript archive ${ARCHIVE_DIR}"
+  else
+    say "keeping transcript archive ${ARCHIVE_DIR} (pass --purge-archive to remove it)"
+    note_preserved "transcript archive ${ARCHIVE_DIR}"
+  fi
+elif [[ "$PURGE_ARCHIVE" == "1" ]]; then
+  # A purge was explicitly requested but we could not resolve/find the archive
+  # (no env, no manifest ARCHIVE_DIR, no venv to ask, or the dir is already gone).
+  # Report it so a custom archive_dir is never silently left behind.
+  say "could not resolve the transcript archive to purge (no REKOL_ARCHIVE_DIR, no manifest ARCHIVE_DIR, no venv to ask)"
+  note_leftover "transcript archive: not resolved; remove it by hand or set REKOL_ARCHIVE_DIR and re-run with --purge-archive"
 fi
 
 # Always record that the markdown memory is preserved.
