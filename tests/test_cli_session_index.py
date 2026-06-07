@@ -295,6 +295,80 @@ def test_session_index_embed_heals_a_no_embed_index(tmp_path: Path, monkeypatch)
     assert hits and hits[0]["message_uuid"] == "u-3"
 
 
+def _write_session_with_cwd(path: Path, *, session_id: str, cwd: str, text: str) -> None:
+    """Write a one-message transcript carrying a real `cwd` (the exclude target)."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "type": "user",
+        "uuid": f"{session_id}-u1",
+        "sessionId": session_id,
+        "timestamp": "2026-05-01T10:00:00Z",
+        "cwd": cwd,
+        "message": {"role": "user", "content": text},
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_excluded_project_not_indexed_when_archive_soft_fails(tmp_path: Path, monkeypatch) -> None:
+    """SECURITY: when archive-sync OSErrors and falls back to live, ingest must NOT
+    index excluded/secret projects. ingest_directory has no exclude awareness, so
+    the fallback must either filter or refuse — never silently index a secret
+    project the user excluded.
+    """
+    import rekol.cli_session_index as cli_mod
+
+    home = tmp_path / "memhome"
+    home.mkdir()
+    projects = tmp_path / "fake-projects"
+    _write_session_with_cwd(
+        projects / "-Users-x-secret" / "s-secret.jsonl",
+        session_id="s-secret",
+        cwd="/Users/x/secret",
+        text="this is a SECRET project transcript",
+    )
+    _write_session_with_cwd(
+        projects / "-Users-x-public" / "s-public.jsonl",
+        session_id="s-public",
+        cwd="/Users/x/public",
+        text="this is a public project transcript",
+    )
+    archive = tmp_path / "archive"
+    monkeypatch.setenv("MEMORY_HOME", str(home))
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(archive))
+    (home / "memory.config.yaml").write_text(
+        f"claude_projects_dir: {projects}\n"
+        "embedding_model: test-hashing\n"
+        "archive_enabled: true\n"
+        "exclude_paths:\n"
+        "  - '*/secret*'\n"
+    )
+
+    # Force archive-sync to OSError so the fallback path is exercised.
+    def boom(*args, **kwargs):
+        raise OSError("simulated unwritable archive dir")
+
+    monkeypatch.setattr(cli_mod, "archive_directory", boom)
+    result = CliRunner().invoke(cli_main, ["--full"])
+    assert result.exit_code == 0, result.output
+
+    db_path = cache_dir_for(home) / "sessions.db"
+    if not db_path.exists():
+        # No-ingest degradation is an acceptable exclude-safe fallback: nothing
+        # indexed at all, so no secret leaked. Done.
+        return
+    store = SessionStore(db_path=db_path, dim=384)
+    store.init_schema()
+    try:
+        rows = store.conn.execute("SELECT cwd, content FROM messages").fetchall()
+    finally:
+        store.close()
+    blob = " ".join(f"{r['cwd']} {r['content']}" for r in rows)
+    # The excluded/secret project must NOT be in the index.
+    assert "secret" not in blob.lower(), blob
+
+
 def test_session_index_uses_archive_backfill_once(tmp_path: Path, monkeypatch) -> None:
     """main() must call the hardened, tested archive.backfill_once (not a private
     duplicate). We assert the consolidated entry point runs and writes the marker.

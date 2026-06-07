@@ -38,12 +38,25 @@ from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 def _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progress):
     """Archive-sync the live projects dir, returning the dir ingest should read.
 
+    Returns the dir ingest should walk, or ``None`` meaning "skip ingest this run".
+
     When the archive is on, copy-if-changed the live transcripts into the durable
     archive and return the ARCHIVE dir, so a rebuild stays lossless even if Claude
     Code deleted the live originals (#8). On ``OSError`` (disk full, unwritable
-    dir) this SOFT-FAILS: it logs a non-fatal notice and returns the LIVE projects
-    dir, degrading to today's behavior — archiving must never block indexing. With
-    the archive off, it simply returns the live dir.
+    dir) this SOFT-FAILS: it logs a non-fatal notice and falls back to the LIVE
+    projects dir — archiving must never block indexing. With the archive off, it
+    simply returns the live dir.
+
+    EXCLUDE-SAFE FALLBACK (review fix): ``ingest_directory`` has NO exclude
+    awareness — it indexes every ``.jsonl`` it walks. The archive applies excludes
+    by NOT copying excluded sessions, so ingesting from the archive is exclude-safe.
+    But ingesting from LIVE on a soft-fail would index excluded/secret projects
+    too — silently bypassing the user's exclude (a security hole). So when the
+    fallback would hit live AND excludes are configured, we REFUSE to ingest-from-
+    live and return ``None`` (no-ingest this run); the exclude guarantee stays
+    airtight, and the next successful archive-sync catches the non-excluded content
+    up (copy-if-changed is idempotent). With no excludes, live and archive index
+    the same set, so the live fallback is safe and we keep it.
     """
     if not cfg.archive_enabled:
         return projects_root
@@ -51,7 +64,18 @@ def _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progres
     try:
         archive_stats = archive_directory(projects_root, archive_dir, exclude_patterns)
     except OSError as exc:
-        # SOFT-FAIL: archiving must never block indexing. Fall back to live.
+        if exclude_patterns:
+            # Refusing to ingest from live preserves the exclude (security). The
+            # next successful sync catches the non-excluded content up.
+            click.echo(
+                f"archive-sync degraded (non-fatal): {exc}; excludes are configured, "
+                f"so skipping ingest this run rather than indexing excluded projects "
+                f"from live (the next successful sync catches up)",
+                err=True,
+            )
+            return None
+        # SOFT-FAIL with no excludes: live and archive index the same set, so
+        # falling back to live is safe and keeps indexing working.
         click.echo(f"archive-sync degraded (non-fatal): {exc}; ingesting from live", err=True)
         return projects_root
     if progress:
@@ -96,6 +120,34 @@ def _backfill_once_soft_fail(cfg, archive_dir, store) -> None:
             f"`archive_enabled: false` in rekol.config.yaml.",
             err=True,
         )
+
+
+def _echo_zeroed_stats() -> None:
+    """Print the all-zero stats line for a no-ingest run (exclude-safe fallback).
+
+    Mirrors the normal final stats line so downstream parsers see the same shape;
+    a no-ingest run indexed nothing, so every counter is zero.
+    """
+    click.echo(
+        "files_seen=0 files_ingested=0 files_skipped_unchanged=0 "
+        "messages_inserted=0 messages_skipped_dupe=0 messages_skipped_malformed=0 "
+        "messages_skipped_no_text=0 messages_embedded_repaired=0"
+    )
+
+
+def _make_progress_cb(progress: bool):
+    """Build the per-50-files progress callback, or ``None`` when disabled.
+
+    Progress prints to stderr so it never interleaves with the final stats line on
+    stdout (tests assert against stdout substrings).
+    """
+    if not progress:
+        return None
+
+    def _emit_progress(done: int, total: int) -> None:
+        click.echo(f"... {done}/{total} files indexed", err=True)
+
+    return _emit_progress
 
 
 @click.command()
@@ -152,15 +204,7 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
     embedder = get_embedder(cfg.embedding_model) if embed else None
     store_dim = embedder.dim if embedder is not None else 384
 
-    # Progress callback prints to stderr so it doesn't interleave with the
-    # final stats line on stdout (tests assert against stdout substrings).
-    progress_cb = None
-    if progress:
-
-        def _emit_progress(done: int, total: int) -> None:
-            click.echo(f"... {done}/{total} files indexed", err=True)
-
-        progress_cb = _emit_progress
+    progress_cb = _make_progress_cb(progress)
 
     # Determine where ingest reads FROM. With the archive on, we archive-sync the
     # live projects dir into the durable archive, then ingest from the ARCHIVE —
@@ -169,6 +213,14 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
     # (today's behavior); the next successful run catches up.
     archive_dir = cfg.archive_dir
     ingest_root = _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progress)
+
+    # Exclude-safe no-ingest: archive-sync soft-failed AND excludes are configured,
+    # so we refused to ingest from live (it would index excluded/secret projects).
+    # Skip ingest entirely this run; the next successful sync catches up. Exit 0 —
+    # this is a degraded-but-honored state, never a crash (SessionEnd contract).
+    if ingest_root is None:
+        _echo_zeroed_stats()
+        sys.exit(0)
 
     # NO LOCK around this block: sessions.db is a separate DB from the curated
     # index.db, so the curated index_write_lock (#24/#25) is NOT reused — it would
