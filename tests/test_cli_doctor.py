@@ -292,3 +292,29 @@ def test_doctor_warns_on_cloud_synced_archive(tmp_path, monkeypatch):
     findings = _check_archive(cfg)
     detail = " ".join(f.detail.lower() for f in findings)
     assert "cloud" in detail or "sync" in detail
+
+
+def test_doctor_warns_on_icloud_synced_archive(tmp_path, monkeypatch):
+    """The iCloud candidate's REAL path is `…/Mobile Documents/com~apple~CloudDocs`,
+    which does not contain the display label's first word ('iCloud'). Matching on
+    the label word silently misses it — doctor must match the resolved archive path
+    against the candidate PATH VALUES (or the iCloud on-disk signal)."""
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    # Mirror the macOS iCloud Drive on-disk layout under a fake HOME so the
+    # candidate path resolves to this archive.
+    fake_home = tmp_path / "home"
+    icloud = fake_home / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "rekol-archive"
+    icloud.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path / "memhome"))
+    (tmp_path / "memhome").mkdir()
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(icloud))
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    location_findings = [f for f in findings if f.label == "archive location"]
+    assert location_findings, [f.label for f in findings]
+    detail = " ".join(f.detail.lower() for f in location_findings)
+    assert "cloud" in detail or "sync" in detail or "icloud" in detail
