@@ -14,6 +14,9 @@
 #   --tools-home P  override default ~/.local/share/rekol
 #   --bin-dir P     override default ~/bin
 #   --migrate       opt in to importing legacy ~/.claude/projects/*/memory/ content
+#   --no-archive    disable the durable transcript archive (seeds archive_enabled:false)
+#   --archive-dir P set the durable archive location (default ~/.local/share/rekol/archive)
+#   --help          print this usage block and exit
 #
 # Per Bash standard: using [[ ]] for conditionals, printf instead of echo -e,
 # local for function-scoped vars, SCREAMING_SNAKE_CASE for constants.
@@ -42,11 +45,46 @@ DO_MIGRATE=0
 TEST_MODE=0
 TOOLS_HOME="$TOOLS_HOME_DEFAULT"
 BIN_DIR="$BIN_DIR_DEFAULT"
+# Durable transcript archive (#8). Default-ON: with no flag we write nothing and
+# the code default (archive_enabled:true) applies. --no-archive seeds the off
+# switch into the config; --archive-dir relocates it.
+DO_ARCHIVE=1
+ARCHIVE_DIR=""
 
 # --- Helpers ---
 
 say() {
   printf '%s\n' "$*"
+}
+
+usage() {
+  cat <<'EOF'
+rekol install — idempotent installer; safe to rerun on an already-set-up machine.
+
+Usage: ./install.sh [--dry-run] [--no-hook] [--no-skill] [--no-shellrc]
+                    [--test-mode] [--tools-home PATH] [--bin-dir PATH]
+                    [--migrate] [--no-archive] [--archive-dir PATH] [--help]
+
+Set REKOL_HOME to your memory folder (MEMORY_HOME accepted as a fallback); the
+installer prompts for it when neither is set and stdin is a TTY.
+
+Flags:
+  --dry-run       print actions without executing them
+  --no-hook       skip SessionStart hook installation (settings.json only)
+  --no-skill      skip Claude skill installation
+  --no-shellrc    skip ~/.zshrc edits (PATH + REKOL_HOME export)
+  --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
+  --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
+  --bin-dir P     override default ~/bin (where the rekol shim lives)
+  --migrate       import legacy ~/.claude/projects/*/memory/ content (opt-in)
+  --no-archive    disable the durable transcript archive (seeds archive_enabled:false)
+  --archive-dir P set the durable archive location (default ~/.local/share/rekol/archive)
+  --help          show this help and exit
+
+rekol keeps a local copy of your sessions so your memory survives Claude Code
+rotating its transcripts — on your disk, never uploaded. Turn it off with
+--no-archive (or archive_enabled:false in rekol.config.yaml).
+EOF
 }
 
 # Prints a dry-run notice or executes the given command string.
@@ -145,6 +183,9 @@ while [[ $# -gt 0 ]]; do
     --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
     --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
     --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
+    --no-archive) DO_ARCHIVE=0;                         shift ;;
+    --archive-dir) ARCHIVE_DIR="$2";                    shift 2 ;;
+    --help|-h)    usage; exit 0 ;;
     *)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
@@ -262,6 +303,28 @@ else
 fi
 readonly INDEX_DIR
 
+# --- Resolve the durable archive dir for the manifest (mirrors INDEX_DIR) ---
+# Precedence matches the runtime resolver: REKOL_ARCHIVE_DIR > --archive-dir flag >
+# the venv's resolve_archive_dir default. Recorded so uninstall can find/remove it
+# without re-deriving the XDG default. (Note: the archive is machine-level, NOT
+# hashed per REKOL_HOME — resolve_archive_dir takes the raw config value only.)
+# Skip the venv call under --dry-run (the venv may not exist), like INDEX_DIR.
+ARCHIVE_DIR_RESOLVED=""
+if [[ -n "${REKOL_ARCHIVE_DIR:-}" ]]; then
+  ARCHIVE_DIR_RESOLVED="${REKOL_ARCHIVE_DIR}"
+elif [[ -n "$ARCHIVE_DIR" ]]; then
+  ARCHIVE_DIR_RESOLVED="${ARCHIVE_DIR}"
+elif [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: resolve archive dir via '${TOOLS_HOME}/.venv/bin/python'"
+else
+  ARCHIVE_DIR_RESOLVED="$(
+    "${TOOLS_HOME}/.venv/bin/python" -c \
+      'from rekol.config import resolve_archive_dir; print(resolve_archive_dir(None))' \
+      2>/dev/null || true
+  )"
+fi
+readonly ARCHIVE_DIR_RESOLVED
+
 # --- Install manifest ---
 # Records the resolved install parameters so uninstall.sh can be deterministic:
 # when a user installs with custom --tools-home/--bin-dir and later runs
@@ -273,7 +336,8 @@ readonly INDEX_DIR
 # REKOL_HOME. Reuses .install-logs/.  Format: simple KEY=value lines, overwritten
 # on every (re)install (idempotent). Uninstall reads it by whitelisting keys — it
 # never sources this file. INDEX_DIR is recorded so uninstall can remove the
-# local cache without re-deriving the hash.
+# local cache without re-deriving the hash; ARCHIVE_DIR is recorded so uninstall
+# can find the durable transcript archive without re-deriving the XDG default.
 if [[ "$DRY_RUN" == "1" ]]; then
   say "DRY-RUN: write install manifest ${MANIFEST}"
 else
@@ -285,6 +349,7 @@ else
     printf 'REKOL_HOME=%s\n' "${RESOLVED_HOME}"
     printf 'SHIM=%s\n' "${BIN_DIR}/rekol"
     printf 'INDEX_DIR=%s\n' "${INDEX_DIR}"
+    printf 'ARCHIVE_DIR=%s\n' "${ARCHIVE_DIR_RESOLVED}"
     printf 'INSTALLED_AT=%s\n' "${TS}"
   } > "${MANIFEST}"
   log_journal "WROTE manifest ${MANIFEST}"
@@ -372,6 +437,32 @@ if is_empty_memory_home "${RESOLVED_HOME}"; then
   log_journal "SEEDED ${RESOLVED_HOME} from template"
 else
   say "${RESOLVED_HOME} is non-empty — skipping template seeding (safe)"
+fi
+
+# =============================================================================
+# Step 5.5 — Seed archive config keys when overridden by flags
+# =============================================================================
+# Default-ON: with no flag we write nothing (the code default is
+# archive_enabled:true). --no-archive seeds the off switch; --archive-dir seeds
+# the relocation. Both writes are idempotent — appended only if the key is absent.
+#
+# Resolve the config file to seed into, mirroring the Step 8.5 CONFIG_YAML block:
+# prefer rekol.config.yaml; fall back to memory.config.yaml so a root created by
+# an older install is still seeded. Step 8.5 runs much later in the script, so we
+# must resolve our own copy here rather than reuse its CONFIG_YAML.
+CONFIG_YAML_SEED="${RESOLVED_HOME}/rekol.config.yaml"
+[[ -f "${CONFIG_YAML_SEED}" ]] || CONFIG_YAML_SEED="${RESOLVED_HOME}/memory.config.yaml"
+if [[ "$DO_ARCHIVE" == "0" ]]; then
+  if ! grep -qs '^archive_enabled:' "${CONFIG_YAML_SEED}" 2>/dev/null; then
+    run "printf 'archive_enabled: false\n' >> '${CONFIG_YAML_SEED}'"
+    log_journal "SEEDED archive_enabled:false in ${CONFIG_YAML_SEED}"
+  fi
+fi
+if [[ -n "$ARCHIVE_DIR" ]]; then
+  if ! grep -qs '^archive_dir:' "${CONFIG_YAML_SEED}" 2>/dev/null; then
+    run "printf 'archive_dir: %s\n' '${ARCHIVE_DIR}' >> '${CONFIG_YAML_SEED}'"
+    log_journal "SEEDED archive_dir:${ARCHIVE_DIR} in ${CONFIG_YAML_SEED}"
+  fi
 fi
 
 # =============================================================================
@@ -935,6 +1026,25 @@ else
 fi
 
 # =============================================================================
+# Step 9.7 — Backfill the durable transcript archive from the freshly built index
+# =============================================================================
+# With the index seeded (Step 9.5), reconstruct the durable archive from it so a
+# fresh install has a complete, rebuild-safe copy of every transcript on disk.
+# Skipped in --test-mode (would walk the real ~/.claude/projects on CI) and when
+# --no-archive disables the archive. Non-fatal (set -euo pipefail is in effect):
+# an unwritable archive must never abort an otherwise-good install. Also skipped
+# under --dry-run, where the venv may not exist.
+
+if [[ "${TEST_MODE}" != "1" && "${DO_ARCHIVE}" == "1" && "${DRY_RUN}" != "1" ]]; then
+  say "building the durable transcript archive (rekol archive --from-index)"
+  if "${TOOLS_HOME}/.venv/bin/rekol" archive --from-index 2>&1 | sed 's/^/  /'; then
+    log_journal "BACKFILLED archive (archive --from-index)"
+  else
+    say "archive backfill skipped or failed (non-fatal) — run 'rekol archive --from-index' later"
+  fi
+fi
+
+# =============================================================================
 # Step 10 — Migrate legacy memory (opt-in via --migrate)
 # =============================================================================
 # Runs `rekol migrate auto` after seeding to bring any legacy ~/.claude/projects/*/memory/
@@ -968,6 +1078,13 @@ fi
 say ""
 say "done."
 say "journal: ${JOURNAL}"
+# Disclosure (default-ON honesty): a single plain line, no per-session nag. The
+# archive holds verbatim transcripts on local disk; we say so and how to opt out.
+if [[ "${DO_ARCHIVE}" == "1" ]]; then
+  say ""
+  say "rekol keeps a local copy of your sessions so your memory survives — it's on your"
+  say "disk, never uploaded. Turn it off anytime: set archive_enabled:false in rekol.config.yaml."
+fi
 say ""
 say "next steps:"
 say "  1. source ${ZSHRC}   (or open a new terminal)"
