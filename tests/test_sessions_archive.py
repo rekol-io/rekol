@@ -232,3 +232,145 @@ def test_archive_directory_matches_cwd_not_slug(tmp_path: Path) -> None:
     # A natural cwd-shaped pattern DOES exclude (on the retroactive sweep here).
     excluded = archive_directory(live_root, archive_dir, exclude_patterns=["*/secret*"])
     assert excluded.files_removed_excluded == 1
+
+
+# --- Phase 4: backfill_from_index ---
+
+from rekol.sessions.archive import backfill_from_index  # noqa: E402
+from rekol.sessions.ingest import iter_messages_in_file  # noqa: E402
+from rekol.sessions.store import SessionStore  # noqa: E402
+
+
+def _seed_store_with_session(db_path: Path, *, cwd: str = "/Users/x/projA") -> SessionStore:
+    store = SessionStore(db_path=db_path, dim=4, use_sqlite_vec=False)
+    store.init_schema()
+    store.insert_message(
+        dict(
+            session_id="sess-1",
+            message_uuid="u1",
+            parent_uuid=None,
+            role="user",
+            content="how do I configure the proxy base_url",
+            cwd=cwd,
+            timestamp_iso="2026-05-01T10:00:00Z",
+            timestamp_unix=1777622400,
+            jsonl_path="/gone/projA/sess-1.jsonl",
+            line_number=1,
+        )
+    )
+    return store
+
+
+def test_backfill_reconstructs_missing_session(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    store = _seed_store_with_session(tmp_path / "sessions.db")
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert stats.sessions_reconstructed == 1
+    # The reconstructed file is a real .jsonl that re-ingests cleanly.
+    reconstructed = list(archive_dir.glob("**/*.jsonl"))
+    assert len(reconstructed) == 1
+    msgs = list(iter_messages_in_file(reconstructed[0]))
+    assert len(msgs) == 1
+    assert msgs[0]["session_id"] == "sess-1"
+    assert msgs[0]["content"].startswith("how do I configure")
+
+
+def test_backfill_is_exclude_aware(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    store = _seed_store_with_session(tmp_path / "sessions.db", cwd="/Users/x/secret-project")
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=["*/secret-project*"])
+    finally:
+        store.close()
+    assert stats.sessions_skipped_excluded == 1
+    assert stats.sessions_reconstructed == 0
+    assert list(archive_dir.glob("**/*.jsonl")) == []
+
+
+def test_backfill_skips_sessions_already_archived(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    # Pre-create an archive file for the session so backfill leaves it alone.
+    existing = archive_dir / "projA" / "sess-1.jsonl"
+    existing.parent.mkdir(parents=True)
+    existing.write_text('{"type":"user"}\n')
+    store = _seed_store_with_session(tmp_path / "sessions.db")
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert stats.sessions_skipped_present == 1
+    assert stats.sessions_reconstructed == 0
+
+
+# --- Phase 4: one-time marker-guarded backfill (architect-review ordering fix) ---
+
+from rekol.sessions.archive import BACKFILL_MARKER_FILENAME, backfill_once  # noqa: E402
+
+
+def test_backfill_once_writes_marker_before_running(tmp_path: Path) -> None:
+    """The marker must be touched BEFORE the backfill runs, so a crash mid-run
+    cannot re-trigger the one-time notice. We assert the marker is in place at the
+    moment the (idempotent) backfill executes by observing it from inside a patched
+    iterator that the backfill drives."""
+    archive_dir = tmp_path / "archive"
+    store = _seed_store_with_session(tmp_path / "sessions.db")
+
+    marker_present_during_backfill: list[bool] = []
+    real_iter = store.iter_sessions_for_backfill
+
+    def spying_iter():
+        # When the backfill reaches the DB read, the marker must already exist.
+        marker_present_during_backfill.append((archive_dir / BACKFILL_MARKER_FILENAME).exists())
+        yield from real_iter()
+
+    store.iter_sessions_for_backfill = spying_iter  # type: ignore[method-assign]
+    try:
+        stats = backfill_once(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert stats is not None
+    assert stats.sessions_reconstructed == 1
+    assert marker_present_during_backfill == [True]
+    assert (archive_dir / BACKFILL_MARKER_FILENAME).exists()
+
+
+def test_backfill_once_is_idempotent_notice_once(tmp_path: Path) -> None:
+    """A second run is a no-op: the marker guards re-runs so the notice fires
+    exactly once. The second call returns None (nothing happened)."""
+    archive_dir = tmp_path / "archive"
+    store = _seed_store_with_session(tmp_path / "sessions.db")
+    try:
+        first = backfill_once(store, archive_dir, exclude_patterns=[])
+        second = backfill_once(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert first is not None
+    assert first.sessions_reconstructed == 1
+    # Second run sees the marker and short-circuits — no stats, no re-reconstruction.
+    assert second is None
+
+
+# --- Phase 4: prune ---
+
+from rekol.sessions.archive import prune  # noqa: E402
+
+
+def test_prune_clear_removes_all_archive_files(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    _write(archive_dir / "projA" / "s1.jsonl", "a\n")
+    _write(archive_dir / "projB" / "s2.jsonl", "b\n")
+    save_manifest(archive_dir, {"projA/s1.jsonl": {"mtime_unix": 1, "size_bytes": 2}})
+
+    stats = prune(archive_dir, clear=True)
+    assert stats.files_removed == 2
+    assert list(archive_dir.glob("**/*.jsonl")) == []
+    # Clearing also resets the manifest so a later sync re-copies cleanly.
+    assert load_manifest(archive_dir) == {}
+
+
+def test_prune_on_empty_archive_is_noop(tmp_path: Path) -> None:
+    stats = prune(tmp_path / "nonexistent", clear=True)
+    assert stats.files_removed == 0

@@ -445,3 +445,19 @@ def test_rebuild_fts_heals_desync(tmp_path: Path) -> None:
     hits = store.search_fts("uninstall", top_k=5)
     assert len(hits) == 5  # every row now reachable
     store.close()
+
+
+def test_iter_sessions_for_backfill_groups_by_session(tmp_path: Path) -> None:
+    store = SessionStore(db_path=tmp_path / "s.db", dim=4, use_sqlite_vec=False)
+    store.init_schema()
+    for uuid, line in (("u1", 1), ("u2", 2)):
+        store.insert_message(_make_msg(uuid=uuid, session="sess-1", line=line))
+    sessions = list(store.iter_sessions_for_backfill())
+    assert len(sessions) == 1
+    session_id, jsonl_path, messages = sessions[0]
+    assert session_id == "sess-1"
+    assert len(messages) == 2
+    # Messages carry the fields needed to reconstruct a minimal .jsonl row.
+    assert messages[0]["message_uuid"] == "u1"
+    assert messages[0]["role"] == "user"
+    store.close()
