@@ -293,3 +293,55 @@ def test_session_index_embed_heals_a_no_embed_index(tmp_path: Path, monkeypatch)
     hits = store.search_vec(query_vec, top_k=3)
     store.close()
     assert hits and hits[0]["message_uuid"] == "u-3"
+
+
+def test_session_index_uses_archive_backfill_once(tmp_path: Path, monkeypatch) -> None:
+    """main() must call the hardened, tested archive.backfill_once (not a private
+    duplicate). We assert the consolidated entry point runs and writes the marker.
+    """
+    import rekol.cli_session_index as cli_mod
+    from rekol.sessions.archive import BACKFILL_MARKER_FILENAME
+
+    _setup_home(tmp_path, monkeypatch)
+    archive = tmp_path / "archive"
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(archive))
+
+    calls: list[str] = []
+    real_backfill_once = cli_mod.backfill_once
+
+    def spy(store, archive_dir, exclude_patterns):
+        calls.append("called")
+        return real_backfill_once(store, archive_dir, exclude_patterns)
+
+    monkeypatch.setattr(cli_mod, "backfill_once", spy)
+    result = CliRunner().invoke(cli_main, ["--full"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["called"]
+    assert (archive / BACKFILL_MARKER_FILENAME).exists()
+
+
+def test_session_index_survives_corrupt_db_during_backfill(tmp_path: Path, monkeypatch) -> None:
+    """The backfill step must never crash the SessionEnd hook: a corrupt/locked
+    sessions.db raises sqlite3.DatabaseError (NOT OSError), which the old private
+    _maybe_backfill_once did not catch. The run must degrade to a non-fatal notice
+    and exit 0, still ingesting the live session.
+    """
+    import sqlite3
+
+    import rekol.cli_session_index as cli_mod
+
+    _setup_home(tmp_path, monkeypatch)
+    archive = tmp_path / "archive"
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(archive))
+
+    def boom(store, archive_dir, exclude_patterns):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(cli_mod, "backfill_once", boom)
+    result = CliRunner().invoke(cli_main, ["--full"])
+    # Exit 0 despite the backfill failing — archiving/backfill never blocks indexing.
+    assert result.exit_code == 0, result.output
+    # The live session was still ingested.
+    assert "messages_inserted=3" in result.output
+    # A non-fatal degradation notice was emitted (not a traceback).
+    assert "backfill" in result.output.lower()
