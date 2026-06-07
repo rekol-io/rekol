@@ -138,10 +138,12 @@ def test_archive_directory_counts_os_errors_without_aborting(tmp_path: Path, mon
 
     real_archive_file = archive_mod.archive_file
 
-    def flaky(live_path, archived_path, manifest, *, manifest_key):
+    def flaky(live_path, archived_path, manifest, *, manifest_key, archive_dir=None):
         if live_path.name == "bad.jsonl":
             raise OSError("simulated unreadable file")
-        return real_archive_file(live_path, archived_path, manifest, manifest_key=manifest_key)
+        return real_archive_file(
+            live_path, archived_path, manifest, manifest_key=manifest_key, archive_dir=archive_dir
+        )
 
     monkeypatch.setattr(archive_mod, "archive_file", flaky)
     stats = archive_directory(live_root, archive_dir, exclude_patterns=[])
@@ -351,6 +353,108 @@ def test_backfill_once_is_idempotent_notice_once(tmp_path: Path) -> None:
     assert first.sessions_reconstructed == 1
     # Second run sees the marker and short-circuits — no stats, no re-reconstruction.
     assert second is None
+
+
+# --- Security: path traversal / arbitrary-file-write in backfill (review blocker) ---
+
+
+def _seed_store_with_evil_ids(
+    db_path: Path, *, session_id: str, jsonl_path: str, cwd: str = "/Users/x/projA"
+) -> SessionStore:
+    """Seed a store with attacker-controlled session_id / jsonl_path.
+
+    ``sessionId`` is copied verbatim from untrusted Claude Code transcripts, so a
+    crafted value (``../../../tmp/x`` or an absolute ``/tmp/x``) must never let the
+    backfill write outside the archive root.
+    """
+    store = SessionStore(db_path=db_path, dim=4, use_sqlite_vec=False)
+    store.init_schema()
+    store.insert_message(
+        dict(
+            session_id=session_id,
+            message_uuid="u1",
+            parent_uuid=None,
+            role="user",
+            content="payload that must never escape the archive",
+            cwd=cwd,
+            timestamp_iso="2026-05-01T10:00:00Z",
+            timestamp_unix=1777622400,
+            jsonl_path=jsonl_path,
+            line_number=1,
+        )
+    )
+    return store
+
+
+def test_backfill_rejects_relative_traversal_session_id(tmp_path: Path) -> None:
+    """A crafted sessionId with `..` segments must NOT write outside archive_dir.
+
+    Nothing may be created anywhere under tmp_path except inside archive_dir; the
+    session is skipped and counted in sessions_errored.
+    """
+    archive_dir = tmp_path / "archive"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = _seed_store_with_evil_ids(
+        tmp_path / "sessions.db",
+        session_id="../../../../outside/pwned",
+        jsonl_path="/gone/projA/sess.jsonl",
+    )
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    # Nothing escaped: the only sibling dir is untouched.
+    assert list(outside.glob("**/*")) == []
+    assert not (tmp_path / "pwned").exists()
+    # Every .jsonl that WAS written lives strictly under the archive root.
+    for written in tmp_path.glob("**/*.jsonl"):
+        assert archive_dir.resolve() in written.resolve().parents
+    assert stats.sessions_reconstructed == 0
+    assert stats.sessions_errored == 1
+
+
+def test_backfill_rejects_absolute_session_id(tmp_path: Path) -> None:
+    """An absolute sessionId (``/tmp/pwned``) collapses the path join and would
+    write to an absolute location; it must be rejected, not honored."""
+    archive_dir = tmp_path / "archive"
+    abs_target = tmp_path / "abs-escape"
+    store = _seed_store_with_evil_ids(
+        tmp_path / "sessions.db",
+        session_id=str(abs_target / "pwned"),
+        jsonl_path="/gone/projA/sess.jsonl",
+    )
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert not abs_target.exists()
+    for written in tmp_path.glob("**/*.jsonl"):
+        assert archive_dir.resolve() in written.resolve().parents
+    assert stats.sessions_reconstructed == 0
+    assert stats.sessions_errored == 1
+
+
+def test_backfill_rejects_traversal_via_slug(tmp_path: Path) -> None:
+    """The project slug derives from an untrusted jsonl_path parent; a `..` parent
+    must not let the reconstructed file escape the archive either."""
+    archive_dir = tmp_path / "archive"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = _seed_store_with_evil_ids(
+        tmp_path / "sessions.db",
+        session_id="sess-ok",
+        jsonl_path="/gone/../../../../outside/sess-ok.jsonl",
+    )
+    try:
+        stats = backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    assert list(outside.glob("**/*")) == []
+    for written in tmp_path.glob("**/*.jsonl"):
+        assert archive_dir.resolve() in written.resolve().parents
+    # Either reconstructed safely under the archive, or skipped — never escaped.
+    assert stats.sessions_errored + stats.sessions_reconstructed == 1
 
 
 # --- Phase 4: prune ---

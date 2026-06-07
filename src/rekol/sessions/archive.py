@@ -41,6 +41,66 @@ MANIFEST_FILENAME = ".manifest.json"
 BACKFILL_MARKER_FILENAME = ".backfilled-from-index"
 
 
+class UnsafeArchivePathError(ValueError):
+    """Raised when an archive path component or target would escape the root.
+
+    The archive's ``session_id`` and project-slug components are derived from
+    UNTRUSTED transcript data (Claude Code's ``sessionId``, the on-disk slug).
+    A crafted value like ``../../../tmp/x`` or an absolute ``/tmp/x`` would, when
+    joined under the archive root, either traverse out (``..``) or collapse the
+    join entirely (an absolute operand) — an arbitrary-file-write primitive. We
+    sanitize each component and then assert containment; callers turn this into a
+    skipped-and-counted session rather than honoring the write.
+    """
+
+
+def _safe_path_component(raw: str, *, allow_default: str | None = None) -> str:
+    """Validate an untrusted string as a single safe filesystem component.
+
+    REJECTS anything that is not already a plain leaf name: empty, ``.`` / ``..``,
+    a NUL byte, an absolute path, or any value containing a path separator or
+    backslash. We intentionally do NOT silently collapse ``/etc/cron.d/evil`` to
+    ``evil`` — a value carrying separators is hostile (or corrupt) input, and
+    rewriting it would mask the attack and could still collide; rejecting it is the
+    honest, auditable choice. On rejection, returns ``allow_default`` if one was
+    supplied (the slug has a sane fallback folder), else raises
+    :class:`UnsafeArchivePathError` (the session id has no safe substitute — the
+    caller skips + counts the session).
+    """
+    if (
+        not raw
+        or raw in (".", "..")
+        or "\x00" in raw
+        or "/" in raw
+        or "\\" in raw
+        or raw != Path(raw).name
+    ):
+        if allow_default is not None:
+            return allow_default
+        raise UnsafeArchivePathError(f"unsafe archive path component: {raw!r}")
+    return raw
+
+
+def _assert_within_archive(archived_path: Path, archive_dir: Path) -> Path:
+    """Resolve ``archived_path`` and assert it stays under ``archive_dir``.
+
+    Defense in depth after component sanitization: even a sanitized join is
+    re-validated with ``resolve().relative_to(...)`` so a symlink in the archive
+    tree or any future component-construction bug cannot silently write outside.
+    Raises :class:`UnsafeArchivePathError` (the caller skips + counts) on escape.
+    Returns the resolved path on success.
+    """
+    archive_root = archive_dir.resolve()
+    resolved = archived_path.resolve()
+    try:
+        resolved.relative_to(archive_root)
+    except ValueError as exc:
+        raise UnsafeArchivePathError(
+            f"archive path escapes the archive root: {archived_path}"
+        ) from exc
+    return resolved
+
+
 def load_manifest(archive_dir: Path) -> dict[str, dict[str, int]]:
     """Read the archive manifest, or ``{}`` when absent/corrupt.
 
@@ -129,6 +189,7 @@ def archive_file(
     manifest: dict[str, dict[str, int]],
     *,
     manifest_key: str,
+    archive_dir: Path | None = None,
 ) -> ArchiveFileResult:
     """Copy-if-changed primitive: reconcile one live file into the archive.
 
@@ -140,9 +201,17 @@ def archive_file(
     * live grew, archived is prefix -> replace (normal append), record manifest
     * live shorter / not a prefix   -> keep archive, write divergence sidecar
 
+    When ``archive_dir`` is given, every write target (the canonical archived path
+    AND the divergence sidecar) is re-validated to stay under it via
+    :func:`_assert_within_archive` — defense in depth against a symlinked archive
+    tree or a malformed manifest key. An escape raises
+    :class:`UnsafeArchivePathError` (the caller skips + counts the file).
+
     Raises ``OSError`` to the caller (``archive_directory``), which counts it and
     keeps going — one unreadable file must not abort the whole sync.
     """
+    if archive_dir is not None:
+        _assert_within_archive(archived_path, archive_dir)
     live_stat = live_path.stat()
     live_mtime = int(live_stat.st_mtime)
     live_size = int(live_stat.st_size)
@@ -171,6 +240,8 @@ def archive_file(
     # Divergence (compaction/rewrite): live is shorter or not a prefix. NEVER
     # overwrite — keep the existing archive and write the new version beside it.
     sidecar_path = _divergence_sidecar_path(archived_path, live_path)
+    if archive_dir is not None:
+        _assert_within_archive(sidecar_path, archive_dir)
     if not sidecar_path.exists():
         shutil.copy2(live_path, sidecar_path)
     # Intentionally do NOT update the manifest key here: the canonical archived
@@ -321,7 +392,18 @@ def archive_directory(
                 continue
         archived_path = archive_dir / relative
         try:
-            result = archive_file(live_path, archived_path, manifest, manifest_key=manifest_key)
+            result = archive_file(
+                live_path,
+                archived_path,
+                manifest,
+                manifest_key=manifest_key,
+                archive_dir=archive_dir,
+            )
+        except UnsafeArchivePathError:
+            # The archive target escaped the root (symlinked tree, malformed key).
+            # Skip + count it rather than writing outside the archive.
+            stats.files_errored += 1
+            continue
         except OSError:
             # One unreadable/unwritable file must not abort the run; the next
             # successful sync catches it (copy-if-changed is idempotent).
@@ -434,9 +516,23 @@ def backfill_from_index(
         if cwd and path_is_excluded(str(cwd), exclude_patterns):
             stats.sessions_skipped_excluded += 1
             continue
-        slug = _project_slug_from_jsonl_path(jsonl_path)
-        relative = Path(slug) / f"{session_id}.jsonl"
-        archived_path = archive_dir / relative
+        # SECURITY: session_id and slug come from UNTRUSTED transcript data. A
+        # crafted `sessionId` (`../../../tmp/x`, `/tmp/x`) would traverse out of or
+        # collapse the archive join — an arbitrary-file-write. Sanitize each to a
+        # single safe component (the slug has a fallback folder; an unsafe session
+        # id has no safe substitute, so skip + count it), then re-assert
+        # containment defensively. Any escape skips the session.
+        try:
+            slug = _safe_path_component(
+                _project_slug_from_jsonl_path(jsonl_path), allow_default="_backfilled"
+            )
+            safe_session_id = _safe_path_component(session_id)
+            relative = Path(slug) / f"{safe_session_id}.jsonl"
+            archived_path = archive_dir / relative
+            _assert_within_archive(archived_path, archive_dir)
+        except UnsafeArchivePathError:
+            stats.sessions_errored += 1
+            continue
         if archived_path.exists():
             stats.sessions_skipped_present += 1
             continue
