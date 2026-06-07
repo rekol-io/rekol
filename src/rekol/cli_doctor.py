@@ -374,34 +374,52 @@ def _check_archive(cfg: Config) -> list[Finding]:
 
     archive_dir = cfg.archive_dir
 
-    # Cloud-mount heuristic: is the resolved archive under a known sync root? We
-    # match on the path's STRING form (a path-segment substring), NOT relative_to
-    # against the real ``~`` candidates — a relocated archive can sit under a
-    # Dropbox/iCloud folder anywhere (an explicit REKOL_ARCHIVE_DIR, a non-home
-    # mount), so the segment name is the durable signal.
-    archive_str = str(archive_dir)
-    for label in default_cloud_sync_candidates():
-        # The candidate keys are display labels (e.g. "iCloud Drive"); match on the
-        # provider's folder name as it appears on disk, which is the label's first
-        # word (Dropbox / iCloud / Google / OneDrive) — enough to catch a relocated
-        # archive without false-positiving on unrelated paths.
-        provider_segment = label.split()[0]
-        if f"/{provider_segment}" in archive_str or f"{os.sep}{provider_segment}" in archive_str:
-            findings.append(
-                Finding(
-                    label="archive location",
-                    status=Status.PROBLEM,
-                    detail=(
-                        f"archive resolves under {label} ({archive_dir}) — a synced archive "
-                        f"puts verbatim transcripts (and any pasted secrets) in the cloud, and "
-                        f"on-demand sync can dehydrate files so a rebuild reads placeholders"
-                    ),
-                    remedy=(
-                        "move it local: set REKOL_ARCHIVE_DIR (or archive_dir) to a non-synced path"
-                    ),
-                )
-            )
+    # Cloud-mount heuristic: is the resolved archive under a known sync root? The
+    # matchable signal is the candidate's real PATH VALUE, NOT the display label's
+    # first word — iCloud Drive's on-disk path is
+    # ``~/Library/Mobile Documents/com~apple~CloudDocs``, which contains no
+    # "iCloud" segment, so the old label-word match silently missed it. We resolve
+    # the archive and test containment against each candidate path
+    # (``is_relative_to``); we ALSO test a set of on-disk segment signals (the
+    # iCloud container name; provider folder names) so a relocated archive that
+    # sits under such a folder ANYWHERE (an explicit REKOL_ARCHIVE_DIR off the home
+    # tree) is still caught.
+    resolved_archive = archive_dir.resolve()
+    cloud_label: str | None = None
+    for label, candidate in default_cloud_sync_candidates().items():
+        if resolved_archive.is_relative_to(candidate.resolve()):
+            cloud_label = label
             break
+    if cloud_label is None:
+        # Path-segment fallback for archives outside the home-tree candidates: the
+        # iCloud container + provider folder names as they appear on disk.
+        archive_parts = set(resolved_archive.parts)
+        cloud_segment_signals = {
+            "com~apple~CloudDocs": "iCloud Drive",
+            "Mobile Documents": "iCloud Drive",
+            "Dropbox": "Dropbox",
+            "Google Drive": "Google Drive",
+            "OneDrive": "OneDrive",
+        }
+        for segment, label in cloud_segment_signals.items():
+            if segment in archive_parts:
+                cloud_label = label
+                break
+    if cloud_label is not None:
+        findings.append(
+            Finding(
+                label="archive location",
+                status=Status.PROBLEM,
+                detail=(
+                    f"archive resolves under {cloud_label} ({archive_dir}) — a synced archive "
+                    f"puts verbatim transcripts (and any pasted secrets) in the cloud, and "
+                    f"on-demand sync can dehydrate files so a rebuild reads placeholders"
+                ),
+                remedy=(
+                    "move it local: set REKOL_ARCHIVE_DIR (or archive_dir) to a non-synced path"
+                ),
+            )
+        )
 
     if not archive_dir.exists():
         findings.append(
