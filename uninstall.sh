@@ -122,6 +122,46 @@ run() {
   fi
 }
 
+# Resolves a path to its canonical absolute form WITHOUT requiring it to exist.
+# `cd ... pwd -P` resolves symlinks but needs the dir to exist; for a possibly-
+# absent path we resolve the deepest existing ancestor and re-append the rest, so
+# the overlap check below works even when the archive dir was already removed.
+# Falls back to the input unchanged if nothing resolves.
+canonical_path() {
+  local target="$1"
+  [[ -n "$target" ]] || { printf '%s' ""; return 0; }
+  if [[ -d "$target" ]]; then
+    ( cd -- "$target" 2>/dev/null && pwd -P ) || printf '%s' "$target"
+    return 0
+  fi
+  local parent leaf
+  parent="$(dirname -- "$target")"
+  leaf="$(basename -- "$target")"
+  if [[ -d "$parent" ]]; then
+    local resolved_parent
+    resolved_parent="$( cd -- "$parent" 2>/dev/null && pwd -P )" || resolved_parent="$parent"
+    printf '%s/%s' "$resolved_parent" "$leaf"
+  else
+    printf '%s' "$target"
+  fi
+}
+
+# True (0) when two resolved paths OVERLAP: equal, or one contains the other.
+# Used to refuse a destructive `rm -rf` of the archive when it would also delete
+# (a subtree of) the markdown home. Compares canonical forms with a trailing-slash
+# guard so `/a/home` does NOT spuriously "contain" `/a/home-2`.
+paths_overlap() {
+  local a b
+  a="$(canonical_path "$1")"
+  b="$(canonical_path "$2")"
+  [[ -n "$a" && -n "$b" ]] || return 1
+  [[ "$a" == "$b" ]] && return 0
+  # a contains b (b is under a), or b contains a (a is under b).
+  [[ "$b" == "$a/"* ]] && return 0
+  [[ "$a" == "$b/"* ]] && return 0
+  return 1
+}
+
 # Asks a yes/no question (default no). Returns 0 for yes. Honours --yes
 # (auto-yes) and --dry-run (auto-no, since dry-run must change nothing). When
 # stdin is not a TTY and --yes was not given, defaults to no (the safe choice
@@ -569,7 +609,18 @@ fi
 # argue for cleanup, but "it's yours / no export in v1" means deletion is
 # irreversible — so prompt (or require --purge-archive), never silently nuke.
 # Markdown under $REKOL_HOME is never touched here either way.
-if [[ -n "$ARCHIVE_DIR" && -d "$ARCHIVE_DIR" ]]; then
+if [[ -n "$ARCHIVE_DIR" && -d "$ARCHIVE_DIR" ]] \
+   && [[ -n "$RESOLVED_HOME" ]] && paths_overlap "$ARCHIVE_DIR" "$RESOLVED_HOME"; then
+  # SECURITY: a misconfigured archive dir that equals/contains/is-contained-by the
+  # markdown home would make `rm -rf "${ARCHIVE_DIR}"` delete (a subtree of) the
+  # user's irreplaceable markdown memory. REFUSE to purge — markdown under
+  # $REKOL_HOME must never be deleted — and report it as a leftover so the user can
+  # relocate the archive and purge it deliberately.
+  say "REFUSING to purge the transcript archive ${ARCHIVE_DIR}: it overlaps your markdown home ${RESOLVED_HOME}."
+  say "  Deleting it would risk your markdown memory. Move the archive to a non-overlapping path (REKOL_ARCHIVE_DIR) and re-run with --purge-archive."
+  note_preserved "transcript archive ${ARCHIVE_DIR} (overlaps \$REKOL_HOME — not purged to protect markdown)"
+  note_leftover "transcript archive: ${ARCHIVE_DIR} overlaps \$REKOL_HOME; relocate it (REKOL_ARCHIVE_DIR) before purging"
+elif [[ -n "$ARCHIVE_DIR" && -d "$ARCHIVE_DIR" ]]; then
   if [[ "$PURGE_ARCHIVE" == "1" ]]; then
     say "removing transcript archive ${ARCHIVE_DIR} (--purge-archive)"
     run "rm -rf '${ARCHIVE_DIR}'"
