@@ -236,6 +236,37 @@ def test_archive_directory_matches_cwd_not_slug(tmp_path: Path) -> None:
     assert excluded.files_removed_excluded == 1
 
 
+# --- Robustness: non-UTF-8 transcript must not crash archive-sync (review) ---
+
+
+def test_read_cwd_from_non_utf8_does_not_crash(tmp_path: Path) -> None:
+    """`_read_cwd_from_jsonl` wraps the read in `except OSError`, but a non-UTF-8
+    transcript raises UnicodeDecodeError — which would escape and crash the whole
+    archive-sync (and the SessionEnd hook). It must return None instead."""
+    from rekol.sessions.archive import _read_cwd_from_jsonl
+
+    bad = tmp_path / "bad.jsonl"
+    # Invalid UTF-8 byte 0xff at the start of the file.
+    bad.write_bytes(b"\xff\xfe not valid utf-8\n")
+    assert _read_cwd_from_jsonl(bad) is None
+
+
+def test_archive_directory_survives_non_utf8_file_with_excludes(tmp_path: Path) -> None:
+    """With excludes on, archive_directory reads each file's cwd; a non-UTF-8 file
+    must be archived (fail-open), not crash the sync."""
+    live_root = tmp_path / "projects"
+    archive_dir = tmp_path / "archive"
+    bad = live_root / "projA" / "bad.jsonl"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"\xff\xfe garbage bytes\n")
+
+    # Excludes non-empty so the per-file cwd read runs.
+    stats = archive_directory(live_root, archive_dir, exclude_patterns=["*/never-matches*"])
+    # No crash; the unreadable-cwd file fails open and is archived.
+    assert stats.files_copied == 1
+    assert (archive_dir / "projA" / "bad.jsonl").exists()
+
+
 # --- Phase 4: backfill_from_index ---
 
 from rekol.sessions.archive import backfill_from_index  # noqa: E402

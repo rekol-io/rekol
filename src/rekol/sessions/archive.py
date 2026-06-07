@@ -276,9 +276,16 @@ def _read_cwd_from_jsonl(jsonl_path: Path) -> str | None:
     so a huge transcript is not slurped just to find it). Returns ``None`` when the
     file is unreadable or no row has a cwd — the caller then does NOT exclude it
     (fail-open: a missing cwd must not silently drop a session from the archive).
+
+    A non-UTF-8 transcript raises ``UnicodeDecodeError`` on read; we caught only
+    ``OSError`` before, so that escaped and crashed the whole archive-sync (and the
+    SessionEnd hook). We open with ``errors="replace"`` so a malformed byte becomes
+    U+FFFD rather than raising — the worst case is a garbled cwd that fails the
+    exclude match (fail-open), never a crash. ``UnicodeDecodeError`` is also caught
+    defensively in case a future change reintroduces strict decoding.
     """
     try:
-        with jsonl_path.open(encoding="utf-8") as handle:
+        with jsonl_path.open(encoding="utf-8", errors="replace") as handle:
             for line_number, raw_line in enumerate(handle):
                 if line_number >= 50:  # cwd is on the first row in practice
                     break
@@ -292,7 +299,7 @@ def _read_cwd_from_jsonl(jsonl_path: Path) -> str | None:
                 cwd = row.get("cwd")
                 if isinstance(cwd, str) and cwd:
                     return cwd
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return None
 
