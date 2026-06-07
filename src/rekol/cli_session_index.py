@@ -15,17 +15,14 @@ honours the ``files_seen`` skip.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 
 import click
 
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.embeddings import get_embedder
-from rekol.sessions.archive import (
-    BACKFILL_MARKER_FILENAME,
-    archive_directory,
-    backfill_from_index,
-)
+from rekol.sessions.archive import archive_directory, backfill_once
 from rekol.sessions.ingest import embed_missing, ingest_directory
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 
@@ -67,31 +64,30 @@ def _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progres
     return archive_dir
 
 
-def _maybe_backfill_once(cfg, archive_dir, store) -> None:
-    """Run the index→archive backfill exactly once on upgrade.
+def _backfill_once_soft_fail(cfg, archive_dir, store) -> None:
+    """Run the index→archive backfill exactly once on upgrade (soft-fail).
 
-    Guarded by ``archive/.backfilled-from-index``: if present, no-op. Otherwise
-    reconstruct any session that is in ``sessions.db`` but missing from the
-    archive (so history predating the archive isn't lost on a future rebuild),
-    write the marker, and emit ONE non-blocking notice line disclosing what we
-    did, where it lives, and the off-switch. Soft-fails on OSError.
+    Delegates to the hardened, tested ``archive.backfill_once`` (the marker guard
+    + before-the-run marker ordering live there) rather than duplicating that
+    logic here — this is purely the CLI-layer shell: soft-fail + the one-time
+    disclosure. When ``backfill_once`` returns non-``None`` with sessions
+    reconstructed, emit ONE non-blocking disclosure line (what we did, where it
+    lives, the off-switch).
+
+    SOFT-FAIL: the backfill step must NEVER crash the SessionEnd hook (exit 0 is
+    the contract). The old copy caught only ``OSError`` — but a corrupt/locked
+    ``sessions.db`` raises ``sqlite3.DatabaseError``, which escaped and crashed the
+    run. We catch ``(OSError, sqlite3.DatabaseError)`` and degrade to a logged
+    notice + continue. The next successful run retries (backfill is idempotent;
+    the marker is only written on a non-erroring run inside ``backfill_once``).
     """
-    marker = archive_dir / BACKFILL_MARKER_FILENAME
-    if marker.exists():
-        return
     exclude_patterns = list(cfg.exclude_paths) + load_rekolignore_patterns(cfg.claude_projects_dir)
     try:
-        # Touch the marker BEFORE the backfill. backfill is idempotent (skips
-        # already-present sessions), so writing the marker first guarantees the
-        # one-time notice fires exactly once even if the process is killed
-        # mid-backfill — a later sync finishes any leftover work. Marking only on
-        # success would re-run + re-notify on every run until one completes.
-        marker.touch()
-        stats = backfill_from_index(store, archive_dir, exclude_patterns)
-    except OSError as exc:
+        stats = backfill_once(store, archive_dir, exclude_patterns)
+    except (OSError, sqlite3.DatabaseError) as exc:
         click.echo(f"archive backfill degraded (non-fatal): {exc}", err=True)
         return
-    if stats.sessions_reconstructed > 0:
+    if stats is not None and stats.sessions_reconstructed > 0:
         # The one-time disclosure: default-ON honesty, no per-session nag.
         click.echo(
             f"rekol built a local archive of {stats.sessions_reconstructed} past "
@@ -196,7 +192,7 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             # when ingesting from the archive — a soft-failed sync (ingest_root
             # back on live) skips it, retrying next run.
             if cfg.archive_enabled and ingest_root == archive_dir:
-                _maybe_backfill_once(cfg, archive_dir, store)
+                _backfill_once_soft_fail(cfg, archive_dir, store)
             # --full forces re-walk even of unchanged files; default (incremental)
             # trusts files_seen mtime+size and skips matches. files_seen is keyed
             # on ingest_root's paths: the FIRST run after repointing to the archive
