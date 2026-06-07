@@ -338,6 +338,52 @@ def test_backfill_skips_sessions_already_archived(tmp_path: Path) -> None:
     assert stats.sessions_reconstructed == 0
 
 
+# --- Backfill-origin canonical must yield to the faithful live file (review) ---
+
+
+def test_live_faithful_replaces_backfill_origin_canonical(tmp_path: Path) -> None:
+    """A backfill writes a LOSSY (text-only) canonical. When the FAITHFUL live
+    file (with tool_use/thinking rows) later syncs, the faithful one must WIN —
+    become the canonical — not get demoted to a divergence sidecar while the lossy
+    reconstruction stays canonical."""
+    archive_dir = tmp_path / "archive"
+    store = _seed_store_with_session(tmp_path / "sessions.db")
+    try:
+        backfill_from_index(store, archive_dir, exclude_patterns=[])
+    finally:
+        store.close()
+    # The backfill produced a lossy canonical at <slug>/<session-id>.jsonl.
+    canonical = archive_dir / "projA" / "sess-1.jsonl"
+    assert canonical.exists()
+    lossy_text = canonical.read_text()
+
+    # Now the live faithful file appears. It carries the SAME logical messages but
+    # with interleaved tool_use/thinking rows and Claude Code's own field order, so
+    # it is NOT a byte-prefix of the lossy reconstruction — the naive copy-if-changed
+    # treats it as a divergence (compaction signature) and would sidecar it.
+    live = tmp_path / "projects" / "projA" / "sess-1.jsonl"
+    live.parent.mkdir(parents=True)
+    faithful_text = (
+        '{"parentUuid":null,"sessionId":"sess-1","type":"user","uuid":"u1",'
+        '"timestamp":"2026-05-01T10:00:00Z","cwd":"/Users/x/projA",'
+        '"message":{"role":"user","content":"how do I configure the proxy base_url"}}\n'
+        '{"parentUuid":"u1","sessionId":"sess-1","type":"assistant","uuid":"u2",'
+        '"timestamp":"2026-05-01T10:01:00Z","cwd":"/Users/x/projA",'
+        '"message":{"role":"assistant","content":[{"type":"thinking","thinking":"..."}]}}\n'
+    )
+    assert faithful_text != lossy_text  # sanity: the two byte streams differ
+    live.write_text(faithful_text, encoding="utf-8")
+
+    manifest = load_manifest(archive_dir)
+    key = "projA/sess-1.jsonl"
+    result = archive_file(live, canonical, manifest, manifest_key=key, archive_dir=archive_dir)
+    # The faithful file became the canonical; no sidecar demotion.
+    assert result.action != "diverged_sidecar"
+    assert canonical.read_text() == faithful_text
+    sidecars = [p for p in canonical.parent.glob("sess-1.*.jsonl")]
+    assert sidecars == []
+
+
 # --- Phase 4: one-time marker-guarded backfill (architect-review ordering fix) ---
 
 from rekol.sessions.archive import BACKFILL_MARKER_FILENAME, backfill_once  # noqa: E402
