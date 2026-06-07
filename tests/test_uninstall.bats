@@ -551,3 +551,35 @@ manifest_index_dir() {
     [ -f "${REKOLH}/always/identity.md" ]
     grep -q "my precious memory" "${REKOLH}/always/identity.md"
 }
+
+# SECURITY: a misconfigured REKOL_ARCHIVE_DIR that EQUALS $REKOL_HOME would make
+# `rm -rf "${ARCHIVE_DIR}"` delete the entire markdown memory home. --purge-archive
+# must REFUSE to purge when the resolved archive overlaps the resolved home, and
+# report it as a leftover instead. Markdown must survive.
+@test "uninstall --purge-archive refuses when archive equals REKOL_HOME" {
+    do_full_install
+    # Point the archive AT the markdown home itself (the worst overlap).
+    export REKOL_ARCHIVE_DIR="${REKOLH}"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    # The markdown home (and its contents) MUST still exist.
+    [ -d "${REKOLH}" ]
+    [ -f "${REKOLH}/always/identity.md" ]
+    grep -q "my precious memory" "${REKOLH}/always/identity.md"
+}
+
+# A second overlap shape: the archive sits INSIDE the markdown home, so
+# `rm -rf` would delete a subtree of the user's markdown. Same refusal.
+@test "uninstall --purge-archive refuses when archive is inside REKOL_HOME" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${REKOLH}/topics"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    # The markdown subtree under the home must survive (never rm'd).
+    [ -f "${REKOLH}/topics/sailing.md" ]
+    [ -f "${REKOLH}/always/identity.md" ]
+}
