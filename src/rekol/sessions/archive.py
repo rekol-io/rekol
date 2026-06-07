@@ -225,8 +225,42 @@ def _remove_now_excluded_from_archive(
     manifest: dict[str, dict[str, int]],
     stats: ArchiveStats,
 ) -> None:
-    """Placeholder — real retroactive-removal logic lands in Task 3.2."""
-    return
+    """Remove already-archived files (and sidecars) that now match an exclude.
+
+    The retroactive half of the exclude slice. Because the archive is flat files
+    in rekol's OWN folder, a retroactive delete here is safe (unlike the index,
+    where a destructive purge is deferred). We glob the archive, test each file's
+    REAL cwd against the excludes, ``unlink`` matches, and drop the manifest entry
+    so a later un-exclude re-copies cleanly.
+
+    EXCLUDE MATCHES THE REAL cwd, NOT the slug — symmetric with the forward skip in
+    :func:`archive_directory`. We read each archived file's ``cwd`` (the project
+    path the user worked in) and match against THAT, never the URL-encoded folder
+    name on disk, so a pattern like ``*/secret/*`` removes the right sessions. A
+    file whose cwd cannot be read is left in place (fail-open: never delete on a
+    read error).
+
+    SOFT-FAIL: an ``OSError`` removing one file is swallowed (counted nowhere —
+    the next sync retries); we never abort the sweep.
+    """
+    if not exclude_patterns:
+        return
+    if not archive_dir.is_dir():
+        return
+    for archived_path in sorted(archive_dir.glob("**/*.jsonl")):
+        archived_cwd = _read_cwd_from_jsonl(archived_path)
+        if not archived_cwd or not path_is_excluded(archived_cwd, exclude_patterns):
+            continue
+        try:
+            archived_path.unlink()
+        except OSError:
+            # Best-effort: a file we cannot remove now is retried next sync.
+            continue
+        stats.files_removed_excluded += 1
+        # Drop the manifest entry (keyed by the live-relative path) so a later
+        # un-exclude triggers a fresh copy rather than a false "unchanged" skip.
+        manifest_key = str(archived_path.relative_to(archive_dir))
+        manifest.pop(manifest_key, None)
 
 
 def archive_directory(
