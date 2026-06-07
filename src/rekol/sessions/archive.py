@@ -40,6 +40,20 @@ MANIFEST_FILENAME = ".manifest.json"
 # index on upgrade", so the auto-once backfill never re-runs.
 BACKFILL_MARKER_FILENAME = ".backfilled-from-index"
 
+# Manifest "origin" values. A backfill-reconstructed canonical is LOSSY (text-only;
+# the DB never stored tool_use/thinking rows). When the FAITHFUL live file later
+# syncs it is a superset that the byte-prefix test cannot recognize (different
+# field order / interleaved rows), so without an origin tag the faithful copy would
+# be demoted to a divergence sidecar while the lossy one stays canonical. Tagging
+# origin lets archive_file REPLACE a backfill-origin canonical with the live file.
+ORIGIN_BACKFILL = "backfill"
+ORIGIN_LIVE = "live"
+
+# A manifest value records the last-archived mtime+size (ints) and the canonical's
+# origin (a str). Mixed value types, so the value mapping is str -> (int | str).
+ManifestValue = dict[str, int | str]
+Manifest = dict[str, ManifestValue]
+
 
 class UnsafeArchivePathError(ValueError):
     """Raised when an archive path component or target would escape the root.
@@ -101,7 +115,7 @@ def _assert_within_archive(archived_path: Path, archive_dir: Path) -> Path:
     return resolved
 
 
-def load_manifest(archive_dir: Path) -> dict[str, dict[str, int]]:
+def load_manifest(archive_dir: Path) -> Manifest:
     """Read the archive manifest, or ``{}`` when absent/corrupt.
 
     A missing or corrupt manifest degrades to an empty mapping rather than
@@ -122,7 +136,7 @@ def load_manifest(archive_dir: Path) -> dict[str, dict[str, int]]:
     return loaded
 
 
-def save_manifest(archive_dir: Path, manifest: dict[str, dict[str, int]]) -> None:
+def save_manifest(archive_dir: Path, manifest: Manifest) -> None:
     """Atomically write the archive manifest.
 
     Writes to a temp file in the same dir then ``os.replace``s it, so a crash
@@ -142,8 +156,10 @@ class ArchiveFileResult:
 
     ``action`` is one of: ``copied`` (no prior archive), ``skipped_unchanged``
     (manifest mtime+size match), ``replaced_append`` (live grew, archived was a
-    true prefix), ``diverged_sidecar`` (live shorter/diverged — kept both copies
-    via a sidecar). ``sidecar_path`` is set only for ``diverged_sidecar``.
+    true prefix), ``replaced_backfill`` (archived was a lossy backfill canonical,
+    replaced by the faithful live file), ``diverged_sidecar`` (live
+    shorter/diverged — kept both copies via a sidecar). ``sidecar_path`` is set
+    only for ``diverged_sidecar``.
     """
 
     action: str
@@ -186,7 +202,7 @@ def _divergence_sidecar_path(archived_path: Path, live_path: Path) -> Path:
 def archive_file(
     live_path: Path,
     archived_path: Path,
-    manifest: dict[str, dict[str, int]],
+    manifest: Manifest,
     *,
     manifest_key: str,
     archive_dir: Path | None = None,
@@ -196,10 +212,21 @@ def archive_file(
     Mutates ``manifest[manifest_key]`` in place on copy/replace (caller persists
     it once per directory). The five cases (see module docstring + design):
 
-    * no archived copy             -> copy, record manifest
+    * no archived copy             -> copy, record manifest (origin=live)
     * unchanged (mtime+size match)  -> skip
     * live grew, archived is prefix -> replace (normal append), record manifest
+    * archived is a BACKFILL canonical -> replace with the faithful live file
     * live shorter / not a prefix   -> keep archive, write divergence sidecar
+
+    BACKFILL-ORIGIN REPLACEMENT (review fix): a backfill canonical is LOSSY (the
+    DB never stored tool_use/thinking rows). When the faithful live file syncs it
+    is a superset the byte-prefix test cannot recognize (Claude Code's field order
+    / interleaved rows differ), so without this it would be demoted to a divergence
+    sidecar while the lossy reconstruction stays canonical — the WRONG file wins.
+    When the existing manifest entry marks the canonical as ``origin=backfill``, we
+    REPLACE it wholesale with the live file (and retag it ``origin=live``) so the
+    faithful copy wins. A later append/divergence is then handled normally against
+    the now-live canonical.
 
     When ``archive_dir`` is given, every write target (the canonical archived path
     AND the divergence sidecar) is re-validated to stay under it via
@@ -219,7 +246,11 @@ def archive_file(
     if not archived_path.exists():
         archived_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(live_path, archived_path)
-        manifest[manifest_key] = {"mtime_unix": live_mtime, "size_bytes": live_size}
+        manifest[manifest_key] = {
+            "mtime_unix": live_mtime,
+            "size_bytes": live_size,
+            "origin": ORIGIN_LIVE,
+        }
         return ArchiveFileResult(action="copied")
 
     recorded = manifest.get(manifest_key)
@@ -234,8 +265,23 @@ def archive_file(
     if _archived_is_prefix_of_live(archived_path, live_path):
         # Normal append: the archived copy is an earlier prefix; replace wholesale.
         shutil.copy2(live_path, archived_path)
-        manifest[manifest_key] = {"mtime_unix": live_mtime, "size_bytes": live_size}
+        manifest[manifest_key] = {
+            "mtime_unix": live_mtime,
+            "size_bytes": live_size,
+            "origin": ORIGIN_LIVE,
+        }
         return ArchiveFileResult(action="replaced_append")
+
+    if recorded is not None and recorded.get("origin") == ORIGIN_BACKFILL:
+        # The canonical is a lossy backfill reconstruction; the faithful live file
+        # (a superset the prefix test can't see) must WIN, not be sidecar-demoted.
+        shutil.copy2(live_path, archived_path)
+        manifest[manifest_key] = {
+            "mtime_unix": live_mtime,
+            "size_bytes": live_size,
+            "origin": ORIGIN_LIVE,
+        }
+        return ArchiveFileResult(action="replaced_backfill")
 
     # Divergence (compaction/rewrite): live is shorter or not a prefix. NEVER
     # overwrite — keep the existing archive and write the new version beside it.
@@ -307,7 +353,7 @@ def _read_cwd_from_jsonl(jsonl_path: Path) -> str | None:
 def _remove_now_excluded_from_archive(
     archive_dir: Path,
     exclude_patterns: list[str],
-    manifest: dict[str, dict[str, int]],
+    manifest: Manifest,
     stats: ArchiveStats,
 ) -> None:
     """Remove already-archived files (and sidecars) that now match an exclude.
@@ -418,7 +464,9 @@ def archive_directory(
             continue
         if result.action == "copied":
             stats.files_copied += 1
-        elif result.action == "replaced_append":
+        elif result.action in ("replaced_append", "replaced_backfill"):
+            # Both are "the live file replaced the canonical" — a backfill
+            # replacement is just the lossy-canonical-yields-to-faithful case.
             stats.files_replaced += 1
         elif result.action == "skipped_unchanged":
             stats.files_skipped_unchanged += 1
@@ -553,9 +601,13 @@ def backfill_from_index(
             stats.sessions_errored += 1
             continue
         archived_stat = archived_path.stat()
+        # Tag origin=backfill so a later faithful live sync REPLACES this lossy
+        # canonical (see archive_file's backfill-origin replacement) rather than
+        # demoting the faithful copy to a divergence sidecar.
         manifest[str(relative)] = {
             "mtime_unix": int(archived_stat.st_mtime),
             "size_bytes": int(archived_stat.st_size),
+            "origin": ORIGIN_BACKFILL,
         }
         stats.sessions_reconstructed += 1
     save_manifest(archive_dir, manifest)
