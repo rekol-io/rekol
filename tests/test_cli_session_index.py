@@ -20,7 +20,9 @@ def _setup_home(tmp_path: Path, monkeypatch) -> Path:
     """Create a memory home with a fake projects dir holding the fixture.
 
     Uses the ``test-hashing`` embedder so the embedding path runs without
-    loading the real sentence-transformers model.
+    loading the real sentence-transformers model. The transcript archive
+    (default-ON) is isolated to a throwaway dir by the autouse conftest fixture
+    (``XDG_DATA_HOME``), so these tests never touch the real machine archive.
     """
     home = tmp_path / "memhome"
     home.mkdir()
@@ -60,17 +62,28 @@ def test_session_index_incremental_is_idempotent(tmp_path: Path, monkeypatch) ->
     projects.mkdir(parents=True)
     shutil.copy(FIXTURE, projects / "session.jsonl")
 
+    # Archive on, pointed at a hermetic tmp dir so the test never writes a real
+    # archive. The repoint means ingest reads from here, so files_seen is keyed on
+    # the ARCHIVE path — the second incremental run must still skip it (self-heal).
+    archive = tmp_path / "archive"
     monkeypatch.setenv("MEMORY_HOME", str(home))
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(archive))
     (home / "memory.config.yaml").write_text(
-        f"claude_projects_dir: {projects.parent}\nembedding_model: test-hashing\n"
+        f"claude_projects_dir: {projects.parent}\n"
+        "embedding_model: test-hashing\n"
+        "archive_enabled: true\n"
     )
 
     runner = CliRunner()
     setup_result = runner.invoke(cli_main, ["--full"])
     assert setup_result.exit_code == 0, setup_result.output
+    # The session was archived and (after --full) re-keyed in files_seen by its
+    # archive path.
+    assert (archive / "proj-a" / "session.jsonl").exists()
+
     result = runner.invoke(cli_main, ["--incremental"])
     assert result.exit_code == 0, result.output
-    # Incremental with mtime-skip should NOT touch the file at all
+    # Incremental against the archive-keyed files_seen → mtime+size skip, no inserts.
     assert "messages_inserted=0" in result.output
     assert "files_skipped_unchanged=1" in result.output
 
