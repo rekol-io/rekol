@@ -101,3 +101,49 @@ def test_archive_file_sidecar_is_idempotent(tmp_path: Path) -> None:
     archive_file(live, archived, manifest, manifest_key="sess.jsonl")
     sidecars = list(archived.parent.glob("sess.*.jsonl"))
     assert len(sidecars) == 1  # same content → same shorthash → one sidecar
+
+
+from rekol.sessions.archive import archive_directory  # noqa: E402
+
+
+def test_archive_directory_copies_all_then_skips_on_rerun(tmp_path: Path) -> None:
+    live_root = tmp_path / "projects"
+    archive_dir = tmp_path / "archive"
+    _write(live_root / "projA" / "s1.jsonl", "a\n")
+    _write(live_root / "projB" / "s2.jsonl", "b\n")
+
+    first = archive_directory(live_root, archive_dir, exclude_patterns=[])
+    assert first.files_copied == 2
+    assert first.files_skipped_unchanged == 0
+    # Mirror layout is preserved under the archive root.
+    assert (archive_dir / "projA" / "s1.jsonl").read_text() == "a\n"
+    assert (archive_dir / "projB" / "s2.jsonl").read_text() == "b\n"
+
+    # Re-run with nothing changed → all skipped via the manifest.
+    second = archive_directory(live_root, archive_dir, exclude_patterns=[])
+    assert second.files_copied == 0
+    assert second.files_skipped_unchanged == 2
+
+
+def test_archive_directory_counts_os_errors_without_aborting(tmp_path: Path, monkeypatch) -> None:
+    """One unreadable file must not abort the whole sync: it is counted in
+    files_errored and the rest still archive."""
+    live_root = tmp_path / "projects"
+    archive_dir = tmp_path / "archive"
+    _write(live_root / "good.jsonl", "ok\n")
+    _write(live_root / "bad.jsonl", "boom\n")
+
+    import rekol.sessions.archive as archive_mod
+
+    real_archive_file = archive_mod.archive_file
+
+    def flaky(live_path, archived_path, manifest, *, manifest_key):
+        if live_path.name == "bad.jsonl":
+            raise OSError("simulated unreadable file")
+        return real_archive_file(live_path, archived_path, manifest, manifest_key=manifest_key)
+
+    monkeypatch.setattr(archive_mod, "archive_file", flaky)
+    stats = archive_directory(live_root, archive_dir, exclude_patterns=[])
+    assert stats.files_copied == 1
+    assert stats.files_errored == 1
+    assert (archive_dir / "good.jsonl").read_text() == "ok\n"

@@ -24,6 +24,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from rekol.config import path_is_excluded
+
 # Manifest file name (hidden, inside the archive root). Maps a live-relative
 # path -> {"mtime_unix": int, "size_bytes": int} recorded at last archive.
 MANIFEST_FILENAME = ".manifest.json"
@@ -167,3 +169,132 @@ def archive_file(
     # Intentionally do NOT update the manifest key here: the canonical archived
     # file is unchanged, and the sidecar is found by ingest's directory glob.
     return ArchiveFileResult(action="diverged_sidecar", sidecar_path=sidecar_path)
+
+
+@dataclass
+class ArchiveStats:
+    """Tally of an ``archive_directory`` reconcile run."""
+
+    files_seen: int = 0
+    files_copied: int = 0
+    files_replaced: int = 0
+    files_skipped_unchanged: int = 0
+    files_skipped_excluded: int = 0  # live file matched an exclude -> never archived
+    files_diverged_sidecar: int = 0  # compaction/rewrite -> kept both copies
+    files_removed_excluded: int = 0  # already-archived file now matches an exclude -> rm'd
+    files_errored: int = 0  # OSError on one file; counted, sync continues
+
+
+def _read_cwd_from_jsonl(jsonl_path: Path) -> str | None:
+    """Read the session's REAL cwd from the first message row that carries one.
+
+    The exclude matcher must run against the project path the user actually worked
+    in (e.g. ``/Users/x/secret``), NOT Claude Code's URL-encoded folder slug
+    (``-Users-x-secret``) — otherwise a natural pattern like ``*/secret/*`` would
+    silently never match the on-disk path. Every Claude Code transcript row carries
+    a ``cwd`` field, so we scan from the top and return the first non-empty one.
+
+    Reads only the first few lines (the cwd is on row 1 in practice; we cap the scan
+    so a huge transcript is not slurped just to find it). Returns ``None`` when the
+    file is unreadable or no row has a cwd — the caller then does NOT exclude it
+    (fail-open: a missing cwd must not silently drop a session from the archive).
+    """
+    try:
+        with jsonl_path.open(encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle):
+                if line_number >= 50:  # cwd is on the first row in practice
+                    break
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    row = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                cwd = row.get("cwd")
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
+def _remove_now_excluded_from_archive(
+    archive_dir: Path,
+    exclude_patterns: list[str],
+    manifest: dict[str, dict[str, int]],
+    stats: ArchiveStats,
+) -> None:
+    """Placeholder — real retroactive-removal logic lands in Task 3.2."""
+    return
+
+
+def archive_directory(
+    live_root: Path,
+    archive_dir: Path,
+    exclude_patterns: list[str],
+) -> ArchiveStats:
+    """Reconcile the archive to ``(live ∩ not-excluded)``.
+
+    Walks every ``*.jsonl`` under ``live_root`` (typically
+    ``~/.claude/projects``), and for each non-excluded file runs the
+    copy-if-changed primitive (:func:`archive_file`). Then it sweeps the archive
+    for files that now match an exclude and removes them (the safe retroactive
+    flat-file delete — see exclude slice).
+
+    EXCLUDE MATCHES THE REAL cwd, NOT the slug. The forward skip reads the first
+    message row's ``cwd`` from each ``.jsonl`` (the project path the user actually
+    worked in, e.g. ``/Users/x/secret``) and matches ``exclude_patterns`` against
+    THAT — never against Claude Code's URL-encoded folder name
+    (``-Users-x-secret``), which would make a natural pattern like ``*/secret/*``
+    silently never match. This is symmetric with the retroactive removal and the
+    backfill, which also match the real cwd. ``.rekolignore`` patterns are merged
+    in by the caller (``cli_archive`` / ``cli_session_index``) before calling this,
+    so this function takes a single already-combined pattern list.
+
+    SOFT-FAIL: an ``OSError`` on one file is caught, counted in
+    ``files_errored``, and the walk continues — one bad file never aborts the
+    sync. The manifest is persisted once at the end (after all copies).
+
+    Returns the :class:`ArchiveStats` tally.
+    """
+    stats = ArchiveStats()
+    manifest = load_manifest(archive_dir)
+    live_root = Path(live_root)
+
+    for live_path in sorted(live_root.glob("**/*.jsonl")):
+        stats.files_seen += 1
+        # manifest_key / archive layout mirror the live tree relative to root.
+        relative = live_path.relative_to(live_root)
+        manifest_key = str(relative)
+        # Exclude on the session's REAL cwd (read from the file), NOT the slug-
+        # encoded path on disk — so a pattern like `*/secret/*` matches the project
+        # the user worked in. A file with no readable cwd is never excluded here
+        # (it falls through to archiving; an unreadable file is caught below). Only
+        # read the cwd when there ARE excludes — otherwise every sync would pay a
+        # per-file read for nothing (the common no-exclude case stays cheap).
+        if exclude_patterns:
+            session_cwd = _read_cwd_from_jsonl(live_path)
+            if session_cwd and path_is_excluded(session_cwd, exclude_patterns):
+                stats.files_skipped_excluded += 1
+                continue
+        archived_path = archive_dir / relative
+        try:
+            result = archive_file(live_path, archived_path, manifest, manifest_key=manifest_key)
+        except OSError:
+            # One unreadable/unwritable file must not abort the run; the next
+            # successful sync catches it (copy-if-changed is idempotent).
+            stats.files_errored += 1
+            continue
+        if result.action == "copied":
+            stats.files_copied += 1
+        elif result.action == "replaced_append":
+            stats.files_replaced += 1
+        elif result.action == "skipped_unchanged":
+            stats.files_skipped_unchanged += 1
+        elif result.action == "diverged_sidecar":
+            stats.files_diverged_sidecar += 1
+
+    _remove_now_excluded_from_archive(archive_dir, exclude_patterns, manifest, stats)
+    save_manifest(archive_dir, manifest)
+    return stats
