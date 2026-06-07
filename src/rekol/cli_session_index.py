@@ -19,10 +19,87 @@ import sys
 
 import click
 
-from rekol.config import load_config
+from rekol.config import load_config, load_rekolignore_patterns
 from rekol.embeddings import get_embedder
+from rekol.sessions.archive import (
+    BACKFILL_MARKER_FILENAME,
+    archive_directory,
+    backfill_from_index,
+)
 from rekol.sessions.ingest import embed_missing, ingest_directory
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
+
+# NOTE: do NOT import index_write_lock here. `session-index` writes `sessions.db`,
+# a separate database from the curated `index.db`; the curated `index_write_lock`
+# (#24/#25) must not be reused — it would hang the SessionEnd hook behind a curated
+# rebuild and couple two independent subsystems. `sessions.db` concurrency is the
+# DB's own WAL + 30s `busy_timeout`; archive-sync writes idempotent flat files.
+# (See the design's "Locking" section. A dedicated `.session-index.lock` is YAGNI
+# for v1.)
+
+
+def _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progress):
+    """Archive-sync the live projects dir, returning the dir ingest should read.
+
+    When the archive is on, copy-if-changed the live transcripts into the durable
+    archive and return the ARCHIVE dir, so a rebuild stays lossless even if Claude
+    Code deleted the live originals (#8). On ``OSError`` (disk full, unwritable
+    dir) this SOFT-FAILS: it logs a non-fatal notice and returns the LIVE projects
+    dir, degrading to today's behavior — archiving must never block indexing. With
+    the archive off, it simply returns the live dir.
+    """
+    if not cfg.archive_enabled:
+        return projects_root
+    exclude_patterns = list(cfg.exclude_paths) + load_rekolignore_patterns(projects_root)
+    try:
+        archive_stats = archive_directory(projects_root, archive_dir, exclude_patterns)
+    except OSError as exc:
+        # SOFT-FAIL: archiving must never block indexing. Fall back to live.
+        click.echo(f"archive-sync degraded (non-fatal): {exc}; ingesting from live", err=True)
+        return projects_root
+    if progress:
+        click.echo(
+            f"... archived files_copied={archive_stats.files_copied} "
+            f"files_replaced={archive_stats.files_replaced} "
+            f"files_diverged_sidecar={archive_stats.files_diverged_sidecar}",
+            err=True,
+        )
+    return archive_dir
+
+
+def _maybe_backfill_once(cfg, archive_dir, store) -> None:
+    """Run the index→archive backfill exactly once on upgrade.
+
+    Guarded by ``archive/.backfilled-from-index``: if present, no-op. Otherwise
+    reconstruct any session that is in ``sessions.db`` but missing from the
+    archive (so history predating the archive isn't lost on a future rebuild),
+    write the marker, and emit ONE non-blocking notice line disclosing what we
+    did, where it lives, and the off-switch. Soft-fails on OSError.
+    """
+    marker = archive_dir / BACKFILL_MARKER_FILENAME
+    if marker.exists():
+        return
+    exclude_patterns = list(cfg.exclude_paths) + load_rekolignore_patterns(cfg.claude_projects_dir)
+    try:
+        # Touch the marker BEFORE the backfill. backfill is idempotent (skips
+        # already-present sessions), so writing the marker first guarantees the
+        # one-time notice fires exactly once even if the process is killed
+        # mid-backfill — a later sync finishes any leftover work. Marking only on
+        # success would re-run + re-notify on every run until one completes.
+        marker.touch()
+        stats = backfill_from_index(store, archive_dir, exclude_patterns)
+    except OSError as exc:
+        click.echo(f"archive backfill degraded (non-fatal): {exc}", err=True)
+        return
+    if stats.sessions_reconstructed > 0:
+        # The one-time disclosure: default-ON honesty, no per-session nag.
+        click.echo(
+            f"rekol built a local archive of {stats.sessions_reconstructed} past "
+            f"session(s) so they're not lost — at {archive_dir}. "
+            f"It's on your disk, never uploaded. Turn it off with "
+            f"`archive_enabled: false` in rekol.config.yaml.",
+            err=True,
+        )
 
 
 @click.command()
@@ -89,6 +166,19 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
 
         progress_cb = _emit_progress
 
+    # Determine where ingest reads FROM. With the archive on, we archive-sync the
+    # live projects dir into the durable archive, then ingest from the ARCHIVE —
+    # so a rebuild is lossless even if Claude Code deleted the live originals
+    # (#8). If archiving soft-fails (OSError), we degrade to ingesting from live
+    # (today's behavior); the next successful run catches up.
+    archive_dir = cfg.archive_dir
+    ingest_root = _sync_archive_then_pick_ingest_root(cfg, projects_root, archive_dir, progress)
+
+    # NO LOCK around this block: sessions.db is a separate DB from the curated
+    # index.db, so the curated index_write_lock (#24/#25) is NOT reused — it would
+    # hang the SessionEnd hook behind a curated rebuild for no correctness benefit.
+    # sessions.db concurrency is its own WAL + busy_timeout (set in SessionStore);
+    # archive-sync above writes idempotent flat files. See the design's "Locking".
     repaired = 0
     try:
         with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
@@ -100,10 +190,21 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             # blocked by an existing index's width.
             if embedder is not None:
                 store.reconcile_embedding_dim(embedder.dim)
+            # Auto-once backfill: if the archive is on and we have never
+            # backfilled, reconstruct any indexed-but-unarchived sessions so
+            # nothing predating the archive is lost. Marker guards re-runs. Only
+            # when ingesting from the archive — a soft-failed sync (ingest_root
+            # back on live) skips it, retrying next run.
+            if cfg.archive_enabled and ingest_root == archive_dir:
+                _maybe_backfill_once(cfg, archive_dir, store)
             # --full forces re-walk even of unchanged files; default (incremental)
-            # trusts files_seen mtime+size and skips matches.
+            # trusts files_seen mtime+size and skips matches. files_seen is keyed
+            # on ingest_root's paths: the FIRST run after repointing to the archive
+            # re-walks once (keys differ from the old live paths), all dedupe-
+            # skipped via UNIQUE(session_id, message_uuid); the mtime skip then
+            # self-heals on the next run. Benign, documented in the design.
             stats = ingest_directory(
-                projects_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
+                ingest_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
             )
             # FTS-at-build (C5): a --full reingest is the authoritative "make the
             # index correct" path, so rebuild the external-content FTS5 index from
