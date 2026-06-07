@@ -254,3 +254,41 @@ def test_doctor_does_not_crash_on_missing_session_index(tmp_path: Path, monkeypa
     assert result.exit_code == 0, result.output
     assert "session index" in result.output
     assert "healthy" in result.output
+
+
+# ----------------------------- archive health ------------------------------
+
+
+def test_doctor_reports_archive_present(tmp_path, monkeypatch):
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(tmp_path / "archive"))
+    (tmp_path / "archive" / "projA").mkdir(parents=True)
+    (tmp_path / "archive" / "projA" / "s.jsonl").write_text('{"type":"user"}\n')
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    archive_findings = [f for f in findings if "archive" in f.label]
+    assert archive_findings, [f.label for f in findings]
+    detail = " ".join(f.detail for f in archive_findings)
+    assert "1" in detail  # one archived session counted
+
+
+def test_doctor_warns_on_cloud_synced_archive(tmp_path, monkeypatch):
+    """A synced archive puts verbatim secrets in the cloud and on-demand sync can
+    dehydrate files — doctor must flag it (PROBLEM/warn), not stay silent."""
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    cloud = tmp_path / "Dropbox" / "rekol-archive"
+    cloud.mkdir(parents=True)
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(cloud))
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    detail = " ".join(f.detail.lower() for f in findings)
+    assert "cloud" in detail or "sync" in detail

@@ -19,6 +19,7 @@ the whole point is to be the tool you reach for when things look broken.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ import click
 
 from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
+from rekol.onboarding.detect import default_cloud_sync_candidates
 from rekol.sessions.store import SessionStore
 from rekol.store import CURATED_SCHEMA_VERSION, IndexModelMismatchError, IndexStore
 
@@ -350,6 +352,94 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     return findings
 
 
+def _check_archive(cfg: Config) -> list[Finding]:
+    """Inspect the durable transcript archive: presence, writability, count, age.
+
+    Also emits a SECURITY warning when the archive resolves under a cloud-sync
+    mount. The archive holds verbatim prompts (and any pasted secrets). The default is a
+    local, non-synced dir; if a user relocated it under Dropbox/iCloud/Drive/
+    OneDrive, on-demand/streaming sync can dehydrate files (a rebuild then reads
+    placeholders) AND the secrets leave the machine. We flag that loudly.
+    """
+    findings: list[Finding] = []
+    if not cfg.archive_enabled:
+        findings.append(
+            Finding(
+                label="transcript archive",
+                status=Status.INFO,
+                detail="archive_enabled=false (durable archive off; rebuilds read live only)",
+            )
+        )
+        return findings
+
+    archive_dir = cfg.archive_dir
+
+    # Cloud-mount heuristic: is the resolved archive under a known sync root? We
+    # match on the path's STRING form (a path-segment substring), NOT relative_to
+    # against the real ``~`` candidates — a relocated archive can sit under a
+    # Dropbox/iCloud folder anywhere (an explicit REKOL_ARCHIVE_DIR, a non-home
+    # mount), so the segment name is the durable signal.
+    archive_str = str(archive_dir)
+    for label in default_cloud_sync_candidates():
+        # The candidate keys are display labels (e.g. "iCloud Drive"); match on the
+        # provider's folder name as it appears on disk, which is the label's first
+        # word (Dropbox / iCloud / Google / OneDrive) — enough to catch a relocated
+        # archive without false-positiving on unrelated paths.
+        provider_segment = label.split()[0]
+        if f"/{provider_segment}" in archive_str or f"{os.sep}{provider_segment}" in archive_str:
+            findings.append(
+                Finding(
+                    label="archive location",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"archive resolves under {label} ({archive_dir}) — a synced archive "
+                        f"puts verbatim transcripts (and any pasted secrets) in the cloud, and "
+                        f"on-demand sync can dehydrate files so a rebuild reads placeholders"
+                    ),
+                    remedy=(
+                        "move it local: set REKOL_ARCHIVE_DIR (or archive_dir) to a non-synced path"
+                    ),
+                )
+            )
+            break
+
+    if not archive_dir.exists():
+        findings.append(
+            Finding(
+                label="transcript archive",
+                status=Status.INFO,
+                detail=f"not built yet (no {archive_dir})",
+                remedy="rekol archive",
+            )
+        )
+        return findings
+
+    # Count archived sessions (flat .jsonl files) and find the newest mtime.
+    archived = list(archive_dir.glob("**/*.jsonl"))
+    newest_mtime: int | None = None
+    for path in archived:
+        try:
+            mtime = int(path.stat().st_mtime)
+        except OSError:
+            continue
+        if newest_mtime is None or mtime > newest_mtime:
+            newest_mtime = mtime
+    writable = os.access(archive_dir, os.W_OK)
+    findings.append(
+        Finding(
+            label="transcript archive",
+            status=Status.OK if writable else Status.PROBLEM,
+            detail=(
+                f"{len(archived)} archived session file(s) at {archive_dir}; "
+                f"last archived {_format_last_indexed(newest_mtime)}; "
+                f"{'writable' if writable else 'NOT writable'}"
+            ),
+            remedy=None if writable else "fix permissions on the archive dir, or relocate it",
+        )
+    )
+    return findings
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -366,6 +456,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
     ]
     findings.extend(_check_curated_index(cfg, embedder))
     findings.extend(_check_session_index(cfg, embedder))
+    findings.extend(_check_archive(cfg))
     return DoctorReport(findings=findings)
 
 
