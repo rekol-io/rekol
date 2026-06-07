@@ -23,8 +23,15 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rekol.config import path_is_excluded
+
+if TYPE_CHECKING:
+    # Imported only for typing: the backfill receives an already-open SessionStore
+    # and only reads it, so we keep this module DB-free at runtime (no hard import
+    # of the sqlite layer at module load — a bug there can never load via archive).
+    from rekol.sessions.store import SessionStore
 
 # Manifest file name (hidden, inside the archive root). Maps a live-relative
 # path -> {"mtime_unix": int, "size_bytes": int} recorded at last archive.
@@ -331,4 +338,193 @@ def archive_directory(
 
     _remove_now_excluded_from_archive(archive_dir, exclude_patterns, manifest, stats)
     save_manifest(archive_dir, manifest)
+    return stats
+
+
+@dataclass
+class BackfillStats:
+    """Tally of a ``backfill_from_index`` run."""
+
+    sessions_seen: int = 0
+    sessions_reconstructed: int = 0
+    sessions_skipped_present: int = 0  # already had an archive file
+    sessions_skipped_excluded: int = 0
+    sessions_errored: int = 0
+
+
+def _project_slug_from_jsonl_path(jsonl_path: str | None) -> str:
+    """Derive the archive sub-folder for a reconstructed session.
+
+    Mirrors how the live tree is laid out under ``~/.claude/projects/<slug>/``.
+    Uses the parent directory name of the original jsonl path; falls back to
+    ``_backfilled`` when the path is missing or has no usable parent, so a
+    reconstructed file always has a home.
+    """
+    # WHY parent-dir-name: this assumes Claude Code's on-disk layout, where each
+    # transcript lives at ``<projects>/<url-encoded-slug>/<session-id>.jsonl`` — so
+    # the immediate parent directory IS the project slug. We deliberately reuse
+    # that slug (not the real cwd) for the archive folder so the backfilled file
+    # mirrors the live tree exactly; if Claude Code ever changes that layout, this
+    # is the single place to revisit. (Excludes still match the real cwd, not this
+    # slug — see backfill_from_index.)
+    if not jsonl_path:
+        return "_backfilled"
+    parent_name = Path(jsonl_path).parent.name
+    return parent_name or "_backfilled"
+
+
+def _reconstruct_jsonl_line(message: dict) -> str:
+    """Render one indexed message back into a minimal Claude-Code-shaped JSONL row.
+
+    Only the fields ``iter_messages_in_file`` reads are emitted (type, uuid,
+    sessionId, timestamp, cwd, message.role/content), so the reconstructed file
+    round-trips through the existing ingest path with no special-casing. This is
+    deliberately lossy — tool_use/thinking rows were never indexed — which is
+    acceptable: a text-only copy beats a lost session.
+    """
+    row = {
+        "type": message["role"] if message["role"] in ("user", "assistant") else "user",
+        "uuid": message["message_uuid"],
+        "parentUuid": message.get("parent_uuid"),
+        "sessionId": message["session_id"],
+        "timestamp": message["timestamp_iso"],
+        "cwd": message.get("cwd"),
+        "message": {"role": message["role"], "content": message["content"]},
+    }
+    return json.dumps(row, ensure_ascii=False)
+
+
+def backfill_from_index(
+    store: SessionStore,
+    archive_dir: Path,
+    exclude_patterns: list[str],
+) -> BackfillStats:
+    """Reconstruct archive files for indexed sessions absent from the archive.
+
+    Exclude-aware, text-only/lossy. Used both for the one-time auto-backfill on
+    upgrade and the explicit
+    ``rekol archive --from-index``. For each session in ``sessions.db``: skip if
+    its REAL cwd matches an exclude; skip if an archive file already exists;
+    otherwise write a minimal reconstructed ``.jsonl`` under
+    ``<archive>/<project-slug>/<session-id>.jsonl`` and record it in the manifest.
+
+    EXCLUDE MATCHES THE REAL cwd, NOT the slug. ``exclude_paths`` globs are matched
+    against the session's actual working directory (e.g. ``/Users/x/secret``) read
+    from the indexed rows — NOT against Claude Code's URL-encoded project slug
+    (``-Users-x-secret``). Matching the slug would silently break a natural pattern
+    like ``*/secret/*`` (it never contains a ``/secret/`` segment). This makes the
+    retroactive (backfill) and forward (archive-sync) checks symmetric — both match
+    the real cwd. See ``archive_directory`` for the forward side.
+
+    SOFT-FAIL: an ``OSError`` writing one session is counted in
+    ``sessions_errored`` and the loop continues.
+
+    Returns the :class:`BackfillStats` tally. Does NOT write the marker — the
+    caller (``backfill_once`` / ``cli_archive`` / ``cli_session_index``) owns the
+    one-time guard.
+    """
+    stats = BackfillStats()
+    manifest = load_manifest(archive_dir)
+    for session_id, jsonl_path, messages in store.iter_sessions_for_backfill():
+        stats.sessions_seen += 1
+        # Match on the session's REAL cwd (the project path the user worked in),
+        # falling back to jsonl_path only when no row carried a cwd. We never match
+        # the URL-encoded slug — a pattern like `*/secret/*` must see `/secret/`.
+        cwd = next((m.get("cwd") for m in messages if m.get("cwd")), jsonl_path)
+        if cwd and path_is_excluded(str(cwd), exclude_patterns):
+            stats.sessions_skipped_excluded += 1
+            continue
+        slug = _project_slug_from_jsonl_path(jsonl_path)
+        relative = Path(slug) / f"{session_id}.jsonl"
+        archived_path = archive_dir / relative
+        if archived_path.exists():
+            stats.sessions_skipped_present += 1
+            continue
+        try:
+            archived_path.parent.mkdir(parents=True, exist_ok=True)
+            archived_path.write_text(
+                "\n".join(_reconstruct_jsonl_line(m) for m in messages) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            stats.sessions_errored += 1
+            continue
+        archived_stat = archived_path.stat()
+        manifest[str(relative)] = {
+            "mtime_unix": int(archived_stat.st_mtime),
+            "size_bytes": int(archived_stat.st_size),
+        }
+        stats.sessions_reconstructed += 1
+    save_manifest(archive_dir, manifest)
+    return stats
+
+
+def backfill_once(
+    store: SessionStore,
+    archive_dir: Path,
+    exclude_patterns: list[str],
+) -> BackfillStats | None:
+    """Run the one-time, marker-guarded index→archive backfill on upgrade.
+
+    Returns the :class:`BackfillStats` of the run, or ``None`` when the marker is
+    already present (so the caller can emit the one-time disclosure notice exactly
+    when this returns non-``None``).
+
+    MARKER ORDERING (architect-review fix): the marker is touched BEFORE the
+    backfill runs, not after. ``backfill_from_index`` is idempotent (it skips
+    sessions already archived), so writing the marker up front is safe — and it
+    guarantees the one-time notice fires exactly once even if the process is
+    killed mid-backfill. Writing it after would let a crash re-trigger the whole
+    backfill and re-fire the notice on the next run.
+
+    SOFT-FAIL: a failure to create the marker is swallowed (the backfill still
+    runs); the worst case is the notice fires again next time, never a crash.
+    """
+    marker_path = archive_dir / BACKFILL_MARKER_FILENAME
+    if marker_path.exists():
+        return None
+    # Touch the marker BEFORE the (idempotent) backfill so a mid-run crash cannot
+    # re-fire the one-time notice. mkdir first — the archive dir may not exist yet.
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        marker_path.touch()
+    except OSError:
+        # Could not write the marker; still run the backfill (idempotent). The
+        # notice may re-fire next run, which is acceptable — never fatal.
+        pass
+    return backfill_from_index(store, archive_dir, exclude_patterns)
+
+
+@dataclass
+class PruneStats:
+    """Tally of a ``prune`` run."""
+
+    files_removed: int = 0
+
+
+def prune(archive_dir: Path, *, clear: bool) -> PruneStats:
+    """Manual retention: flat-file removal of archive contents.
+
+    v1 supports only ``clear=True`` (remove every archived ``.jsonl`` and reset
+    the manifest) — the manual off-ramp. Auto-compaction/retention by age or
+    size is a deferred fast-follow. SOFT-FAIL: an ``OSError`` removing one file
+    is skipped; the rest still go.
+
+    Returns the :class:`PruneStats` tally. A non-existent archive is a no-op.
+    """
+    stats = PruneStats()
+    archive_dir = Path(archive_dir)
+    if not archive_dir.is_dir():
+        return stats
+    if not clear:
+        # v1 has no partial-trim policy; without clear there is nothing to do.
+        return stats
+    for archived_path in sorted(archive_dir.glob("**/*.jsonl")):
+        try:
+            archived_path.unlink()
+        except OSError:
+            continue
+        stats.files_removed += 1
+    # Reset the manifest so a later sync treats every live file as new.
+    save_manifest(archive_dir, {})
     return stats
