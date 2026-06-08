@@ -669,9 +669,11 @@ def bulk_capture_commands(batch: BootstrapBatch, *, top_n: int | None = None) ->
 _DEFERRED_HEADING_PREFIX = "## Deferred"
 
 # A rendered ``capture:`` review line, e.g. ``      capture: `rekol capture …` ``.
-# Match the command between the backticks so a bulk-approve reads the SAME command
-# the operator would copy-paste — the persisted review file is the source of truth.
-_CAPTURE_LINE_RE = re.compile(r"capture:\s*`(rekol capture [^`]+)`")
+# ANCHORED to a whole indented annotation line (^\s+ … $): matched per-line, this
+# only fires on the dedicated ``capture:`` line we render, never on the ``- [ ]``
+# candidate-content line — so untrusted transcript content that happens to contain
+# ``capture: `rekol capture …` `` cannot inject an extra command into bulk-approve.
+_CAPTURE_LINE_RE = re.compile(r"^\s+capture:\s*`(rekol capture [^`]+)`\s*$")
 
 
 def extract_capture_commands_from_review(review_text: str) -> list[str]:
@@ -814,7 +816,15 @@ def promote_to_rekol_md(
         )
 
     rekol_md.parent.mkdir(parents=True, exist_ok=True)
-    rekol_md.write_text(new_text, encoding="utf-8")
+    # Atomic write (mirror write_batch_candidates): a process killed mid-write must
+    # leave either the previous complete REKOL.md or the new one — never a torn
+    # always-on index, which is injected into every session.
+    tmp = rekol_md.with_name(rekol_md.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(new_text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, rekol_md)
     return PromoteResult(promoted=True)
 
 
@@ -834,11 +844,15 @@ def _append_under_section(text: str, heading: str, line: str) -> str:
             "are phrased as triggers — read the referenced file when the trigger "
             "matches the user's request.\n"
         )
-    if heading in body:
+    # Locate the heading by EXACT line match — the SAME criterion used to insert
+    # below — so a heading that appears only as a substring of body text can't pass
+    # an outer `in` check and then exhaust the inner search (StopIteration). The
+    # `None` default makes "no heading" fall through to the append-fresh branch.
+    lines = body.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
+    if start is not None:
         # Insert the new pointer at the END of the existing section (just before
         # the next heading or EOF), so promotions accumulate in capture order.
-        lines = body.splitlines()
-        start = next(i for i, ln in enumerate(lines) if ln.strip() == heading)
         end = start + 1
         while end < len(lines) and not lines[end].startswith("## "):
             end += 1
