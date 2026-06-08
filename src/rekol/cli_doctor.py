@@ -30,6 +30,7 @@ import click
 
 from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
+from rekol.include_coverage import compute_coverage
 from rekol.onboarding.detect import default_cloud_sync_candidates
 from rekol.sessions.store import SessionStore
 from rekol.store import CURATED_SCHEMA_VERSION, IndexModelMismatchError, IndexStore
@@ -458,6 +459,50 @@ def _check_archive(cfg: Config) -> list[Finding]:
     return findings
 
 
+def _check_include_scope(cfg: Config) -> list[Finding]:
+    """Report include-scope coverage: indexed-vs-discoverable files (T8 #63).
+
+    SILENT-SKIP when no ``include_dirs`` are configured — the feature is additive,
+    so an existing user who never opted in sees no finding (mirrors the spec's
+    "never 'Found 0 sources'" rule and keeps ``doctor`` quiet for them).
+
+    When include-scope IS configured, emit the "Z of ~Y discoverable files
+    indexed (~C%)" coverage line. PROBLEM-vs-INFO: a partial coverage (< 100%)
+    means some in-scope files have changed since the last index and are awaiting
+    the next ``session-index`` run — a degraded-but-self-healing state, so we
+    flag it as a PROBLEM with the catch-up remedy. Full coverage is OK.
+    """
+    if not cfg.include_dirs:
+        return []
+    report = compute_coverage(cfg)
+    if report.discoverable == 0:
+        # Configured dirs but nothing discoverable (empty/missing dirs): INFO, not
+        # a failure — there is simply nothing in scope to index yet.
+        return [
+            Finding(
+                label="include scope",
+                status=Status.INFO,
+                detail="include_dirs configured but no discoverable files in scope yet",
+            )
+        ]
+    if report.indexed < report.discoverable:
+        return [
+            Finding(
+                label="include scope",
+                status=Status.PROBLEM,
+                detail=f"{report.summary()} — some in-scope files await (re)indexing",
+                remedy="rekol session-index --incremental",
+            )
+        ]
+    return [
+        Finding(
+            label="include scope",
+            status=Status.OK,
+            detail=report.summary(),
+        )
+    ]
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -475,6 +520,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
     findings.extend(_check_curated_index(cfg, embedder))
     findings.extend(_check_session_index(cfg, embedder))
     findings.extend(_check_archive(cfg))
+    findings.extend(_check_include_scope(cfg))
     return DoctorReport(findings=findings)
 
 
