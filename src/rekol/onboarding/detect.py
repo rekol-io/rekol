@@ -25,9 +25,17 @@ def count_claude_transcripts(projects_dir: Path) -> int:
     if not projects_dir.is_dir():
         return 0
     # rglob defaults to recurse_symlinks=False (Python 3.13+), so no loop risk.
-    # On a large ~/.claude/projects this scan runs before the first prompt; if
-    # latency on network-synced filesystems becomes noticeable, add an early-exit cap.
-    return sum(1 for _ in projects_dir.rglob("*.jsonl"))
+    # Early-exit cap: this scan runs before the first prompt, and on a large or
+    # network-synced ~/.claude/projects an unbounded walk is slow. The count only
+    # drives a >0 Path-A/B fork and a headline number, so stop once we've seen
+    # enough to know there's "a lot" rather than walking every file.
+    cap = 10_000
+    count = 0
+    for _ in projects_dir.rglob("*.jsonl"):
+        count += 1
+        if count >= cap:
+            break
+    return count
 
 
 def default_cloud_sync_candidates() -> dict[str, Path]:
