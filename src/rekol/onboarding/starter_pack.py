@@ -6,11 +6,16 @@ from. ``install.sh`` already seeds it on a *first* install; this module is the
 Python equivalent ``rekol init`` calls so the starter-pack step is re-runnable
 from inside the tool (Path B always-on, Path A opt-in) without shelling out.
 
-Seeding is COPY-IF-ABSENT: an existing home file is never overwritten, so a
-re-run is a safe no-op and a user's hand-edits survive. The ``.example`` suffix
+Seeding is COPY-IF-ABSENT, i.e. **gap-fill** (#60): an existing home file is
+never overwritten, so a re-run is a safe no-op and a user's hand-edits survive,
+and a partially-populated home keeps every real file it already has while only
+the *missing* layers receive their directive scaffold. The ``.example`` suffix
 is stripped on copy (same convention ``install.sh`` uses), so what lands on disk
-is the real ``identity.md`` / ``REKOL.md`` the runtime reads. T4 (#42) owns the
-*content* of the template; T1 only owns wiring the copy into the init flow.
+is the real ``identity.md`` / ``REKOL.md`` the runtime reads.
+
+The scaffolds themselves are inert, generic *directives* — each layer file tells
+the assistant what to learn and record there (#60), carrying no example fact-data
+the model could recall as truth. T1 owns wiring the copy into the init flow.
 """
 
 from __future__ import annotations

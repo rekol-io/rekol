@@ -1,6 +1,6 @@
 ---
 name: Before touching a repo
-description: Local conventions to follow before reading, cloning, or editing a repo
+description: Local conventions to follow before reading, cloning, or editing a repo. Learn and record over time.
 type: when
 tags: [repos, git, symlink, local]
 aliases: [repo lookup, check a repo, look at a repo, clone a repo]
@@ -9,13 +9,15 @@ created: 2026-04-27T10:00:00-04:00
 updated: 2026-04-27T10:00:00-04:00
 ---
 
-<!--
-  This file is a stub.  Add your local repo conventions below this comment.
-  Examples (DELETE these and write your own):
-    - Where repos live on disk (e.g., ~/dev/<repo>)
-    - Whether to check a local clone before cloning fresh from GitHub
-    - Symlink layout, if any
-    - Editing rules (e.g., never edit on remote hosts via SSH)
-  An empty stub is preferable to placeholder text — Claude will treat any body
-  text here as guidance and act on it.
--->
+# Before touching a repo
+
+> **Directive (assistant):** Record the user's repo conventions here as you learn
+> them — where repos live on disk, whether to prefer a local clone over cloning
+> fresh, any symlink layout, and any rules about editing (for example, where edits
+> are or aren't allowed). Capture a convention only after the user states it or
+> you confirm it with them; never guess a path or a rule.
+
+This file is task-triggered: its guidance surfaces when the user is about to read,
+clone, or edit a repo. Until you have a real convention to record, leave the body
+empty below this directive — an empty `when/` file is correct, and any text you
+write here is treated as a standing instruction.

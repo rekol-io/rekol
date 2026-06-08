@@ -1,15 +1,10 @@
----
-name: Anatomy of good memory
-description: What each memory layer is for, with tiny examples — read this first
-type: knowledge
-tags: [anatomy, layers, guidance, knowledge, getting-started]
-aliases: [memory layers, what goes where, anatomy of good memory, how memory works]
-see_also: [knowledge/why-we-chose-x.md, topics/example-canonical-source.md]
-created: 2026-04-27T10:00:00-04:00
-updated: 2026-04-27T10:00:00-04:00
----
-
 # Anatomy of good memory
+
+A tour of what each memory layer is for, and what makes a memory worth keeping.
+This is documentation — it does **not** ship inside your memory pack, so it never
+costs context or gets confused for one of your own notes. Read it once to build a
+mental model of where things go; the directive scaffolds in your memory home will
+remind you in the moment.
 
 REKOL memory is split by **trigger** — *when does Claude need this?* — not by
 topic. The same project might leave a fact in `topics/`, a rule in `when/`, and
@@ -47,5 +42,12 @@ the reasoning in `knowledge/`. Pick the layer by how the memory should surface.
 - **Honest about staleness:** when a fact changes, fix it (and run
   `rekol index update` after hand-edits). Stale memory is worse than none.
 
-See `knowledge/why-we-chose-x.md` for a worked example of the understanding
-layer, and `topics/example-canonical-source.md` for a topic pointer.
+## A note on the scaffolds
+
+Each layer in your memory home ships with a short **directive** scaffold — a note
+to the assistant describing *what to learn and record there* as it works with you
+(your name and role in `always/identity.md`, your repo conventions in
+`when/when-touching-repos.md`, and so on). The scaffolds carry no example facts on
+purpose: anything written in a memory body is read as truth, so a placeholder like
+a fake name would be a confabulation hazard. The scaffolds tell the assistant what
+*kind* of thing belongs there; the real content grows as it learns about you.
