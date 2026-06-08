@@ -49,7 +49,7 @@ from rekol.bootstrap_state import (
     state_path_for,
 )
 from rekol.cli_common import guard_curated_schema
-from rekol.config import Config, load_config
+from rekol.config import Config, load_config, load_rekolignore_patterns
 from rekol.corpus_propose import dedupe_against_memory, recall_corpus_candidates
 from rekol.embeddings import get_embedder
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
@@ -98,28 +98,44 @@ def _recall_and_dedupe(cfg: Config):
     """
     if not cfg.session_search_enabled:
         return []
+    # Combine config excludes with any per-folder .rekolignore at the projects
+    # root, so a sensitive project a user excluded is also excluded from recall
+    # (matches cli_session_index.py / cli_archive.py).
+    exclude_patterns = list(cfg.exclude_paths) + load_rekolignore_patterns(cfg.claude_projects_dir)
+
     embedder = get_embedder(cfg.embedding_model)
-    memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
-    memory_store.init_schema()
-    guard_curated_schema(memory_store)
-    session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
-    session_store.init_schema()
+    # Opens live INSIDE the try so a raise in init_schema/guard_curated_schema
+    # (or the session-store open) never leaks an already-opened store. ``finally``
+    # closes whatever got opened (None-guarded).
+    memory_store: IndexStore | None = None
+    session_store: SessionStore | None = None
     try:
+        memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+        memory_store.init_schema()
+        guard_curated_schema(memory_store)
+        session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
+        session_store.init_schema()
+
         try:
             session_store.reconcile_embedding_dim(embedder.dim)
         except SessionStoreDimMismatchError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(2) from exc
         candidates = recall_corpus_candidates(
-            session_store, embedder, max_candidates=RECALL_CEILING
+            session_store,
+            embedder,
+            max_candidates=RECALL_CEILING,
+            exclude_patterns=exclude_patterns,
         )
         if not candidates:
             return []
         new_candidates, _already = dedupe_against_memory(candidates, memory_store, embedder)
         return new_candidates
     finally:
-        session_store.close()
-        memory_store.close()
+        if session_store is not None:
+            session_store.close()
+        if memory_store is not None:
+            memory_store.close()
 
 
 def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:

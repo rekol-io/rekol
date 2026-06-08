@@ -308,6 +308,55 @@ def test_every_recalled_candidate_carries_full_provenance(tmp_path: Path) -> Non
         assert cand.timestamp_iso, "missing timestamp"
 
 
+def test_recall_honors_exclude_paths_dropping_excluded_cwd(tmp_path: Path) -> None:
+    """A candidate whose cwd matches an exclude pattern must NOT appear in recall.
+
+    The privacy chokepoint: a user's ``exclude_paths``/``.rekolignore`` is honored
+    on the recall path too (reachable with ``archive_enabled=false`` +
+    ``session_search_enabled=true``), so a sensitive project they excluded from
+    archiving/indexing is also excluded from corpus recall — not just dropped by
+    dedupe afterward, which would still embed its content.
+    """
+    embedder = HashingEmbedder(dim=384)
+    store = SessionStore(db_path=tmp_path / "sessions.db", dim=embedder.dim)
+    store.init_schema()
+    rows = [
+        # Kept: an ordinary project cwd.
+        ("/home/leon/github/rekol", "sess-keep", "u-keep"),
+        # Excluded: a cwd under the secret project the pattern names.
+        ("/home/leon/github/secret-project", "sess-secret", "u-secret"),
+    ]
+    for cwd, session_id, uuid in rows:
+        msg = dict(
+            session_id=session_id,
+            message_uuid=uuid,
+            parent_uuid=None,
+            role="user",
+            content="We always deploy via docker compose pull on the Dell box.",
+            cwd=cwd,
+            timestamp_iso="2026-01-01T10:00:00Z",
+            timestamp_unix=1767261600,
+            jsonl_path=f"/transcripts/{session_id}.jsonl",
+            line_number=1,
+        )
+        rowid = store.insert_message(msg)
+        assert rowid is not None
+        store.upsert_embedding(rowid, embedder.embed(msg["content"]))
+    try:
+        candidates = recall_corpus_candidates(
+            store, embedder, per_query_top_k=5, exclude_patterns=["secret-project"]
+        )
+    finally:
+        store.close()
+
+    recalled_cwds = {c.cwd for c in candidates}
+    assert "/home/leon/github/secret-project" not in recalled_cwds, (
+        "an excluded-cwd candidate leaked into recall output"
+    )
+    # And the non-excluded project still surfaces (the filter narrows, not nukes).
+    assert "/home/leon/github/rekol" in recalled_cwds
+
+
 def test_every_rendered_batch_line_carries_a_source_ref(tmp_path: Path) -> None:
     """Each candidate in a rendered batch review prints its source ref line.
 
