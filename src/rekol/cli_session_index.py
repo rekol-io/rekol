@@ -22,6 +22,7 @@ import click
 
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.embeddings import get_embedder
+from rekol.include_indexer import index_include_dirs
 from rekol.sessions.archive import archive_directory, backfill_once
 from rekol.sessions.ingest import embed_missing, ingest_directory
 from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
@@ -135,6 +136,49 @@ def _echo_zeroed_stats() -> None:
     )
 
 
+def _index_include_dirs_soft_fail(cfg, progress: bool) -> None:
+    """Convert include_dirs into synthetic transcripts BEFORE the ingest walk.
+
+    This is the "extend ongoing indexing beyond $REKOL_HOME" step (T8 #63): each
+    in-scope directory is converted to synthetic Claude Code JSONL under
+    ``claude_projects_dir``, so the SAME ingest pass that runs after this picks
+    the content up — a dir included once auto-indexes its new files every run,
+    governed by the deny-list, with no separate filewatcher. Incremental: an
+    unchanged dir is skipped (manifest-hash marker), so the steady-state cost is
+    one cheap scan per included dir.
+
+    Runs BEFORE the archive-sync so the synthetic transcripts are archived and
+    ingested in the normal flow. SOFT-FAIL: a conversion error (unreadable source,
+    full disk) must NEVER crash the SessionEnd hook — we log a non-fatal notice
+    and continue to the transcript ingest, which is the primary job. The next run
+    retries (conversion is idempotent; the marker is only written on success).
+
+    Always emits the stats line on stdout (even all-zero / on error) so downstream
+    parsers and the test-suite see a stable shape.
+    """
+    if not cfg.include_dirs:
+        # No include-scope configured: emit the all-zero line so the output shape
+        # is stable, but do no work. Keeps existing users' behaviour unchanged.
+        click.echo(
+            "include_dirs_converted=0 include_dirs_skipped_unchanged=0 "
+            "include_dirs_missing=0 include_files_converted=0"
+        )
+        return
+    try:
+        result = index_include_dirs(cfg)
+    except OSError as exc:
+        click.echo(f"include-scope indexing degraded (non-fatal): {exc}", err=True)
+        click.echo(
+            "include_dirs_converted=0 include_dirs_skipped_unchanged=0 "
+            "include_dirs_missing=0 include_files_converted=0"
+        )
+        return
+    if progress and result.dirs_missing:
+        for missing in result.dirs_missing:
+            click.echo(f"... include dir not found, skipped: {missing}", err=True)
+    click.echo(result.as_line())
+
+
 def _make_progress_cb(progress: bool):
     """Build the per-50-files progress callback, or ``None`` when disabled.
 
@@ -205,6 +249,13 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
     store_dim = embedder.dim if embedder is not None else 384
 
     progress_cb = _make_progress_cb(progress)
+
+    # Include-scope (T8 #63): convert any configured include_dirs into synthetic
+    # transcripts under claude_projects_dir BEFORE the archive-sync + ingest below,
+    # so a dir included once auto-indexes its new files on every run (deny-list
+    # governed, incremental). Soft-fails so a conversion error never crashes the
+    # SessionEnd hook — the transcript ingest is the primary job.
+    _index_include_dirs_soft_fail(cfg, progress)
 
     # Determine where ingest reads FROM. With the archive on, we archive-sync the
     # live projects dir into the durable archive, then ingest from the ARCHIVE —
