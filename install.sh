@@ -152,7 +152,9 @@ prompt_for_memory_home() {
   if [[ -n "$suggestions" ]]; then
     {
       printf 'Detected cloud-sync folders you could keep memory in:\n'
-      printf '  %s\n' $suggestions
+      # Per-line, quoted: a detected path may contain spaces (e.g.
+      # "~/Library/Mobile Documents/...") which unquoted word-splitting would mangle.
+      while IFS= read -r _sugg; do printf '  %s\n' "$_sugg"; done <<<"$suggestions"
       printf '(or any local folder; the index lives in a local cache outside it, so syncing your memory never syncs the index)\n'
     } >&2
   fi
@@ -473,12 +475,13 @@ fi
 # =============================================================================
 
 if [[ "$DO_SKILL" == "1" ]]; then
-  # Install the canonical `rekol` skill, the `memory` back-compat shim, and the
+  # Install the canonical `rekol` skill, the `memory` back-compat shim, the
+  # `rekol-init` assistant-led onboarding interview (#59), and the
   # `rekol-bootstrap` cold-start routine (#41). Claude Code derives the /<name>
   # trigger from the directory name and has no aliases field, so the shim
-  # directory is what keeps `/memory` working, and `rekol-bootstrap` gets its own
-  # /rekol-bootstrap trigger.
-  for skill_name in rekol memory rekol-bootstrap; do
+  # directory is what keeps `/memory` working, `rekol-init` gets its own
+  # /rekol-init trigger, and `rekol-bootstrap` gets /rekol-bootstrap.
+  for skill_name in rekol memory rekol-init rekol-bootstrap; do
     skill_dst_dir="${SKILL_BASE}/${skill_name}"
     run "mkdir -p '${skill_dst_dir}'"
 

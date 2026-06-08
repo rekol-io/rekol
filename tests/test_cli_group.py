@@ -27,6 +27,7 @@ EXPECTED_COMMANDS = {
     "init",
     "doctor",
     "coverage",
+    "include",
 }
 
 HIDDEN_COMMANDS = {"_hook"}  # registered but hidden from --help
