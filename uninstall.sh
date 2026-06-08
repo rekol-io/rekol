@@ -380,11 +380,11 @@ elif [[ "$BIN_DIR_SOURCE" == "default" && "$MANIFEST_FOUND" == "0" ]]; then
 fi
 
 # =============================================================================
-# Step 2 — remove the Claude skills (rekol + the memory shim + bootstrap)
+# Step 2 — remove the Claude skills (rekol + the memory shim + init + bootstrap)
 # =============================================================================
-# install.sh Step 6 installed ${SKILL_BASE}/{rekol,memory,rekol-bootstrap}.
+# install.sh Step 6 installed ${SKILL_BASE}/{rekol,memory,rekol-init,rekol-bootstrap}.
 
-for skill_name in rekol memory rekol-bootstrap; do
+for skill_name in rekol memory rekol-init rekol-bootstrap; do
   skill_dir="${SKILL_BASE}/${skill_name}"
   if [[ -d "$skill_dir" ]]; then
     say "removing skill ${skill_dir}"
