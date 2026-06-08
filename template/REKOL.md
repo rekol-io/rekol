@@ -2,7 +2,7 @@
 
 This file is re-injected into every Claude session. Pointers below are phrased as triggers — read the referenced file when the trigger matches the user's request.
 
-New here? Read [knowledge/anatomy-of-good-memory.md](knowledge/anatomy-of-good-memory.md) once — it explains what each layer (`always/`/`when/`/`topics/`/`knowledge/`) is for and what makes a memory worth keeping.
+New here? Read the docs tour `docs/anatomy-of-good-memory.md` in the rekol repo once — it explains what each layer (`always/`/`when/`/`topics/`/`knowledge/`) is for and what makes a memory worth keeping. Each layer file in this pack also carries a short directive telling the assistant what to learn and record there.
 
 ## Before any activity
 

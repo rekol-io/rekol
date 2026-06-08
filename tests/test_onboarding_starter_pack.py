@@ -8,6 +8,7 @@ argv. Both are pure/deterministic so the interactive shell stays thin.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from rekol.onboarding import (
@@ -18,13 +19,19 @@ from rekol.onboarding import (
 
 
 def _make_template(root: Path) -> Path:
-    """Build a minimal stand-in ``template/`` tree (mirrors the bundled one)."""
+    """Build a multi-layer stand-in ``template/`` tree (mirrors the bundled one)."""
     template = root / "template"
     (template / "always").mkdir(parents=True)
     (template / "when").mkdir(parents=True)
+    (template / "topics").mkdir(parents=True)
+    (template / "knowledge").mkdir(parents=True)
     (template / "REKOL.md").write_text("# REKOL\n", encoding="utf-8")
     (template / "always" / "identity.md.example").write_text("# id\n", encoding="utf-8")
     (template / "when" / "when-touching-repos.md.example").write_text("# repos\n", encoding="utf-8")
+    (template / "topics" / "example-canonical-source.md.example").write_text(
+        "# topic\n", encoding="utf-8"
+    )
+    (template / "knowledge" / "why-we-chose-x.md.example").write_text("# why\n", encoding="utf-8")
     return template
 
 
@@ -33,6 +40,67 @@ def test_find_template_dir_locates_bundled_template() -> None:
     found = find_template_dir()
     assert found is not None
     assert (found / "REKOL.md").is_file()
+
+
+def test_bundled_template_covers_all_four_layers() -> None:
+    """Every layer (always/when/topics/knowledge) ships a directive scaffold (#60)."""
+    template = find_template_dir()
+    assert template is not None
+    for layer in ("always", "when", "topics", "knowledge"):
+        layer_dir = template / layer
+        assert layer_dir.is_dir(), f"missing layer dir: {layer}"
+        scaffolds = list(layer_dir.glob("*.example"))
+        assert scaffolds, f"layer {layer} ships no scaffold"
+
+
+def _scaffold_body(text: str) -> str:
+    """Return the markdown body of a scaffold, stripping any YAML frontmatter.
+
+    Bracketed ``[...]`` tokens are legal *inside* frontmatter (YAML lists like
+    ``tags: [a, b]``); the confabulation hazard is bracketed fact-data in the
+    rendered body, so the placeholder check only inspects the body.
+    """
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            newline = text.find("\n", end + 1)
+            return text[newline + 1 :] if newline != -1 else ""
+    return text
+
+
+def test_bundled_template_carries_no_placeholder_fact_data() -> None:
+    """Scaffolds must not embed bracketed fact-data the AI could recall as truth.
+
+    A ``[name]`` / ``[role]`` style token in body text is the confabulation
+    hazard #60 exists to kill: the model treats memory body text as fact. The
+    scaffolds may carry *directives* ("record the user's name here") but never a
+    fill-in slot that looks like a recalled value. We allow markdown link syntax
+    ``[text](target)`` — that is navigation, not a fact slot.
+    """
+    template = find_template_dir()
+    assert template is not None
+    # A bracketed token NOT immediately followed by "(" — i.e. not a markdown link.
+    bracket_token = re.compile(r"\[[^\]]+\](?!\()")
+    offenders: list[str] = []
+    for scaffold in template.rglob("*.example"):
+        body = _scaffold_body(scaffold.read_text(encoding="utf-8"))
+        for line in body.splitlines():
+            if bracket_token.search(line):
+                rel = scaffold.relative_to(template).as_posix()
+                offenders.append(f"{rel}: {line.strip()}")
+    assert not offenders, "placeholder fact-data found:\n" + "\n".join(offenders)
+
+
+def test_anatomy_tour_lives_in_docs_not_the_pack() -> None:
+    """The anatomy-of-good-memory tour moved out of the pack into docs/ (#60)."""
+    template = find_template_dir()
+    assert template is not None
+    # Not in the seedable pack — it must never land in a user's memory home.
+    assert not (template / "knowledge" / "anatomy-of-good-memory.md.example").exists()
+    assert not list(template.rglob("anatomy-of-good-memory*"))
+    # It lives in docs/ instead.
+    docs_anatomy = template.parent / "docs" / "anatomy-of-good-memory.md"
+    assert docs_anatomy.is_file()
 
 
 def test_seed_starter_pack_copies_and_strips_example(tmp_path: Path) -> None:
@@ -66,6 +134,41 @@ def test_seed_starter_pack_never_overwrites_existing(tmp_path: Path) -> None:
 
     assert user_identity.read_text(encoding="utf-8") == "MY OWN IDENTITY — do not clobber\n"
     assert user_identity not in created  # not reported as created
+
+
+def test_seed_starter_pack_gap_fills_only_missing_layers(tmp_path: Path) -> None:
+    """A partially-populated home keeps every real file; only missing layers seed.
+
+    This is the gap-fill contract (#60): a user who already learned/recorded
+    their identity and a repo convention must not have either replaced by a
+    generic scaffold, while the empty layers (topics/, knowledge/) still receive
+    their directive scaffolds so the model knows what to grow there.
+    """
+    template = _make_template(tmp_path / "src")
+    home = tmp_path / "home"
+    (home / "always").mkdir(parents=True)
+    (home / "when").mkdir(parents=True)
+    # Two layers the user has already filled with real content.
+    user_identity = home / "always" / "identity.md"
+    user_identity.write_text("REAL identity — keep me\n", encoding="utf-8")
+    user_repos = home / "when" / "when-touching-repos.md"
+    user_repos.write_text("REAL repo convention — keep me\n", encoding="utf-8")
+
+    created = seed_starter_pack(template, home)
+
+    # The user's real content is untouched, byte-for-byte.
+    assert user_identity.read_text(encoding="utf-8") == "REAL identity — keep me\n"
+    assert user_repos.read_text(encoding="utf-8") == "REAL repo convention — keep me\n"
+    # The two filled layers were NOT re-seeded...
+    assert user_identity not in created
+    assert user_repos not in created
+    # ...but the missing layers WERE gap-filled with their scaffolds.
+    created_rel = {p.relative_to(home).as_posix() for p in created}
+    assert "topics/example-canonical-source.md" in created_rel
+    assert "knowledge/why-we-chose-x.md" in created_rel
+    assert "REKOL.md" in created_rel
+    assert (home / "topics" / "example-canonical-source.md").is_file()
+    assert (home / "knowledge" / "why-we-chose-x.md").is_file()
 
 
 def test_seed_starter_pack_second_run_creates_nothing(tmp_path: Path) -> None:
