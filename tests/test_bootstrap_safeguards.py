@@ -694,11 +694,11 @@ def test_plan_persists_checkpoint_before_writing_all_batches(tmp_path: Path, mon
     real_write = cli_bootstrap.write_batch_candidates
     calls = {"n": 0}
 
-    def flaky_write(batch, *, pending_dir, run_id):
+    def flaky_write(batch, *, pending_dir, run_id, top_n=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("simulated reap mid-plan")
-        return real_write(batch, pending_dir=pending_dir, run_id=run_id)
+        return real_write(batch, pending_dir=pending_dir, run_id=run_id, top_n=top_n)
 
     monkeypatch.setattr(cli_bootstrap, "write_batch_candidates", flaky_write)
 
