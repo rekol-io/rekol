@@ -6,7 +6,8 @@
 
 ![REKOL — a fresh session recalls your project's conventions from memory](docs/demo.gif)
 
-**Status:** v0.1 (pre-release). macOS-first; Claude Code is the reference integration.
+REKOL works anywhere Claude Code runs — the terminal, your IDE (VS Code or
+JetBrains), or the Claude Desktop app. It runs on macOS.
 
 ## Why
 
@@ -15,10 +16,9 @@ your context and uses it. REKOL's specific corner:
 
 - **No API key, fully local.** Embeddings (BAAI `bge-small`) and vector search
   (`sqlite-vec`) run on your machine. No account, no key, no telemetry — the
-  memory layer doesn't even need an LLM provider.
-- **A drop-in *layer*, not a new app.** REKOL plugs into the assistant you
-  already use (Claude Code today, every MCP assistant next) — no agent to adopt,
-  no tool to switch.
+  memory layer runs entirely on your hardware.
+- **A drop-in *layer*, not a new app.** REKOL plugs into Claude Code, the
+  assistant you already use — no agent to adopt, no tool to switch.
 - **Memory that surfaces itself.** A layered model (`always / when / topics /
   knowledge`) injects the right context at the start of each session, and the
   assistant pulls in more as it works — it just *knows*, instead of being told
@@ -75,12 +75,12 @@ you already have:
 
 - **Index past Claude Code sessions** — `rekol session-index --incremental`
   makes your existing transcripts searchable. `rekol init` wraps this (and the
-  steps below) in confirm prompts. REKOL never indexes on its own — just open
-  Claude and ask it to "set up my rekol memory" or "index my past sessions".
+  steps below) in confirm prompts. Indexing is opt-in — it runs when you ask.
+  Open Claude Code and say: "set up my rekol memory."
 - **Import a notes/docs folder** — `rekol import ~/Documents/ObsidianVault`
   converts a tree of text files into searchable content. This is a mechanical
-  conversion (it makes your docs findable) — not an LLM filing notes into the
-  `always`/`when`/`topics` layers.
+  conversion that makes your docs findable; the assistant (or you, with `rekol
+  capture`) curates them into the `always`/`when`/`topics` layers.
 - **Verify it landed** — `rekol search "something you wrote"`.
 
 ## How REKOL gets smart
@@ -89,16 +89,15 @@ There are two phases, and they're honestly different.
 
 **Day 1 — searchable history (recall).** The moment you install, your past
 Claude Code sessions become searchable. Ask about something you worked on and
-Claude finds it. That's real and immediate — but it's *search*, not yet
-understanding. Nothing has been distilled into always-on rules.
+Claude finds it. That's real and immediate — search over everything you've done.
 
 **Over time — it learns how your project thinks (understanding).** The payoff is
 ambient memory: the recurring "always do X", "repos live in Y", "we chose Z"
 that gets curated into the `always`/`when`/`topics` layers and surfaces on its
 own, without you asking. Some of that accumulates as you work and capture; the
 rest comes from a memory-bootstrap step you explicitly run — it reads back over
-your indexed transcripts and proposes durable memories for your review (nothing
-is auto-written).
+your indexed transcripts and proposes durable memories for your review (you
+approve what lands).
 
 **Token honesty:** that bootstrap is *your own Claude* reading *your own*
 transcript corpus — there's no bundled model. Running it over a large history is
