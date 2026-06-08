@@ -23,6 +23,15 @@ mid-run loses at most the in-flight batch; ``--resume`` picks up where it left
 off. Review-gated throughout: this command NEVER captures or writes memory
 itself.
 
+For a big corpus (T3 v2, #62), the engine adds scalable-review affordances the
+skill drives: ``--top N`` (STOP-EARLY — review the strongest N candidates per
+batch, defer the rest), ``--bulk-approve <batch>`` (emit every capture command
+for a batch so the user can approve the whole batch in one action),
+``--promote-always`` (promote a captured always-on item's pointer into REKOL.md),
+and ``--refine`` (the end-of-run customize/refine summary). All stay review-gated:
+``--bulk-approve`` only PRINTS the capture commands; the skill runs them after the
+user approves.
+
 The ``/goal`` wrapper is an OPTIONAL durability accelerant layered on top by the
 skill — this command has no dependency on it.
 """
@@ -36,9 +45,13 @@ import sys
 import click
 
 from rekol.bootstrap import (
+    REKOL_MD_FILENAME,
     ScopeFilter,
     apply_scope,
+    extract_capture_commands_from_review,
     plan_batches,
+    promote_to_rekol_md,
+    render_refine_summary,
     write_batch_candidates,
 )
 from rekol.bootstrap_state import (
@@ -138,7 +151,9 @@ def _recall_and_dedupe(cfg: Config):
             memory_store.close()
 
 
-def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
+def _plan_run(
+    cfg: Config, scope: ScopeFilter, *, top_n: int | None = None
+) -> BootstrapState | None:
     """Recall → scope → batch → write review files → return a persisted checkpoint.
 
     Persists the checkpoint INCREMENTALLY rather than only after every batch is
@@ -150,6 +165,12 @@ def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
     ``completed`` stays empty here: planning only WRITES the review files; a batch
     is marked done only after the skill fully PROCESSES it (capture + REKOL.md),
     preserving the mark-done-after-processing ordering.
+
+    ``top_n`` (STOP-EARLY) caps how many of each batch's confidence-ranked
+    candidates are rendered as ACTIVE review items; the remainder is written into
+    a deferred section (not dropped). ``candidates_written`` still counts the full
+    batch, since every candidate is on disk and reachable — only the review focus
+    is narrowed.
 
     Returns ``None`` when nothing is in scope (a fresh install / over-narrow
     scope), so the caller can report "no candidates" rather than write an empty
@@ -181,7 +202,7 @@ def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
     save_state(state, state_path)
 
     for batch in batches:
-        write_batch_candidates(batch, pending_dir=pending_dir, run_id=run_id)
+        write_batch_candidates(batch, pending_dir=pending_dir, run_id=run_id, top_n=top_n)
         state.candidates_written += len(batch.candidates)
         state.updated_iso = _now_iso()
         # Persist progress after each batch's file lands (atomic), so the
@@ -263,7 +284,105 @@ def _handle_mark_done(cfg: Config, batch_id: str) -> None:
     click.echo(f"marked {batch_id} done ({remaining} batch(es) remaining)")
 
 
-def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) -> None:
+def _handle_bulk_approve(cfg: Config, batch_id: str) -> None:
+    """Print every active ``rekol capture`` command for ``batch_id`` (BULK-APPROVE).
+
+    The scalable-review whole-batch approval primitive: rather than gating each
+    candidate individually, the skill calls this to get the full capture plan for a
+    batch in one action, presents it for the user's batch-level approval, then runs
+    the printed commands. REVIEW-GATED — this NEVER captures itself; it only reads
+    the persisted review file (the on-disk source of truth) and emits the active
+    (non-deferred) commands, one per line, so the skill can run them verbatim.
+    """
+    state = _load_or_fail(cfg)
+    if state is None:
+        click.echo("no bootstrap run in progress — run `rekol bootstrap` first", err=True)
+        raise SystemExit(1)
+    if batch_id not in state.batches:
+        click.echo(
+            f"no batch {batch_id!r} in the current run (batches: {', '.join(state.batches)})",
+            err=True,
+        )
+        raise SystemExit(2)
+    from rekol.bootstrap import _batch_review_path
+
+    pending_dir = cfg.memory_home / "pending-review"
+    review_path = _batch_review_path(pending_dir, state.run_id, batch_id)
+    if not review_path.exists():
+        click.echo(
+            f"review file for {batch_id} is missing ({review_path}); re-run "
+            "`rekol bootstrap --reset` to regenerate it.",
+            err=True,
+        )
+        raise SystemExit(2)
+    commands = extract_capture_commands_from_review(review_path.read_text(encoding="utf-8"))
+    if not commands:
+        click.echo(f"no capturable candidates in {batch_id} (nothing to bulk-approve)", err=True)
+        return
+    for command in commands:
+        click.echo(command)
+
+
+def _handle_promote_always(cfg: Config, *, rel_path: str, name: str, trigger: str) -> None:
+    """Promote a captured always-on file's pointer into REKOL.md (the always-on index).
+
+    Capturing an ``always/`` file does not by itself make it ambient — REKOL.md is
+    the hand-curated index re-injected every session, so the pointer must land
+    there. Idempotent and budget-capped (the always-on cap is honored); an
+    over-budget or already-present promotion is reported, never silently dropped.
+    """
+    result = promote_to_rekol_md(
+        cfg.memory_home,
+        name=name,
+        rel_path=rel_path,
+        trigger=trigger,
+        budget_bytes=cfg.always_on_budget_bytes,
+    )
+    if result.promoted:
+        click.echo(f"promoted {rel_path} into {REKOL_MD_FILENAME}")
+    else:
+        click.echo(f"not promoted: {result.reason}")
+
+
+def _handle_refine(cfg: Config) -> None:
+    """Emit the end-of-run customize/refine summary the skill drives (END REFINE PASS).
+
+    Surveys the captured curated-memory files and renders a per-layer summary so
+    the skill can offer the user a final pass to rename, re-layer, or edit before
+    the bootstrap is declared done. Read-only — it never mutates memory.
+    """
+    click.echo(render_refine_summary(_captured_memory_items(cfg)))
+
+
+def _captured_memory_items(cfg: Config) -> list[dict]:
+    """List the curated-memory files present, as refine-summary item dicts.
+
+    Walks the memory-layer dirs (``always``/``when``/``topics``/``knowledge``) and
+    reports each ``.md`` file as ``{layer, name, rel_path}`` — the engine has no
+    per-run capture ledger (the skill captures), so the refine pass summarises the
+    on-disk curated memory the run produced. ``topics`` (plural dir) maps back to
+    the singular ``topic`` layer the rest of the engine uses.
+    """
+    dir_to_layer = {"always": "always", "when": "when", "topics": "topic", "knowledge": "knowledge"}
+    items: list[dict] = []
+    for layer_dir, layer in dir_to_layer.items():
+        base = cfg.memory_home / layer_dir
+        if not base.exists():
+            continue
+        for md in sorted(base.rglob("*.md")):
+            items.append(
+                {
+                    "layer": layer,
+                    "name": md.stem,
+                    "rel_path": str(md.relative_to(cfg.memory_home)),
+                }
+            )
+    return items
+
+
+def _handle_plan(
+    cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool, top_n: int | None
+) -> None:
     """Plan a new run, or resume/refuse against an existing checkpoint.
 
     With ``--resume`` an existing run is continued using *its original scope* —
@@ -272,6 +391,9 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
     re-invocation continues the existing run only when the scope still matches;
     a differing scope is refused so the user makes an explicit choice (resume vs
     reset) rather than silently desyncing the plan from the corpus.
+
+    ``top_n`` (STOP-EARLY) is a render-time focus applied only when planning a
+    fresh run; a resume reuses the already-written review files unchanged.
     """
     existing = _load_or_fail(cfg)
 
@@ -301,7 +423,7 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
     # persists the checkpoint incrementally (a "planning started" checkpoint up
     # front, re-saved after each batch), so it is already on disk by the time we
     # report. ``--reset`` overwrites any prior checkpoint via that up-front save.
-    new_state = _plan_run(cfg, scope)
+    new_state = _plan_run(cfg, scope, top_n=top_n)
     if new_state is None:
         click.echo(
             "no candidates in scope — nothing to bootstrap (a fresh install with no "
@@ -356,6 +478,44 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
     default=None,
     help="Cap the corpus to the N most-recent distinct sessions. Default: a bounded cap.",
 )
+@click.option(
+    "--top",
+    "top_n",
+    type=int,
+    default=None,
+    help="STOP-EARLY: review only the top-N highest-confidence candidates per batch; "
+    "defer the rest (resumable — re-run with a larger --top or --reset to widen).",
+)
+@click.option(
+    "--bulk-approve",
+    "bulk_approve_batch",
+    default=None,
+    help="Print every active `rekol capture` command for a batch (whole-batch approval). "
+    "Review-gated: prints only — the skill runs them after the user approves.",
+)
+@click.option(
+    "--promote-always",
+    "promote_rel_path",
+    default=None,
+    help="Promote a captured always-on file (relative path, e.g. always/ruff.md) into "
+    "REKOL.md, the always-on index. Idempotent + budget-capped.",
+)
+@click.option(
+    "--promote-name",
+    default=None,
+    help="Human-readable name for the promoted always-on pointer (with --promote-always).",
+)
+@click.option(
+    "--promote-trigger",
+    default="",
+    help="Trigger phrasing for the promoted always-on pointer (with --promote-always).",
+)
+@click.option(
+    "--refine",
+    "show_refine",
+    is_flag=True,
+    help="Print the end-of-run customize/refine summary (the final refine pass the skill drives).",
+)
 def main(
     resume: bool,
     reset: bool,
@@ -366,6 +526,12 @@ def main(
     scope_days: int | None,
     all_time: bool,
     max_sessions: int | None,
+    top_n: int | None,
+    bulk_approve_batch: str | None,
+    promote_rel_path: str | None,
+    promote_name: str | None,
+    promote_trigger: str,
+    show_refine: bool,
 ) -> None:
     """Resumable engine for the memory-bootstrap skill (recall → scope → batch → checkpoint).
 
@@ -374,7 +540,13 @@ def main(
     resume checkpoint. The ``rekol-bootstrap`` skill then loops: ``--next`` to get
     the next batch's file, process it (approve/edit/skip + ``rekol capture``),
     then ``--mark-done <batch>``. ``--resume`` continues an interrupted run;
-    ``--reset`` starts over. NEVER captures memory itself — review-gated.
+    ``--reset`` starts over.
+
+    Scalable-review affordances for a big corpus: ``--top N`` (STOP-EARLY, review
+    the strongest N per batch, defer the rest), ``--bulk-approve <batch>`` (emit
+    every capture command for a batch in one action), ``--promote-always`` (promote
+    a captured always-on item's pointer into REKOL.md), and ``--refine`` (the
+    end-of-run customize pass). NEVER captures memory itself — review-gated.
     """
     if resume and reset:
         raise click.UsageError("--resume and --reset are mutually exclusive")
@@ -390,9 +562,22 @@ def main(
     if mark_done_batch is not None:
         _handle_mark_done(cfg, mark_done_batch)
         return
+    if bulk_approve_batch is not None:
+        _handle_bulk_approve(cfg, bulk_approve_batch)
+        return
+    if promote_rel_path is not None:
+        if not promote_name:
+            raise click.UsageError("--promote-always requires --promote-name")
+        _handle_promote_always(
+            cfg, rel_path=promote_rel_path, name=promote_name, trigger=promote_trigger
+        )
+        return
+    if show_refine:
+        _handle_refine(cfg)
+        return
 
     scope = _build_scope(all_time, scope_days, scope_projects, max_sessions)
-    _handle_plan(cfg, scope, resume=resume, reset=reset)
+    _handle_plan(cfg, scope, resume=resume, reset=reset, top_n=top_n)
 
 
 if __name__ == "__main__":
