@@ -1,6 +1,6 @@
 ---
 name: Before scoping an ops task
-description: Default scoping rule for changes that could affect multiple environments
+description: Default scoping rule for changes that could affect multiple environments. Learn and record over time.
 type: when
 tags: [environments, ops, scope]
 aliases: [which environment, all envs, scope, environments]
@@ -9,12 +9,15 @@ created: 2026-04-27T10:00:00-04:00
 updated: 2026-04-27T10:00:00-04:00
 ---
 
-<!--
-  This file is a stub.  Add your environment conventions below this comment.
-  Examples (DELETE these and write your own):
-    - List of environments you operate across (dev/staging/prod, machines, clusters)
-    - Default scoping ("apply to all unless told otherwise" vs "ask which")
-    - Per-environment account/PRD mappings
-  An empty stub is preferable to placeholder text — Claude will treat any body
-  text here as guidance and act on it.
--->
+# Before scoping an ops task
+
+> **Directive (assistant):** Record the user's environment conventions here as you
+> learn them — which environments they operate across (dev/staging/prod, machines,
+> clusters), the default scoping rule (apply to all unless told otherwise, vs. ask
+> which), and any per-environment account or project mappings. Record a mapping
+> only after the user gives it; do not assume an environment layout.
+
+This file is task-triggered: its guidance surfaces when the user is scoping a
+change that could touch more than one environment. Until you have a real
+convention to record, leave the body empty below this directive — an empty `when/`
+file is correct, and any text you write here is treated as a standing instruction.
