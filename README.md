@@ -4,6 +4,8 @@
 > layer — no API key, runs on your machine, and your assistant uses it
 > automatically. Your memory is markdown in a folder you own.
 
+![REKOL — a fresh session recalls your project's conventions from memory](docs/demo.gif)
+
 **Status:** v0.1 (pre-release). macOS-first; Claude Code is the reference integration.
 
 ## Why
