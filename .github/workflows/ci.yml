@@ -1,8 +1,15 @@
 name: CI
 on:
-  push:
-    branches: [main]
+  # pull_request only — the post-merge push-to-main run was redundant (PR CI already
+  # gated the change) and just clogged the single self-hosted runner. On revert before
+  # going public, restore `push: { branches: [main] }` alongside the hosted runner.
   pull_request:
+
+concurrency:
+  # One in-flight run per PR ref; a new push cancels the superseded run, so the single
+  # self-hosted runner isn't wasted finishing stale commits.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 # ⚠️ TEMPORARY (pre-launch, 2026-06) — self-hosted runner.
 # GitHub-hosted Actions minutes are exhausted for the month, so the gate runs on a
