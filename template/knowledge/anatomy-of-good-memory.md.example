@@ -1,0 +1,51 @@
+---
+name: Anatomy of good memory
+description: What each memory layer is for, with tiny examples — read this first
+type: knowledge
+tags: [anatomy, layers, guidance, knowledge, getting-started]
+aliases: [memory layers, what goes where, anatomy of good memory, how memory works]
+see_also: [knowledge/why-we-chose-x.md, topics/example-canonical-source.md]
+created: 2026-04-27T10:00:00-04:00
+updated: 2026-04-27T10:00:00-04:00
+---
+
+# Anatomy of good memory
+
+REKOL memory is split by **trigger** — *when does Claude need this?* — not by
+topic. The same project might leave a fact in `topics/`, a rule in `when/`, and
+the reasoning in `knowledge/`. Pick the layer by how the memory should surface.
+
+## The four layers
+
+| Layer | What it holds | When it surfaces | Tiny example |
+| --- | --- | --- | --- |
+| `always/` | Permanent foundational facts about you. Re-injected into every session, so it has a hard **8 KB** budget — keep it tight. | Every session, automatically. | `always/identity.md`: "I'm a backend engineer on the payments team." |
+| `when/` | Task-triggered rules and conventions. Named `when-<activity>.md`. | When the activity matches the request. | `when/when-touching-repos.md`: "Repos live in `~/dev/<name>`; check the local clone before cloning fresh." |
+| `topics/` | Canonical-source pointers per noun. Named `topics/<noun>.md`. A pointer, not a copy. | When the noun appears in the request. | `topics/billing-api.md`: "The billing API base URL is defined in `infra/config.yaml` — don't guess it." |
+| `knowledge/` | Long-form durable reference and **reasoning** — the "understanding" layer. | On demand, via `rekol search`. | `knowledge/why-we-chose-x.md`: "We chose Postgres over Mongo because…" |
+
+## Layer vs layer — the distinction that trips people up
+
+- **`always/` vs everything else:** if it doesn't need to be in *every* session,
+  it doesn't belong in `always/`. The 8 KB cap is a feature: it forces the
+  always-on context to stay small so the model actually reads it.
+- **`when/` vs `topics/`:** `when/` is a **rule** triggered by an *activity*
+  ("before editing a repo, do X"). `topics/` is a **fact source** triggered by a
+  *noun* ("the truth about `<service>` lives here"). Rule → `when/`; where the
+  answer lives → `topics/`.
+- **`topics/` vs `knowledge/`:** `topics/` is the short pointer ("the URL lives
+  in this repo"). `knowledge/` is the long-form *why* ("we picked this stack
+  because…"). If you're explaining reasoning or background, it's `knowledge/`.
+
+## What makes a memory "good"
+
+- **Earns its place:** would a *future* session genuinely benefit? If not, skip it.
+- **Right layer, right trigger:** a rule the model never sees at the right moment
+  is dead weight; a fact buried in `knowledge/` won't fire on the noun.
+- **Points, doesn't copy:** for anything with a canonical home, link to it. Copies
+  drift; pointers stay correct.
+- **Honest about staleness:** when a fact changes, fix it (and run
+  `rekol index update` after hand-edits). Stale memory is worse than none.
+
+See `knowledge/why-we-chose-x.md` for a worked example of the understanding
+layer, and `topics/example-canonical-source.md` for a topic pointer.

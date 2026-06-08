@@ -1,0 +1,37 @@
+---
+name: Example — canonical source for a noun
+description: Template for a topics/<noun>.md file — where the truth for one thing lives
+type: topic
+tags: [example, canonical-source, topics]
+aliases: [example topic, canonical source]
+see_also: [knowledge/anatomy-of-good-memory.md]
+created: 2026-04-27T10:00:00-04:00
+updated: 2026-04-27T10:00:00-04:00
+---
+
+<!--
+  This is an EXAMPLE topic file. A topics/<noun>.md file answers one question:
+  "when this noun comes up, where does the authoritative answer live, and what
+  should I NOT treat as the source?" Copy this file to topics/<your-noun>.md
+  (name it after the noun the user actually says), then replace the body.
+
+  Good candidates for a topic file: a service whose URL/config has one true
+  home, an internal tool, a project codename, an account or environment ID —
+  anything where you keep re-deriving a fact that has a single canonical source.
+
+  Keep it short: a topic file is a POINTER to the source of truth, not a copy of
+  it. Copying invites drift; pointing stays correct.
+
+  Delete this comment and the placeholder below once you write a real one. An
+  empty stub is better than placeholder text — Claude treats body text as fact.
+-->
+
+# Example — canonical source for `<noun>`
+
+The truth for `<noun>` lives in `<exact location>` (e.g. a specific repo path, a
+config file, a runbook, or a ticket). Read it there; do not reconstruct the
+answer from a derived or cached view, and do not guess.
+
+- Canonical source: `<where the authoritative value is defined>`
+- Derived views (do NOT treat as truth): `<dashboards, caches, exported copies>`
+- Why this matters: `<one line — e.g. "the derived copy lags and has burned us">`
