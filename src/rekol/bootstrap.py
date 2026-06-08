@@ -32,6 +32,7 @@ on:
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -493,7 +494,7 @@ def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
 
 
 def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: str) -> Path:
-    """Write one batch's review file to ``pending_dir``, returning its path.
+    """Write one batch's review file to ``pending_dir`` ATOMICALLY, returning its path.
 
     INCREMENTAL by design: each batch is written the moment it is planned/recalled
     (before the assistant processes it), so a run reaped after batch N has batches
@@ -501,8 +502,22 @@ def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: 
     path is deterministic per (run, batch), so re-running a batch (a resume that
     re-touches the last in-flight batch) overwrites in place rather than creating
     a duplicate file. Creates ``pending_dir`` if absent.
+
+    The write mirrors ``save_state``'s atomic pattern (temp file + flush + fsync +
+    ``os.replace``): a process killed mid-write leaves either the previous
+    complete review file or the new complete one, never a torn file the operator
+    (or a tool parsing the checklist) would misread.
     """
     pending_dir.mkdir(parents=True, exist_ok=True)
     out_path = _batch_review_path(pending_dir, run_id, batch.batch_id)
-    out_path.write_text(render_batch_review(batch, run_id=run_id), encoding="utf-8")
+    body = render_batch_review(batch, run_id=run_id)
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    # Write + flush + fsync the temp file before the rename so the bytes are on
+    # disk when the atomic rename publishes them; otherwise a power loss could
+    # rename an empty/partial inode into place.
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, out_path)
     return out_path

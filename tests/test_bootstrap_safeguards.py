@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from rekol.bootstrap import (
@@ -637,3 +638,76 @@ def test_save_state_overwrites_stale_tmp_leaving_only_final(tmp_path: Path) -> N
     leftovers = [p.name for p in path.parent.iterdir() if p != path]
     assert leftovers == [], f"stale temp must be consumed by the atomic save: {leftovers}"
     assert load_state(path) == state
+
+
+def test_write_batch_candidates_is_atomic_no_torn_tmp_left_behind(tmp_path: Path) -> None:
+    """A batch review file is written atomically: no ``.tmp`` survives a clean write.
+
+    ``write_batch_candidates`` mirrors ``save_state``'s temp-file + ``os.replace``
+    pattern so a process killed mid-write leaves the previous complete file or the
+    new complete one, never a torn one. After a successful write only the final
+    ``.md`` exists — no leftover ``.tmp`` sibling.
+    """
+    pending = tmp_path / "pending-review"
+    batch = BootstrapBatch(
+        batch_id="project-rekol", candidates=[_cand("always run ruff", uuid="u")]
+    )
+    out_path = write_batch_candidates(batch, pending_dir=pending, run_id="r1")
+
+    assert out_path.exists()
+    leftovers = [p.name for p in pending.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"atomic write left a torn temp file behind: {leftovers}"
+    # The published file is complete (parses as a review with the candidate).
+    assert "always run ruff" in out_path.read_text(encoding="utf-8")
+
+
+def test_plan_persists_checkpoint_before_writing_all_batches(tmp_path: Path, monkeypatch) -> None:
+    """A crash mid-plan leaves a resumable checkpoint, not orphaned review files.
+
+    The checkpoint used to be written only AFTER every batch's review file, so a
+    crash mid-plan orphaned the files behind a missing checkpoint and forced a
+    full replan. ``_plan_run`` now persists a "planning started" checkpoint before
+    the write loop and re-saves it after each batch. We simulate a crash on the
+    second batch's write and assert the checkpoint is already on disk (with the
+    full plan), so a resume finds it.
+    """
+    import rekol.cli_bootstrap as cli_bootstrap
+    from rekol.config import load_config
+
+    memory_home = tmp_path / "home"
+    _seed_memory_home(memory_home)
+    monkeypatch.setenv("REKOL_HOME", str(memory_home))
+    cfg = load_config()
+
+    # All-time scope (days=None) so the candidates' fixed timestamps aren't dropped
+    # by the default recency window — we only care about the batch-write loop here.
+    scope = cli_bootstrap.ScopeFilter(projects=[], days=None, max_sessions=None)
+
+    # Two batches across two projects so the write loop runs more than once.
+    candidates = [
+        _cand("always run ruff", cwd="/home/leon/github/rekol", uuid="a", session_id="s-a"),
+        _cand("always pin deps", cwd="/home/leon/github/infra", uuid="b", session_id="s-b"),
+    ]
+    monkeypatch.setattr(cli_bootstrap, "_recall_and_dedupe", lambda _cfg: candidates)
+
+    # Crash on the SECOND batch write to simulate a reap mid-plan.
+    real_write = cli_bootstrap.write_batch_candidates
+    calls = {"n": 0}
+
+    def flaky_write(batch, *, pending_dir, run_id):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated reap mid-plan")
+        return real_write(batch, pending_dir=pending_dir, run_id=run_id)
+
+    monkeypatch.setattr(cli_bootstrap, "write_batch_candidates", flaky_write)
+
+    with pytest.raises(RuntimeError, match="simulated reap"):
+        cli_bootstrap._plan_run(cfg, scope)
+
+    # The checkpoint landed BEFORE the crash, with the full two-batch plan, so a
+    # resume picks it up rather than replanning from scratch over orphaned files.
+    state = load_state(state_path_for(memory_home))
+    assert state is not None, "no checkpoint persisted — a resume would replan from scratch"
+    assert len(state.batches) == 2, "checkpoint must carry the full batch plan"
+    assert state.completed == [], "planning writes files only; no batch is processed/done yet"
