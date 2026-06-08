@@ -254,3 +254,67 @@ def test_doctor_does_not_crash_on_missing_session_index(tmp_path: Path, monkeypa
     assert result.exit_code == 0, result.output
     assert "session index" in result.output
     assert "healthy" in result.output
+
+
+# ----------------------------- archive health ------------------------------
+
+
+def test_doctor_reports_archive_present(tmp_path, monkeypatch):
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path))
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(tmp_path / "archive"))
+    (tmp_path / "archive" / "projA").mkdir(parents=True)
+    (tmp_path / "archive" / "projA" / "s.jsonl").write_text('{"type":"user"}\n')
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    archive_findings = [f for f in findings if "archive" in f.label]
+    assert archive_findings, [f.label for f in findings]
+    detail = " ".join(f.detail for f in archive_findings)
+    assert "1" in detail  # one archived session counted
+
+
+def test_doctor_warns_on_cloud_synced_archive(tmp_path, monkeypatch):
+    """A synced archive puts verbatim secrets in the cloud and on-demand sync can
+    dehydrate files — doctor must flag it (PROBLEM/warn), not stay silent."""
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    cloud = tmp_path / "Dropbox" / "rekol-archive"
+    cloud.mkdir(parents=True)
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(cloud))
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    detail = " ".join(f.detail.lower() for f in findings)
+    assert "cloud" in detail or "sync" in detail
+
+
+def test_doctor_warns_on_icloud_synced_archive(tmp_path, monkeypatch):
+    """The iCloud candidate's REAL path is `…/Mobile Documents/com~apple~CloudDocs`,
+    which does not contain the display label's first word ('iCloud'). Matching on
+    the label word silently misses it — doctor must match the resolved archive path
+    against the candidate PATH VALUES (or the iCloud on-disk signal)."""
+    from rekol.cli_doctor import _check_archive
+    from rekol.config import load_config
+
+    # Mirror the macOS iCloud Drive on-disk layout under a fake HOME so the
+    # candidate path resolves to this archive.
+    fake_home = tmp_path / "home"
+    icloud = fake_home / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "rekol-archive"
+    icloud.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path / "memhome"))
+    (tmp_path / "memhome").mkdir()
+    monkeypatch.setenv("REKOL_ARCHIVE_DIR", str(icloud))
+
+    cfg = load_config()
+    findings = _check_archive(cfg)
+    location_findings = [f for f in findings if f.label == "archive location"]
+    assert location_findings, [f.label for f in findings]
+    detail = " ".join(f.detail.lower() for f in location_findings)
+    assert "cloud" in detail or "sync" in detail or "icloud" in detail

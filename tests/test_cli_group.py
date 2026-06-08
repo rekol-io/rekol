@@ -21,6 +21,7 @@ EXPECTED_COMMANDS = {
     "review",
     "migrate",
     "session-index",
+    "archive",
     "import",
     "init",
     "doctor",

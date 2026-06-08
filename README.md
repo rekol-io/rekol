@@ -43,6 +43,29 @@ Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the index lives in
 a local cache *outside* your memory folder, so syncing your memory never syncs
 the index.
 
+rekol keeps a **local** copy of your sessions so your memory survives even if
+Claude Code rotates its transcripts — it lives on your disk under
+`~/.local/share/rekol/archive`, is never uploaded, and is excluded from sync by
+default. Turn it off with `--no-archive` (or `archive_enabled: false` in
+`rekol.config.yaml`); relocate it with `--archive-dir`; exclude sensitive
+projects with `exclude_paths` / `.rekolignore`.
+
+## Install options
+
+`./install.sh` accepts these flags (all optional):
+
+- `--dry-run` — print every action without executing it.
+- `--no-hook` — skip the Claude Code SessionStart/hook wiring (settings.json).
+- `--no-skill` — skip installing the `rekol`/`memory` Claude skill.
+- `--no-shellrc` — skip the `~/.zshrc` edits (PATH + `REKOL_HOME` export).
+- `--test-mode` — shorthand for `--no-hook --no-skill --no-shellrc`.
+- `--tools-home PATH` — override the venv + tools home (default `~/.local/share/rekol`).
+- `--bin-dir PATH` — override where the `rekol` shim lives (default `~/bin`).
+- `--migrate` — opt in to importing legacy `~/.claude/projects/*/memory/` content.
+- `--no-archive` — disable the durable transcript archive (seeds `archive_enabled: false`).
+- `--archive-dir PATH` — set the durable archive location (default `~/.local/share/rekol/archive`).
+- `--help` — print usage and exit.
+
 ## Bring in your history
 
 A fresh install starts with an essentially empty store. To seed it from work
@@ -121,7 +144,10 @@ rather than silently skipping it — re-run with `--tools-home PATH` /
 (`always/`, `when/`, `topics/`, `knowledge/`, your `*.md`, the config, the local
 git repo) is preserved. Only the derived index — the local cache outside
 `$REKOL_HOME`, plus any legacy in-tree `.index/` from an older install — is
-removable, and only with `--purge-index` or by confirming the prompt. After
+removable, and only with `--purge-index` or by confirming the prompt. The
+durable transcript archive is treated the same way: preserved by default, removed
+only with `--purge-archive` (or by confirming the prompt). Because there is no
+export in v1, archive deletion is irreversible, so `--yes` keeps it. After
 uninstalling, run `source ~/.zshrc` (or open a new terminal). Re-running
 `./install.sh` later works cleanly from that state.
 

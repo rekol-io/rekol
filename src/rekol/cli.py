@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import click
 
+from rekol.cli_archive import main as archive_cmd
 from rekol.cli_capture import main as capture_cmd
 from rekol.cli_docs_convert import main as import_cmd
 from rekol.cli_doctor import main as doctor_cmd
@@ -39,6 +40,7 @@ main.add_command(propose_cmd, name="propose")
 main.add_command(review_cmd, name="review")
 main.add_command(migrate_grp, name="migrate")
 main.add_command(session_index_cmd, name="session-index")
+main.add_command(archive_cmd, name="archive")
 main.add_command(import_cmd, name="import")
 main.add_command(init_cmd, name="init")
 main.add_command(doctor_cmd, name="doctor")

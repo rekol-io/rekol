@@ -7,6 +7,7 @@ keep working.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 from dataclasses import dataclass
@@ -28,6 +29,10 @@ DEFAULTS: dict = dict(
     temporal_recency_halflife_days=180,
     temporal_recency_exempt_layers=["always", "knowledge"],
     temporal_confirm_interval_days=180,
+    # --- Durable transcript archive (#8) ---
+    archive_enabled=True,  # default-ON: we disclose at install, not opt-in
+    archive_dir=None,  # None → resolve_archive_dir() picks the XDG default
+    exclude_paths=[],  # glob patterns for project/cwd paths never archived/indexed
 )
 
 
@@ -77,6 +82,96 @@ def resolve_index_dir(memory_home: Path) -> Path:
     return cache_root / "rekol" / digest
 
 
+def resolve_archive_dir(config_archive_dir: str | None) -> Path:
+    """Resolve the durable, rekol-owned transcript archive directory.
+
+    Unlike :func:`resolve_index_dir`, the archive is **machine-level** — NOT
+    hashed per ``$REKOL_HOME``. Transcripts come from ``~/.claude/projects``
+    regardless of which memory home is active, so one archive per machine is
+    correct; splitting per-home would only duplicate the same transcripts.
+
+    SECURITY: the archive holds verbatim prompts (and any pasted secrets), so it
+    defaults to a LOCAL, non-synced, non-cache location — the same posture that
+    moved ``sessions.db`` out of ``$REKOL_HOME`` (#10/#13). It lives under
+    ``XDG_DATA_HOME`` (durable) rather than ``XDG_CACHE_HOME`` (disposable),
+    because it is the source of truth a rebuild reads from, not a rebuildable
+    cache.
+
+    Resolution order:
+        1. ``$REKOL_ARCHIVE_DIR`` — explicit override, used verbatim (expanded).
+        2. ``config_archive_dir`` — the ``archive_dir`` config key, if set.
+        3. ``${XDG_DATA_HOME:-~/.local/share}/rekol/archive``.
+
+    Args:
+        config_archive_dir: The raw ``archive_dir`` config value, or ``None``.
+
+    Returns:
+        The absolute archive directory path (not created here; the archive
+        module ``mkdir(parents=True)``s it on first write).
+    """
+    override = os.environ.get("REKOL_ARCHIVE_DIR")
+    if override:
+        return Path(os.path.expanduser(override))
+    if config_archive_dir:
+        return Path(os.path.expanduser(config_archive_dir))
+    data_home = os.environ.get("XDG_DATA_HOME")
+    data_root = (
+        Path(os.path.expanduser(data_home)) if data_home else Path.home() / ".local" / "share"
+    )
+    return data_root / "rekol" / "archive"
+
+
+def path_is_excluded(path: str, patterns: list[str]) -> bool:
+    """True when ``path`` matches any exclude glob in ``patterns``.
+
+    The shared exclude matcher — the reusable foundation for #5; the archive
+    sink is its first consumer. Matching is over the path's STRING form with
+    ``fnmatch`` (case-sensitive, ``*`` spans any characters incl. ``/`` since we
+    match the whole path, not per-segment). A bare segment like
+    ``secret-project`` is matched anywhere in the path by also testing
+    ``*/<pattern>/*`` and ``*<pattern>*``, so users need not always write a full
+    glob.
+
+    Empty ``patterns`` excludes nothing (the default — nothing is excluded until
+    the user opts in).
+    """
+    for pattern in patterns:
+        if fnmatch.fnmatch(path, pattern):
+            return True
+        # A bare segment (no glob chars) should still match anywhere in the path
+        # so a user can write `secret-project` instead of `*/secret-project/*`.
+        if "*" not in pattern and "?" not in pattern:
+            if fnmatch.fnmatch(path, f"*/{pattern}/*") or fnmatch.fnmatch(path, f"*{pattern}*"):
+                return True
+    return False
+
+
+def load_rekolignore_patterns(root: Path) -> list[str]:
+    """Read ``<root>/.rekolignore`` (gitignore-style) into a pattern list.
+
+    Honored IN ADDITION to ``exclude_paths`` from config. Blank lines and lines
+    starting with ``#`` are skipped; each remaining line is stripped of
+    surrounding whitespace and used as an ``fnmatch`` glob. A missing file
+    yields an empty list (no error — absence means "ignore nothing here").
+    """
+    ignore_file = root / ".rekolignore"
+    if not ignore_file.is_file():
+        return []
+    patterns: list[str] = []
+    # OSError (permission, race) must not crash a sync — an unreadable ignore
+    # file degrades to "no extra patterns", logged by the caller, never fatal.
+    try:
+        text = ignore_file.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    return patterns
+
+
 @dataclass
 class Config:
     """Resolved configuration for rekol.
@@ -102,6 +197,14 @@ class Config:
     temporal_recency_halflife_days: float
     temporal_recency_exempt_layers: list[str]
     temporal_confirm_interval_days: int
+    archive_enabled: bool
+    exclude_paths: list[str]
+    # NOTE: the RESOLVED archive_dir is intentionally NOT a stored field — it is
+    # resolved lazily via the archive_dir property (mirrors index_dir), so an env
+    # override is honored at call time rather than frozen at load time. We store
+    # only the RAW config value here (no leading underscore — this is a public
+    # dataclass field; the resolved value comes from the property).
+    archive_dir_raw: str | None
 
     @property
     def index_dir(self) -> Path:
@@ -133,6 +236,15 @@ class Config:
             Path at ``<cache>/sessions.db`` (outside ``$REKOL_HOME``).
         """
         return self.index_dir / "sessions.db"
+
+    @property
+    def archive_dir(self) -> Path:
+        """Absolute path to the durable transcript archive (see resolve_archive_dir).
+
+        Machine-level and NOT synced by default; holds verbatim transcripts.
+        Resolved lazily so an env override is honored at call time.
+        """
+        return resolve_archive_dir(self.archive_dir_raw)
 
 
 def load_config() -> Config:
@@ -184,4 +296,7 @@ def load_config() -> Config:
         temporal_recency_halflife_days=float(data["temporal_recency_halflife_days"]),
         temporal_recency_exempt_layers=list(data["temporal_recency_exempt_layers"]),
         temporal_confirm_interval_days=int(data["temporal_confirm_interval_days"]),
+        archive_enabled=bool(data["archive_enabled"]),
+        exclude_paths=list(data["exclude_paths"]),
+        archive_dir_raw=(str(data["archive_dir"]) if data["archive_dir"] is not None else None),
     )
