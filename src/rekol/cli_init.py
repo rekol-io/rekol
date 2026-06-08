@@ -72,10 +72,25 @@ GROWS_HINT = (
     is_flag=True,
     help="Accept the recommended default for every prompt (non-interactive).",
 )
-def main(yes: bool) -> None:
+@click.option(
+    "--seed-only",
+    is_flag=True,
+    help="Only gap-fill the starter-pack scaffold, then stop — no indexing, "
+    "bootstrap, or coverage. The quiet primitive the onboarding skill uses for "
+    "its baseline step.",
+)
+def main(yes: bool, seed_only: bool) -> None:
     """Interactively onboard a new REKOL install (forked on detected history)."""
     cfg = load_config()
     click.echo(f"REKOL home: {cfg.memory_home}")
+
+    if seed_only:
+        # Baseline-seed primitive (#59 step 4): gap-fill the scaffold and stop.
+        # Deliberately skips indexing / bootstrap / coverage — the onboarding skill
+        # calls this for a quiet, safe baseline seed, NOT the full interview (which
+        # would otherwise fire a multi-minute session-index pass on a large history).
+        _seed_and_report(cfg)
+        return
 
     n_transcripts = count_claude_transcripts(cfg.claude_projects_dir)
     if n_transcripts >= PATH_A_MIN_TRANSCRIPTS:
@@ -126,8 +141,9 @@ def _path_a(cfg: Config, n_transcripts: int, *, yes: bool) -> bool:
         "Index them so REKOL can search your history? (you can change this anytime)",
         default=True,
     ):
-        _invoke(["session-index", "--incremental"])
-        indexed_content = True
+        # Only treat content as indexed if the step actually SUCCEEDED, so the
+        # adaptive close doesn't run a coverage report for a run that indexed nothing.
+        indexed_content = _invoke(["session-index", "--incremental"])
 
     # Step 2 — memory bootstrap (default: later). Distils recurring instructions
     # into curated, always-on memory (understanding). Independent of step 1 —
@@ -298,30 +314,38 @@ def _offer_legacy_migration(*, yes: bool) -> None:
     _invoke(["migrate", "auto", "--commit", "--no-llm"])
 
 
-def _invoke(argv: list[str]) -> None:
-    """Invoke a rekol subcommand in-process, surfacing failure without aborting init.
+def _invoke(argv: list[str]) -> bool:
+    """Invoke a rekol subcommand in-process; return True on success, False on failure.
 
     Lazy import of the CLI group avoids the cli -> cli_init -> cli import cycle.
     standalone_mode=False makes Click return/raise instead of calling sys.exit,
-    so one failed step does not kill the whole onboarding flow.
+    so one failed step does not kill the whole onboarding flow. Callers that must
+    only proceed when a step really succeeded (e.g. the adaptive close reports
+    coverage only when indexing actually happened) check the return; others ignore it.
     """
     from rekol.cli import main as rekol_cli
 
     click.echo(f"  rekol {' '.join(argv)}", err=True)
     try:
         rekol_cli(argv, standalone_mode=False)
+        return True
     except SystemExit as exc:  # some leaf commands still sys.exit on error paths
         if exc.code not in (0, None):
             click.echo(f"  (warning: rekol {argv[0]} exited {exc.code})", err=True)
+            return False
+        return True
     except click.Abort:
         click.echo(f"  (warning: rekol {argv[0]} aborted)", err=True)
+        return False
     except click.ClickException as exc:
         exc.show()
+        return False
     except Exception as exc:  # noqa: BLE001 — INTENTIONAL: one failed step must
         # not kill the whole onboarding flow (the docstring's contract). Any
         # unexpected error from a leaf command is surfaced as a warning and init
         # continues to the next step rather than aborting everything.
         click.echo(f"  (warning: rekol {argv[0]} failed: {exc})", err=True)
+        return False
 
 
 if __name__ == "__main__":
