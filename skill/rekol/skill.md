@@ -7,6 +7,15 @@ description: Persistent memory at $REKOL_HOME (falls back to $MEMORY_HOME). Trig
 
 Memory root: `$REKOL_HOME` (falls back to `$MEMORY_HOME`). Layers: `always/`, `when/`, `topics/`, `knowledge/`. Index: `REKOL.md` (always-on), `.index/INDEX.md` (auto-generated).
 
+## Behavioral rules
+
+These four directives govern every memory interaction. The mechanics that follow show *how* to run them.
+
+1. **Search, don't guess.** Before answering a question, recommending a path/command/ID/env name/canonical reference, or writing a new memory, run `rekol search` first. In-context reasoning goes stale; a curated source may already exist. Search is the first move, not the fallback.
+2. **Ground every answer.** Answer from what memory actually returned, and cite the provenance (the `file_path` + line range, or the session `jsonl_path` + line). If the answer isn't in memory, say so plainly — "I don't have that in memory" — and offer to capture it. Never present an in-context guess as a remembered fact. **Never confabulate.**
+3. **Hedge on absence.** A `rekol search` miss, an unmatched filename, or an unfamiliar command means *you didn't find it* — not that it doesn't exist. Built-in commands and capabilities aren't fully enumerable to you, so never flatly tell the user something is "not available." Hedge: "not registered that I can see, but built-in commands aren't fully enumerable to me — try it and we'll confirm." (Distinct from grounding: grounding governs *facts in memory*; hedging governs *capabilities you couldn't enumerate*.)
+4. **Capture as you go.** When a surprise, correction, or validated approach would help a future session, capture it — and tell the user in one line what you saved. See *Capture* below for the bar and the commands.
+
 ## Retrieve — prefer the vector index over reading whole files
 
 Reading full topic files for a single fact wastes context. The index already stores heading-scoped chunks with line ranges; one `rekol search` call returns the most-relevant snippets across all files. Use it as the **first** lookup, not the fallback.
@@ -16,17 +25,9 @@ Reading full topic files for a single fact wastes context. The index already sto
 3. **Direct file read** when you already know the exact filename (e.g. `topics/<noun>.md` matches the user's noun verbatim, or `when/when-<activity>.md` matches the activity).
 4. **Last-resort grep**: `grep -rE "^(tags|aliases):" "${REKOL_HOME:-$MEMORY_HOME}"` for keyword lookup if search and direct match both miss.
 
-### Search-before-write
+### Dedupe before writing (rule 1 applied to capture)
 
-Before capturing a new memory, run `rekol search` against its gist. If a near-duplicate exists, **update** it instead of creating a new file. The capture flow has cosine-similarity conflict detection, but pre-empting it avoids round-trips and keeps the layer count clean.
-
-### Search-before-recommend
-
-Before recommending a path, command, ID, env name, or canonical reference, do a quick `rekol search` against the topic. Prevents recommending stale info from in-context reasoning when a canonical source already exists.
-
-### Hedge on absence — never declare a capability dead because you didn't find it
-
-A `rekol search` miss, an unmatched filename, or an unfamiliar command means *you didn't find it*, not that it doesn't exist — built-in commands and capabilities aren't fully enumerable to you. Never flatly tell the user something is "not available." Hedge: "not registered that I can see, but built-in commands aren't fully enumerable to me — try it and we'll confirm."
+When the search you ran before capturing surfaces a near-duplicate, **update** that file instead of creating a new one. The capture flow has cosine-similarity conflict detection, but pre-empting it avoids round-trips and keeps the layer count clean.
 
 ## Bring in existing history
 
@@ -42,9 +43,9 @@ When a user wants to seed REKOL from work that already exists, map their phrasin
 
 ## Capture — proactive, not silent
 
-Capture surprises, corrections, and validated approaches as a side effect of getting work done — not just on explicit "remember this." But always tell the user **what** was captured/changed in one line so they can audit without going hunting.
+The capture protocol (rule 4) in practice: capture surprises, corrections, and validated approaches as a side effect of getting work done — not just on explicit "remember this." Always tell the user **what** was captured/changed in one line so they can audit without going hunting.
 
-The bar is still: *would a future session genuinely benefit from knowing this?* Don't capture trivia.
+The bar: *would a future session genuinely benefit from knowing this?* Don't capture trivia.
 
 1. Propose layer + filename + frontmatter (`name`, `description`, `type`, `tags`, `aliases`, `see_also`).
 2. `rekol capture --layer <L> --file <name>.md --name "..." --description "..." [--tags a,b] [--aliases x,y]`
