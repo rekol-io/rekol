@@ -1,5 +1,13 @@
 """rekol import: turn a text-file tree into synthetic Claude Code JSONL.
 
+DEPRECATED (T8 #63): ``import`` writes a ONE-TIME snapshot that drifts the moment
+the source tree changes. It is superseded by INCLUDE-SCOPE — add a directory to
+``include_dirs`` in ``rekol.config.yaml`` once and every ``session-index`` run
+re-indexes its new files automatically, governed by the deny-list (see
+``rekol.include_indexer``). ``import`` is KEPT WORKING (existing flows like
+``backstage-ai-archive`` must not break) but prints a notice steering to
+include-scope.
+
 Writes one .jsonl per immediate-child folder of SOURCE_DIR into
 ``<claude_projects_dir>/<prefix>/`` so the existing rekol session-index
 ingester surfaces the content in rekol search. By default it then chains
@@ -79,6 +87,22 @@ def main(
     exclude: str,
 ) -> None:
     """Convert SOURCE_DIR (a tree of text files) into synthetic transcripts."""
+    # DEPRECATION (T8 #63): `import` is a ONE-TIME snapshot — edit/move/add a file
+    # under SOURCE_DIR after this and the index drifts. Include-scope replaces it
+    # with an ONGOING relationship: add the dir to `include_dirs` once and every
+    # `session-index` run picks up its new files automatically (deny-list
+    # governed). We keep `import` WORKING (so existing flows like
+    # backstage-ai-archive don't break) but steer users to the durable path. The
+    # notice goes to stderr so it never pollutes the machine-readable stats line on
+    # stdout.
+    click.echo(
+        "note: `rekol import` is DEPRECATED — it writes a one-time snapshot that "
+        "goes stale when the source changes. Prefer include-scope: add this "
+        "directory to `include_dirs` in rekol.config.yaml (or via onboarding) so "
+        "`rekol session-index` keeps it indexed on every run, governed by your "
+        "deny-list. `import` still works for now.",
+        err=True,
+    )
     cfg = load_config()
     target_dir = cfg.claude_projects_dir
     target_dir.mkdir(parents=True, exist_ok=True)
