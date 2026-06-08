@@ -116,6 +116,8 @@ manifest_index_dir() {
     [ -L "${BIN_DIR}/rekol" ] || [ -e "${BIN_DIR}/rekol" ]
     [ -f "${SBHOME}/.claude/skills/rekol/skill.md" ]
     [ -f "${SBHOME}/.claude/skills/memory/skill.md" ]
+    [ -f "${SBHOME}/.claude/skills/rekol-init/skill.md" ]
+    [ -f "${SBHOME}/.claude/skills/rekol-bootstrap/skill.md" ]
     [ -d "${TOOLS_HOME}/.venv" ]
 
     run_uninstall --yes
@@ -125,6 +127,8 @@ manifest_index_dir() {
     [ ! -e "${BIN_DIR}/rekol" ]
     [ ! -d "${SBHOME}/.claude/skills/rekol" ]
     [ ! -d "${SBHOME}/.claude/skills/memory" ]
+    [ ! -d "${SBHOME}/.claude/skills/rekol-init" ]
+    [ ! -d "${SBHOME}/.claude/skills/rekol-bootstrap" ]
     [ ! -d "${TOOLS_HOME}" ]
 
     # User markdown memory is intact.
