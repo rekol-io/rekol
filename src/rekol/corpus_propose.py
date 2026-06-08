@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rekol.config import path_is_excluded
+
 if TYPE_CHECKING:
     from rekol.embeddings import BaseEmbedder
     from rekol.sessions.store import SessionStore
@@ -104,6 +106,7 @@ def recall_corpus_candidates(
     queries: list[str] | None = None,
     per_query_top_k: int = 5,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    exclude_patterns: list[str] | None = None,
 ) -> list[CorpusCandidate]:
     """Recall instruction-signal candidates from the indexed session corpus.
 
@@ -119,18 +122,30 @@ def recall_corpus_candidates(
     empty list rather than an error, so the CLI can report "no candidates"
     gracefully on a fresh install.
 
+    ``exclude_patterns`` (config ``exclude_paths`` + any ``.rekolignore``) is the
+    privacy chokepoint: a hit whose originating ``cwd`` matches an exclude glob is
+    dropped BEFORE dedupe, so a sensitive project a user excluded from
+    archiving/indexing is also excluded from recall — even on the
+    ``archive_enabled=false`` + ``session_search_enabled=true`` path, which would
+    otherwise leak it. Default (``None``/empty) excludes nothing, preserving the
+    pure recall behaviour for callers that pass no config.
+
     Args:
         session_store: The transcript store to recall over (already schema-init'd).
         embedder: Embedder for the vector tier; must match the index's model.
         queries: Override the default :data:`INSTRUCTION_SIGNAL_QUERIES`.
         per_query_top_k: Hits to pull from each tier for each query.
         max_candidates: Corpus-narrowing cap on the returned shortlist.
+        exclude_patterns: Glob patterns; a candidate whose ``cwd`` matches any is
+            dropped from recall. Built by the CLI as
+            ``cfg.exclude_paths + load_rekolignore_patterns(...)``.
 
     Returns:
         Deduped, score-sorted candidates with provenance, at most
-        ``max_candidates`` long.
+        ``max_candidates`` long, with excluded-cwd candidates removed.
     """
     driver_queries = queries if queries is not None else INSTRUCTION_SIGNAL_QUERIES
+    patterns = exclude_patterns or []
 
     # Keyed on (session_id, message_uuid) so a message matched by several driver
     # queries (or by both tiers) collapses to one candidate at its best score.
@@ -140,6 +155,11 @@ def recall_corpus_candidates(
         fts_hits = session_store.search_fts(query, top_k=per_query_top_k)
         vec_hits = session_store.search_vec(query_vec, top_k=per_query_top_k)
         for hit in fts_hits + vec_hits:
+            # Privacy filter BEFORE dedupe: drop any hit from an excluded cwd so an
+            # excluded project never even competes for a candidate slot.
+            cwd = hit.get("cwd")
+            if patterns and cwd and path_is_excluded(cwd, patterns):
+                continue
             key = (hit["session_id"], hit["message_uuid"])
             candidate = _candidate_from_hit(hit, query)
             existing = best_by_key.get(key)

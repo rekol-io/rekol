@@ -147,6 +147,16 @@ def test_apply_scope_caps_distinct_sessions() -> None:
     assert sessions == {"sess-new"}
 
 
+def test_apply_scope_cap_treats_garbage_timestamp_as_oldest() -> None:
+    """A session whose timestamp won't parse must not masquerade as most-recent and
+    survive the cap over a genuinely-recent one — it sorts oldest (dropped first)."""
+    scope = ScopeFilter(projects=[], days=None, max_sessions=1)
+    recent = _cand("recent", session_id="sess-recent", ts="2026-06-06T00:00:00Z", uuid="r")
+    garbage = _cand("garbage", session_id="sess-garbage", ts="not-a-timestamp", uuid="g")
+    kept = apply_scope([garbage, recent], scope, now_iso="2026-06-07T12:00:00Z")
+    assert {c.session_id for c in kept} == {"sess-recent"}
+
+
 def test_apply_scope_unbounded_keeps_everything() -> None:
     """No bounds (all None / empty) keeps every candidate — the widenable ceiling."""
     scope = ScopeFilter(projects=[], days=None, max_sessions=None)
