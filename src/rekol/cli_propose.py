@@ -30,7 +30,7 @@ from pathlib import Path
 import click
 
 from rekol.cli_common import guard_curated_schema
-from rekol.config import load_config
+from rekol.config import load_config, load_rekolignore_patterns
 from rekol.corpus_propose import (
     dedupe_against_memory,
     recall_corpus_candidates,
@@ -153,13 +153,24 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
         )
         return
 
+    # Combine config excludes with any per-folder .rekolignore at the projects
+    # root, so a sensitive project a user excluded is also excluded from recall
+    # (matches cli_session_index.py / cli_archive.py).
+    exclude_patterns = list(cfg.exclude_paths) + load_rekolignore_patterns(cfg.claude_projects_dir)
+
     embedder = get_embedder(cfg.embedding_model)
-    memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
-    memory_store.init_schema()
-    guard_curated_schema(memory_store)
-    session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
-    session_store.init_schema()
+    # Opens live INSIDE the try so a raise in init_schema/guard_curated_schema
+    # (or the session-store open) never leaks an already-opened store. ``finally``
+    # closes whatever got opened (None-guarded).
+    memory_store: IndexStore | None = None
+    session_store: SessionStore | None = None
     try:
+        memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+        memory_store.init_schema()
+        guard_curated_schema(memory_store)
+        session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
+        session_store.init_schema()
+
         # The vector tier can only be queried at the index's own width; fail with
         # the same actionable message the ingest/search paths use rather than
         # letting sqlite-vec raise a cryptic width error mid-query.
@@ -169,7 +180,9 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
             click.echo(str(exc), err=True)
             raise SystemExit(2) from exc
 
-        candidates = recall_corpus_candidates(session_store, embedder)
+        candidates = recall_corpus_candidates(
+            session_store, embedder, exclude_patterns=exclude_patterns
+        )
         if not candidates:
             if not quiet:
                 click.echo(
@@ -180,8 +193,10 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
 
         new_candidates, already_captured = dedupe_against_memory(candidates, memory_store, embedder)
     finally:
-        session_store.close()
-        memory_store.close()
+        if session_store is not None:
+            session_store.close()
+        if memory_store is not None:
+            memory_store.close()
 
     proposal, ts = _pending_proposal_path(cfg)
     proposal.write_text(render_corpus_proposal(new_candidates, already_captured, timestamp=ts))
