@@ -211,3 +211,92 @@ def test_starter_pack_seed_is_idempotent_across_runs(
     result = runner.invoke(init_main, [], input=_TAIL)  # re-run
     assert result.exit_code == 0, result.output
     assert rekol_md.read_text(encoding="utf-8") == "MY EDITS\n", "re-run must not clobber edits"
+
+
+# --- §6 UX refinements (#59) --------------------------------------------------
+
+
+def test_change_anytime_phrasing_present(tmp_path, monkeypatch, recorded_invokes) -> None:
+    """Refinement: '(you can change this anytime)' reassurance appears in the flow."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=5)
+    runner = CliRunner()
+    result = runner.invoke(init_main, [], input="\nn\nn\n" + _TAIL)
+    assert result.exit_code == 0, result.output
+    assert "change this anytime" in result.output.lower()
+
+
+def test_magnitude_aware_index_warns_on_huge_history(
+    tmp_path, monkeypatch, recorded_invokes
+) -> None:
+    """Refinement 4: a huge transcript count warns 'this may take a while'."""
+    from rekol.cli_init import HUGE_HISTORY_THRESHOLD
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=HUGE_HISTORY_THRESHOLD + 1)
+    runner = CliRunner()
+    result = runner.invoke(init_main, [], input="\nn\nn\n" + _TAIL)
+    assert result.exit_code == 0, result.output
+    assert "while" in result.output.lower()
+
+
+def test_small_history_does_not_warn(tmp_path, monkeypatch, recorded_invokes) -> None:
+    """A small history indexes without the magnitude warning (no false alarm)."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=3)
+    runner = CliRunner()
+    result = runner.invoke(init_main, [], input="\nn\nn\n" + _TAIL)
+    assert result.exit_code == 0, result.output
+    assert "may take a while" not in result.output.lower()
+
+
+def test_adaptive_close_empty_pivots_to_how_it_grows(
+    tmp_path, monkeypatch, recorded_invokes
+) -> None:
+    """Refinement 1: an empty install skips the coverage report, teaches 'how it grows'."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=0)
+    runner = CliRunner()
+    result = runner.invoke(init_main, [], input=_TAIL)
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "grow" in out
+    # The signature close line, present on every path.
+    assert "recalls what it has" in out
+    # No coverage report invoked on an empty install (nothing to report).
+    assert not any(c and c[0] == "coverage" for c in recorded_invokes)
+
+
+def test_adaptive_close_with_content_runs_coverage(tmp_path, monkeypatch, recorded_invokes) -> None:
+    """Refinement 1: with content (indexed), the close prints the coverage report."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=8)
+    runner = CliRunner()
+    # index? yes(default) | bootstrap? no | starter? no
+    result = runner.invoke(init_main, [], input="\nn\nn\n" + _TAIL)
+    assert result.exit_code == 0, result.output
+    # The close line is present, and coverage is invoked because we indexed.
+    assert "recalls what it has" in result.output.lower()
+    assert any(c and c[0] == "coverage" for c in recorded_invokes), (
+        "with indexed content the close must run the coverage report"
+    )
+
+
+def test_adaptive_close_no_coverage_when_index_declined(
+    tmp_path, monkeypatch, recorded_invokes
+) -> None:
+    """If the user declined indexing, there's no fresh content → no coverage report."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=8)
+    runner = CliRunner()
+    # index? no | bootstrap? no | starter? no
+    result = runner.invoke(init_main, [], input="n\nn\nn\n" + _TAIL)
+    assert result.exit_code == 0, result.output
+    assert not any(c and c[0] == "coverage" for c in recorded_invokes)
+    # Still teaches how it grows, and still prints the signature close line.
+    assert "recalls what it has" in result.output.lower()
