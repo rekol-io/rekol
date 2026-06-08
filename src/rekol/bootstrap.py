@@ -27,6 +27,17 @@ on:
    :func:`suggested_frontmatter`) — a conservative heuristic first guess at the
    layer + frontmatter the assistant refines, so even a degraded run (assistant
    unavailable) still produces a usable review file.
+5. **Scalable review UX** (T3 v2, #62) for a big corpus (hundreds of proposals):
+   :func:`group_by_layer` + a confidence-ranked, layer-grouped
+   :func:`render_batch_review`; BULK-APPROVE (:func:`bulk_capture_commands`,
+   :func:`extract_capture_commands_from_review`) to approve a whole batch in one
+   action; and STOP-EARLY (:func:`truncate_to_top`) to review the top-N and defer
+   the rest (resumably, never dropped).
+6. **Always-on promotion** (:func:`promote_to_rekol_md`) — when a candidate is
+   captured at the ``always`` layer, promote its pointer into ``REKOL.md`` (the
+   always-on index re-injected every session); idempotent + budget-capped.
+7. **End refine pass** (:func:`render_refine_summary`) — the affordance the skill
+   uses for a final customize/refine pass over what the run captured.
 """
 
 from __future__ import annotations
@@ -649,6 +660,38 @@ def bulk_capture_commands(batch: BootstrapBatch, *, top_n: int | None = None) ->
         for candidate in group:
             fm = suggested_frontmatter(candidate.content, layer=layer)
             commands.append(_capture_command(candidate, layer=layer, fm=fm))
+    return commands
+
+
+# Heading prefix marking the STOP-EARLY deferred tail in a rendered review file.
+# Capture lines AFTER this heading belong to deferred candidates and must NOT be
+# bulk-approved (they weren't reviewed in this pass).
+_DEFERRED_HEADING_PREFIX = "## Deferred"
+
+# A rendered ``capture:`` review line, e.g. ``      capture: `rekol capture …` ``.
+# Match the command between the backticks so a bulk-approve reads the SAME command
+# the operator would copy-paste — the persisted review file is the source of truth.
+_CAPTURE_LINE_RE = re.compile(r"capture:\s*`(rekol capture [^`]+)`")
+
+
+def extract_capture_commands_from_review(review_text: str) -> list[str]:
+    """Pull the active (non-deferred) ``rekol capture`` commands from a review file.
+
+    BULK-APPROVE reads the PERSISTED review file (the on-disk source of truth the
+    operator actually saw) rather than re-recalling the corpus — so the emitted
+    commands are byte-identical to the ones in the file, even if recall later
+    drifts. Capture lines under the STOP-EARLY ``## Deferred`` section are
+    excluded: those candidates were set aside this pass and must not be
+    bulk-captured. Returns the commands in file order (already confidence-ranked,
+    grouped by layer).
+    """
+    commands: list[str] = []
+    for line in review_text.splitlines():
+        if line.startswith(_DEFERRED_HEADING_PREFIX):
+            break  # everything past here is the deferred tail — not for bulk-approve
+        match = _CAPTURE_LINE_RE.search(line)
+        if match:
+            commands.append(match.group(1))
     return commands
 
 

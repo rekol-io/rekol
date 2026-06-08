@@ -19,6 +19,7 @@ from rekol.bootstrap import (
     apply_scope,
     bulk_capture_commands,
     classify_layer,
+    extract_capture_commands_from_review,
     group_by_layer,
     plan_batches,
     project_slug_for_cwd,
@@ -443,6 +444,28 @@ def test_bulk_capture_commands_are_injection_safe() -> None:
     assert "$(" not in cmds[0]
     assert "rm -rf" not in cmds[0]
     assert "curl evil.sh" not in cmds[0]
+
+
+def test_extract_capture_commands_from_review_reads_active_only() -> None:
+    """Bulk-approve reads the persisted review file's ACTIVE capture lines, not deferred ones."""
+    cands = [_cand(f"always rule {i}", uuid=f"u{i}", score=1.0 - i / 10) for i in range(5)]
+    batch = BootstrapBatch(batch_id="project-x", candidates=rerank_candidates(cands))
+    review = render_batch_review(batch, run_id="r1", top_n=2)
+    cmds = extract_capture_commands_from_review(review)
+    # Only the 2 reviewed (active) candidates' capture commands are extracted; the
+    # 3 deferred ones (under ## Deferred) are excluded.
+    assert len(cmds) == 2, cmds
+    assert all(c.startswith("rekol capture --layer ") for c in cmds)
+
+
+def test_extract_capture_commands_matches_rendered_commands() -> None:
+    """The extracted commands equal what bulk_capture_commands would build (one source)."""
+    batch = BootstrapBatch(
+        batch_id="project-x",
+        candidates=[_cand("always run ruff", uuid="a"), _cand("when deploying pull", uuid="w")],
+    )
+    review = render_batch_review(batch, run_id="r1")
+    assert extract_capture_commands_from_review(review) == bulk_capture_commands(batch)
 
 
 # --------------------------- promote always-on → REKOL.md ---------------------------
