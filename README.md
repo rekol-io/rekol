@@ -83,6 +83,29 @@ you already have:
   `always`/`when`/`topics` layers.
 - **Verify it landed** — `rekol search "something you wrote"`.
 
+## How REKOL gets smart
+
+There are two phases, and they're honestly different.
+
+**Day 1 — searchable history (recall).** The moment you install, your past
+Claude Code sessions become searchable. Ask about something you worked on and
+Claude finds it. That's real and immediate — but it's *search*, not yet
+understanding. Nothing has been distilled into always-on rules.
+
+**Over time — it learns how your project thinks (understanding).** The payoff is
+ambient memory: the recurring "always do X", "repos live in Y", "we chose Z"
+that gets curated into the `always`/`when`/`topics` layers and surfaces on its
+own, without you asking. Some of that accumulates as you work and capture; the
+rest comes from a memory-bootstrap step you explicitly run — it reads back over
+your indexed transcripts and proposes durable memories for your review (nothing
+is auto-written).
+
+**Token honesty:** that bootstrap is *your own Claude* reading *your own*
+transcript corpus — there's no bundled model. Running it over a large history is
+real token spend against your account, proportional to how much history you
+feed it. It's opt-in and review-gated for exactly that reason; start scoped if
+your corpus is big.
+
 ## Quickstart (fresh install)
 
 1. `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`
