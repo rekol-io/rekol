@@ -11,6 +11,7 @@ import click
 from rekol.cli_archive import main as archive_cmd
 from rekol.cli_bootstrap import main as bootstrap_cmd
 from rekol.cli_capture import main as capture_cmd
+from rekol.cli_coverage import main as coverage_cmd
 from rekol.cli_docs_convert import main as import_cmd
 from rekol.cli_doctor import main as doctor_cmd
 from rekol.cli_hooks import hook_group
@@ -46,6 +47,7 @@ main.add_command(archive_cmd, name="archive")
 main.add_command(import_cmd, name="import")
 main.add_command(init_cmd, name="init")
 main.add_command(doctor_cmd, name="doctor")
+main.add_command(coverage_cmd, name="coverage")
 main.add_command(hook_group, name="_hook")
 
 

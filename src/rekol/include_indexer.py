@@ -233,8 +233,39 @@ def index_include_dirs(cfg: Config, max_bytes: int = _DEFAULT_MAX_BYTES) -> Incl
     return result
 
 
+def dir_is_current(cfg: Config, include_dir: Path) -> bool:
+    """True when ``include_dir``'s in-scope fileset matches its cached marker.
+
+    The coverage report uses this to decide whether a dir's files are reflected
+    in the index: a dir whose current scoped-manifest hash equals its stored
+    marker has been converted with exactly this fileset (so its transcripts are
+    in the index), whereas a new/edited/removed file (or a deny change) moves the
+    hash and the dir is "pending re-index". Pure read — no conversion, no marker
+    write. A missing dir is not current (there is nothing indexed for it).
+    """
+    if not include_dir.is_dir():
+        return False
+    groups = _scoped_groups(include_dir, list(cfg.include_deny))
+    manifest_hash = _manifest_hash(groups)
+    return _read_marker(_marker_path(cfg, include_prefix_for(include_dir))) == manifest_hash
+
+
+def scoped_file_count(cfg: Config, include_dir: Path) -> int:
+    """Count the in-scope (deny/junk-filtered) files under ``include_dir``.
+
+    The "discoverable" unit for one dir. A missing dir contributes 0. Counts the
+    same grouped+filtered fileset that conversion would convert, so coverage's
+    discoverable total never disagrees with what indexing would actually take.
+    """
+    if not include_dir.is_dir():
+        return 0
+    return sum(len(group.files) for group in _scoped_groups(include_dir, list(cfg.include_deny)))
+
+
 __all__ = [
     "IncludeIndexResult",
+    "dir_is_current",
     "include_prefix_for",
     "index_include_dirs",
+    "scoped_file_count",
 ]
