@@ -262,10 +262,31 @@ def scoped_file_count(cfg: Config, include_dir: Path) -> int:
     return sum(len(group.files) for group in _scoped_groups(include_dir, list(cfg.include_deny)))
 
 
+def scoped_count_and_current(cfg: Config, include_dir: Path) -> tuple[int, bool]:
+    """Return ``(in-scope file count, is-current)`` for ``include_dir`` in ONE walk.
+
+    The coverage report needs both the discoverable count AND whether the dir's
+    marker is current. Computing them separately (``scoped_file_count`` +
+    ``dir_is_current``) walks the tree twice, opening a TOCTOU window where a
+    concurrent edit makes the count and the current-check disagree. Deriving both
+    from a single ``_scoped_groups`` walk closes that window. A missing dir is
+    ``(0, False)``.
+    """
+    if not include_dir.is_dir():
+        return (0, False)
+    groups = _scoped_groups(include_dir, list(cfg.include_deny))
+    count = sum(len(group.files) for group in groups)
+    is_current = _read_marker(_marker_path(cfg, include_prefix_for(include_dir))) == _manifest_hash(
+        groups
+    )
+    return (count, is_current)
+
+
 __all__ = [
     "IncludeIndexResult",
     "dir_is_current",
     "include_prefix_for",
     "index_include_dirs",
+    "scoped_count_and_current",
     "scoped_file_count",
 ]

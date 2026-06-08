@@ -1024,6 +1024,11 @@ fi
 
 if [[ "${TEST_MODE}" == "1" ]]; then
   say "test-mode: skipping session-search backfill"
+elif [[ "${DRY_RUN}" == "1" ]]; then
+  # session-index --full does archive-then-ingest, so it writes to both the index
+  # and the durable archive — it must be skipped under --dry-run (it isn't routed
+  # through run(), and the venv may not exist on a dry run).
+  say "DRY-RUN: '${TOOLS_HOME}/.venv/bin/rekol' session-index --full (backfill existing transcripts into the sessions index)"
 else
   say "backfilling existing Claude Code transcripts into the sessions index (may take a few minutes)"
   if "${TOOLS_HOME}/.venv/bin/rekol" session-index --full 2>&1 | sed 's/^/  /'; then
