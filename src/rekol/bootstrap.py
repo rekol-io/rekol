@@ -32,6 +32,7 @@ on:
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -223,9 +224,13 @@ def apply_scope(
     if scope.max_sessions is not None:
         # Rank distinct sessions by their newest candidate timestamp, keep the
         # top N session ids, then retain only candidates from those sessions.
+        # An unparseable timestamp sorts LAST (oldest) here — unlike the days
+        # filter's fail-open above — so a garbage timestamp can't masquerade as
+        # the most-recent session and survive the cap over a genuinely-recent one.
+        oldest = dt.datetime.min.replace(tzinfo=dt.UTC)
         newest_per_session: dict[str, dt.datetime] = {}
         for c in kept:
-            ts = _parse_iso(c.timestamp_iso) or now
+            ts = _parse_iso(c.timestamp_iso) or oldest
             if c.session_id not in newest_per_session or ts > newest_per_session[c.session_id]:
                 newest_per_session[c.session_id] = ts
         top_sessions = {
@@ -301,17 +306,59 @@ _LOCATION_RE = re.compile(
 )
 _ALWAYS_RE = re.compile(r"^\s*(?:always|never|don'?t|do not|prefer|use)\b", re.IGNORECASE)
 
+# Secret-shape signals. A line matching ANY of these is treated as secret-bearing
+# and forced to the non-ambient ``knowledge`` layer BEFORE the always-on imperative
+# check runs (a secret line that happens to start with "use/always/never/prefer"
+# must never be nominated for always-on memory). These are conservative SHAPE
+# matchers, not a secret scanner — they err toward catching a secret, since the
+# cost of a missed one (leaking into ambient context) far outweighs a false
+# positive (a non-secret demoted to knowledge, which the human review gate still
+# sees). Anchored where it matters (key/token assignments, known vendor prefixes,
+# explicit "password is X" / "token: X" phrasings).
+_SECRET_RES: tuple[re.Pattern[str], ...] = (
+    # OpenAI-style ``sk-...`` and GitHub ``ghp_/gho_/ghs_/ghr_...`` token prefixes.
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}", re.IGNORECASE),
+    re.compile(r"\bgh[posru]_[A-Za-z0-9]{8,}"),
+    # AWS access-key id (``AKIA...``) and the canonical secret-key env var name.
+    re.compile(r"\bAKIA[0-9A-Z]{12,}"),
+    re.compile(r"\bAWS_SECRET_ACCESS_KEY\b", re.IGNORECASE),
+    # PEM block headers (private keys, certificates).
+    re.compile(r"-----BEGIN\b"),
+    # A ``KEY=<long value>`` / ``TOKEN=<value>`` / ``api_key=<value>`` assignment:
+    # a name containing key/token/secret/password followed by ``=`` and a value.
+    re.compile(
+        r"\b[\w-]*(?:secret|token|api[_-]?key|password|passwd|access[_-]?key)[\w-]*\s*[=:]\s*\S+",
+        re.IGNORECASE,
+    ),
+    # Natural-language secret disclosure: "password is X", "password: X", or a
+    # bare "password <value>" ("my password hunter2") — any time the word
+    # password/passwd/token/secret is followed by a literal value-looking token.
+    re.compile(r"\b(?:password|passwd)\b(?:\s+is)?\s+\S+", re.IGNORECASE),
+    re.compile(r"\btoken\s+is\s+\S+", re.IGNORECASE),
+)
+
+
+def _looks_secret_bearing(content: str) -> bool:
+    """True when ``content`` matches any secret SHAPE (see :data:`_SECRET_RES`)."""
+    return any(secret_re.search(content) for secret_re in _SECRET_RES)
+
 
 def classify_layer(content: str) -> str:
     """Heuristically classify a candidate into a memory layer.
 
     A conservative SEED the assistant refines via the skill — deliberately simple
-    (regex over phrasing), not an LLM. Priority order: activity-scoped ("when X
-    …" → ``when``), location facts ("the repo lives in …" → ``topic``), bare
-    standing imperatives ("always/never/prefer …" → ``always``), else the safe
-    non-ambient default ``knowledge`` (so a misclassification never pollutes
-    always-on memory).
+    (regex over phrasing), not an LLM. Priority order: secret-shaped lines are
+    forced to the non-ambient ``knowledge`` layer FIRST (so a secret that leads
+    with "use/always/never/prefer" can never be nominated for always-on memory),
+    then activity-scoped ("when X …" → ``when``), location facts ("the repo lives
+    in …" → ``topic``), bare standing imperatives ("always/never/prefer …" →
+    ``always``), else the safe non-ambient default ``knowledge`` (so a
+    misclassification never pollutes always-on memory).
     """
+    # SECRET pre-check, BEFORE the always-on imperative match: an instruction
+    # keyword in front of a secret ("use api_key=sk-…") must not promote it.
+    if _looks_secret_bearing(content):
+        return _LAYER_KNOWLEDGE
     if _WHEN_RE.search(content):
         return _LAYER_WHEN
     if _LOCATION_RE.search(content):
@@ -362,6 +409,41 @@ def _batch_review_path(pending_dir: Path, run_id: str, batch_id: str) -> Path:
     return pending_dir / f"bootstrap-{run_id}-{batch_id}.md"
 
 
+# Sentinel marking where a newline was collapsed when embedding untrusted
+# transcript content into the single-line markdown checklist item, so the
+# operator can tell a multi-line candidate was flattened (the full content stays
+# available via the cited source file). A visible glyph, not a bare space, so a
+# line break isn't silently lost mid-sentence.
+_NEWLINE_SENTINEL = " ↵ "
+
+
+def _collapse_newlines(content: str) -> str:
+    """Flatten ``content`` to a single line for safe markdown-checklist embedding.
+
+    Untrusted transcript content can contain newlines (and lines shaped like
+    ``- [ ]`` checkboxes); embedded verbatim it could spoof extra checklist items
+    or break the review-file structure. Collapsing every CR/LF run to a single
+    :data:`_NEWLINE_SENTINEL` keeps each candidate to exactly one checklist line.
+    The untruncated original remains reachable via the cited source transcript.
+    """
+    return re.sub(r"[\r\n]+", _NEWLINE_SENTINEL, content.strip())
+
+
+def _safe_capture_name(name: str) -> str:
+    """Render a ``--name`` value safe to paste into a shell from a review file.
+
+    The suggested ``rekol capture`` line is meant to be copy-pasteable, so raw
+    transcript content with shell metacharacters (``"``, ``$(...)``, backticks,
+    ``;``, ``|``) must never be embedded as the name — that would be a
+    shell-injection vector. When the name is "plain" (letters/digits/space and a
+    few safe punctuation marks) we keep it double-quoted; otherwise we substitute
+    an explicit edit-me placeholder so nothing dangerous is ever rendered verbatim.
+    """
+    if re.fullmatch(r"[\w .,\-/]+", name):
+        return f'"{name}"'
+    return '"<edit before running>"'
+
+
 def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
     """Render the human-review markdown for one batch's candidates.
 
@@ -391,7 +473,9 @@ def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
     for candidate in batch.candidates:
         layer = classify_layer(candidate.content)
         fm = suggested_frontmatter(candidate.content, layer=layer)
-        lines.append(f"- [ ] {candidate.content.strip()}")
+        # Collapse newlines so a multi-line transcript turn can't spoof extra
+        # checklist items / break the markdown (full content via the source file).
+        lines.append(f"- [ ] {_collapse_newlines(candidate.content)}")
         lines.append(f"      suggested layer: **{layer}** · name: {fm['name']!r}")
         lines.append(
             f"      source: session `{candidate.session_id}` · "
@@ -400,19 +484,21 @@ def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
             f"matched {candidate.matched_query!r} (score {candidate.score:.2f})"
         )
         # A ready-to-edit capture line the assistant can run verbatim for an
-        # approved item. Filename is a slug of the suggested name; the assistant
-        # adjusts layer/name/description/tags before running.
+        # approved item. Filename is a slug of the suggested name; the name is
+        # rendered injection-safe (shell metachars → an explicit placeholder), so
+        # the line is never a copy-paste shell hazard. The assistant adjusts
+        # layer/name/description/tags before running.
         file_slug = re.sub(r"[^a-z0-9]+", "-", fm["name"].lower()).strip("-")[:50] or "candidate"
         lines.append(
             f"      capture: `rekol capture --layer {layer} --file {file_slug}.md "
-            f'--name "{fm["name"]}" --description "..."`'
+            f'--name {_safe_capture_name(fm["name"])} --description "..."`'
         )
         lines.append("")
     return "\n".join(lines)
 
 
 def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: str) -> Path:
-    """Write one batch's review file to ``pending_dir``, returning its path.
+    """Write one batch's review file to ``pending_dir`` ATOMICALLY, returning its path.
 
     INCREMENTAL by design: each batch is written the moment it is planned/recalled
     (before the assistant processes it), so a run reaped after batch N has batches
@@ -420,8 +506,22 @@ def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: 
     path is deterministic per (run, batch), so re-running a batch (a resume that
     re-touches the last in-flight batch) overwrites in place rather than creating
     a duplicate file. Creates ``pending_dir`` if absent.
+
+    The write mirrors ``save_state``'s atomic pattern (temp file + flush + fsync +
+    ``os.replace``): a process killed mid-write leaves either the previous
+    complete review file or the new complete one, never a torn file the operator
+    (or a tool parsing the checklist) would misread.
     """
     pending_dir.mkdir(parents=True, exist_ok=True)
     out_path = _batch_review_path(pending_dir, run_id, batch.batch_id)
-    out_path.write_text(render_batch_review(batch, run_id=run_id), encoding="utf-8")
+    body = render_batch_review(batch, run_id=run_id)
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    # Write + flush + fsync the temp file before the rename so the bytes are on
+    # disk when the atomic rename publishes them; otherwise a power loss could
+    # rename an empty/partial inode into place.
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, out_path)
     return out_path
