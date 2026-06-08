@@ -253,6 +253,11 @@ def _invoke(argv: list[str]) -> None:
         click.echo(f"  (warning: rekol {argv[0]} aborted)", err=True)
     except click.ClickException as exc:
         exc.show()
+    except Exception as exc:  # noqa: BLE001 — INTENTIONAL: one failed step must
+        # not kill the whole onboarding flow (the docstring's contract). Any
+        # unexpected error from a leaf command is surfaced as a warning and init
+        # continues to the next step rather than aborting everything.
+        click.echo(f"  (warning: rekol {argv[0]} failed: {exc})", err=True)
 
 
 if __name__ == "__main__":
