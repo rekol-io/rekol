@@ -85,8 +85,10 @@ sessions.
 
 Present three choices with a default:
 
-- **Index all** *(default)* — `rekol session-index --full` (or
-  `--incremental` on a re-run; incremental is the steady-state, cheaper mode).
+- **Index all** *(default)* — `rekol session-index --incremental` (idempotent and
+  cheaper: it indexes everything not already indexed, so it's right for both the
+  first run and re-runs; `--full` re-embeds from scratch — reserve it for a forced
+  rebuild).
 - **Recent only** — for a user who wants a quick start: index incrementally now;
   the rest catches up automatically on future SessionEnd runs. (`rekol
   session-index --incremental`.)
@@ -176,10 +178,11 @@ Make sure the home has its baseline. Two parts:
 2. **Learning scaffolds** — the generic `always/when/topics/knowledge` directive
    files that seed general memory. **Gap-fill, don't overwrite**: seed only the
    layers the user is missing, never clobbering their own files. The simplest way
-   is to run the mechanical primitive, which is gap-fill by construction:
-   `rekol init --yes` (it copy-if-absent seeds the starter pack and is a safe
-   no-op on anything already present). On a fresh/empty home this lands the
-   scaffolds; on a populated one it adds only the missing layers.
+   is to run the dedicated seed primitive, which is gap-fill by construction and
+   does nothing else: `rekol init --seed-only` (it copy-if-absent seeds the starter
+   pack — use `--seed-only`, NOT `--yes`, which on a machine with history would also
+   fire a full indexing pass). On a fresh/empty home this lands the scaffolds; on a
+   populated one it adds only the missing layers.
 
 These scaffolds are **inert directives** ("record the user's name here as you
 learn it"), never placeholder data — so the assistant never recalls a template
@@ -218,8 +221,8 @@ you do here clobbers the user's existing files.
 
 | Step | Mechanical command(s) | Your reasoning |
 | --- | --- | --- |
-| 1 Recall | `rekol session-index --full` / `--incremental` | magnitude warning, default pick |
+| 1 Recall | `rekol session-index --incremental` (`--full` only for a forced rebuild) | magnitude warning, default pick |
 | 2 Include | `rekol include discover --json` / `add` / `deny` / `show` | rank + group, conversational excludes → deny globs |
 | 3 Understanding | `rekol bootstrap` (+ `--next`/`--top`/`--bulk-approve`/`--refine`), `rekol capture` | cluster/classify, approve gate, layer correction (per `rekol-bootstrap`) |
-| 4 Baseline | `rekol init --yes` (gap-fill seed) | confirm baseline, keep quiet |
+| 4 Baseline | `rekol init --seed-only` (gap-fill seed) | confirm baseline, keep quiet |
 | 5 Close | `rekol coverage` | adaptive: report with content, "how it grows" when empty |

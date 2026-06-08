@@ -65,8 +65,9 @@ def recorded_invokes(monkeypatch) -> list[list[str]]:
     """Capture every ``_invoke`` argv so tests assert on the steps init ran."""
     calls: list[list[str]] = []
 
-    def _fake_invoke(argv: list[str]) -> None:
+    def _fake_invoke(argv: list[str]) -> bool:
         calls.append(list(argv))
+        return True  # real _invoke returns success/failure; stub a successful step
 
     monkeypatch.setattr("rekol.cli_init._invoke", _fake_invoke)
     return calls
@@ -284,6 +285,21 @@ def test_adaptive_close_with_content_runs_coverage(tmp_path, monkeypatch, record
     assert any(c and c[0] == "coverage" for c in recorded_invokes), (
         "with indexed content the close must run the coverage report"
     )
+
+
+def test_seed_only_skips_indexing_bootstrap_and_coverage(
+    tmp_path, monkeypatch, recorded_invokes
+) -> None:
+    """--seed-only gap-fills the scaffold and stops — no indexing/bootstrap/coverage,
+    even WITH history (the quiet primitive the onboarding skill's baseline uses)."""
+    from rekol.cli_init import main as init_main
+
+    _home_with_projects(tmp_path, monkeypatch, n_transcripts=8)
+    result = CliRunner().invoke(init_main, ["--seed-only"])
+    assert result.exit_code == 0, result.output
+    assert not any(
+        c and c[0] in ("session-index", "bootstrap", "coverage") for c in recorded_invokes
+    ), recorded_invokes
 
 
 def test_adaptive_close_no_coverage_when_index_declined(

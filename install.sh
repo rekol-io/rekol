@@ -152,7 +152,9 @@ prompt_for_memory_home() {
   if [[ -n "$suggestions" ]]; then
     {
       printf 'Detected cloud-sync folders you could keep memory in:\n'
-      printf '  %s\n' $suggestions
+      # Per-line, quoted: a detected path may contain spaces (e.g.
+      # "~/Library/Mobile Documents/...") which unquoted word-splitting would mangle.
+      while IFS= read -r _sugg; do printf '  %s\n' "$_sugg"; done <<<"$suggestions"
       printf '(or any local folder; the index lives in a local cache outside it, so syncing your memory never syncs the index)\n'
     } >&2
   fi
