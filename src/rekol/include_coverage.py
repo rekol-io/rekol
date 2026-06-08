@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rekol.config import Config
-from rekol.include_indexer import dir_is_current, scoped_file_count
+from rekol.include_indexer import scoped_count_and_current
 
 
 @dataclass(frozen=True)
@@ -50,17 +50,19 @@ class CoverageReport:
 def compute_coverage(cfg: Config) -> CoverageReport:
     """Compute include-scope coverage from config + the cached conversion markers.
 
-    Pure read: walks each ``include_dirs`` entry's in-scope fileset and checks its
-    marker. No conversion, no writes — safe to call from ``doctor`` / a standalone
-    ``coverage`` command. De-duped dirs come from ``resolved_include_dirs`` so a
-    dir listed twice is not double-counted.
+    Pure read: walks each ``include_dirs`` entry's in-scope fileset ONCE (via
+    ``scoped_count_and_current``) and checks its marker. No conversion, no writes —
+    safe to call from ``doctor`` / a standalone ``coverage`` command. De-duped dirs
+    come from ``resolved_include_dirs`` so a dir listed twice is not double-counted.
     """
     discoverable = 0
     indexed = 0
     for include_dir in cfg.resolved_include_dirs():
-        count = scoped_file_count(cfg, include_dir)
+        # Single walk per dir: count + current-check derived from the same fileset,
+        # so a concurrent edit can't make them disagree (closes the double-scan TOCTOU).
+        count, is_current = scoped_count_and_current(cfg, include_dir)
         discoverable += count
-        if dir_is_current(cfg, include_dir):
+        if is_current:
             indexed += count
     percent = (100.0 * indexed / discoverable) if discoverable else 0.0
     return CoverageReport(discoverable=discoverable, indexed=indexed, percent=percent)
