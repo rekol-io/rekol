@@ -24,6 +24,10 @@ Before capturing a new memory, run `rekol search` against its gist. If a near-du
 
 Before recommending a path, command, ID, env name, or canonical reference, do a quick `rekol search` against the topic. Prevents recommending stale info from in-context reasoning when a canonical source already exists.
 
+### Hedge on absence — never declare a capability dead because you didn't find it
+
+A `rekol search` miss, an unmatched filename, or an unfamiliar command means *you didn't find it*, not that it doesn't exist — built-in commands and capabilities aren't fully enumerable to you. Never flatly tell the user something is "not available." Hedge: "not registered that I can see, but built-in commands aren't fully enumerable to me — try it and we'll confirm."
+
 ## Bring in existing history
 
 When a user wants to seed REKOL from work that already exists, map their phrasing to these commands. Run the command, then confirm with a `rekol search` so the user can verify ingestion worked.
