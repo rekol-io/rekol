@@ -24,9 +24,16 @@ setup() {
     # ~/.cache. (HOME is left alone so the test-mode .zshrc check still verifies
     # the real ~/.zshrc is untouched.)
     export XDG_CACHE_HOME="${TESTROOT}/cache"
+    # SECURITY/test-hygiene: the durable transcript archive (#8) defaults to
+    # ${XDG_DATA_HOME:-~/.local/share}/rekol/archive. Sandbox XDG_DATA_HOME so any
+    # archive resolution lands under TESTROOT and never touches the real
+    # ~/.local/share/rekol/archive (mirrors the conftest fix). The archive
+    # backfill itself is skipped in --test-mode, but resolve_archive_dir(None) is
+    # still consulted to record ARCHIVE_DIR in the manifest.
+    export XDG_DATA_HOME="${TESTROOT}/data"
     # Resolve component dir relative to this test file
     COMPONENT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME
+    export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME XDG_DATA_HOME
 }
 
 teardown() {
@@ -584,4 +591,46 @@ manifest_index_dir() {
   run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("session-start-nudge"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Phase 8 — durable transcript archive flags
+# ---------------------------------------------------------------------------
+# REKOL_ARCHIVE_DIR is sandboxed under TESTROOT (and XDG_DATA_HOME is too, via
+# setup) so no real machine archive is ever written by these tests.
+
+@test "--no-archive seeds archive_enabled:false in the config" {
+    export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
+    run "${COMPONENT_DIR}/install.sh" \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" \
+        --test-mode --no-archive
+    [ "$status" -eq 0 ]
+    grep -q '^archive_enabled: false' "${MEMORY_HOME}/rekol.config.yaml"
+}
+
+@test "--archive-dir is recorded so the archive lands where asked" {
+    export REKOL_ARCHIVE_DIR=""
+    run "${COMPONENT_DIR}/install.sh" \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" \
+        --test-mode --archive-dir "${TESTROOT}/custom-archive"
+    [ "$status" -eq 0 ]
+    # The chosen archive_dir is persisted to config.
+    grep -q "archive_dir: ${TESTROOT}/custom-archive" "${MEMORY_HOME}/rekol.config.yaml"
+    # And it is recorded in the manifest so uninstall can find it.
+    grep -q "^ARCHIVE_DIR=${TESTROOT}/custom-archive$" "${MEMORY_HOME}/.install-logs/manifest.env"
+}
+
+@test "--help prints usage including the archive flags" {
+    run "${COMPONENT_DIR}/install.sh" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--no-archive"* ]]
+    [[ "$output" == *"--archive-dir"* ]]
+}
+
+@test "install output discloses the local archive" {
+    export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
+    run "${COMPONENT_DIR}/install.sh" \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" --test-mode
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"local copy of your sessions"* ]]
 }

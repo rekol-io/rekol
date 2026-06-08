@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -671,6 +672,42 @@ class SessionStore:
         return int(row["mtime_unix"]) == int(mtime_unix) and int(row["size_bytes"]) == int(
             size_bytes
         )
+
+    def iter_sessions_for_backfill(
+        self,
+    ) -> Iterator[tuple[str, str | None, list[dict]]]:
+        """Yield ``(session_id, jsonl_path, messages)`` for archive backfill.
+
+        Reads the messages table grouped by session, in ``(session_id,
+        line_number)`` order, so the archive backfill can reconstruct a minimal,
+        text-only ``.jsonl`` per session that was indexed before the archive
+        existed. ``jsonl_path`` is the original live path recorded at ingest
+        (used only to derive a project-slug folder); it may no longer exist on
+        disk — that is the whole point of backfilling from the index.
+
+        This is a LOSSY reconstruction: the DB never stored tool_use/thinking
+        rows, so the rebuilt file contains only the indexed user/assistant text
+        turns. A lossy copy beats a lost session.
+        """
+        rows = self.conn.execute(
+            "SELECT session_id, message_uuid, parent_uuid, role, content, cwd, "
+            "       timestamp_iso, timestamp_unix, jsonl_path, line_number "
+            "FROM messages ORDER BY session_id, line_number"
+        ).fetchall()
+        current_session: str | None = None
+        current_path: str | None = None
+        bucket: list[dict] = []
+        for row in rows:
+            session_id = row["session_id"]
+            if session_id != current_session:
+                if current_session is not None:
+                    yield current_session, current_path, bucket
+                current_session = session_id
+                current_path = row["jsonl_path"]
+                bucket = []
+            bucket.append(dict(row))
+        if current_session is not None:
+            yield current_session, current_path, bucket
 
     def __enter__(self) -> SessionStore:
         return self

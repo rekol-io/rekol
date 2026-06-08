@@ -504,3 +504,82 @@ manifest_index_dir() {
         "${SBHOME}/.claude/settings.json"
     [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Phase 8 — the durable transcript archive is preserved by default
+# ---------------------------------------------------------------------------
+# Like the index cache: --yes alone keeps it; only --purge-archive (or an
+# interactive prompt) removes it. The archive holds verbatim transcripts and
+# there is no export in v1, so deletion is irreversible — never silent. The
+# fake archive dir is pointed at via REKOL_ARCHIVE_DIR so uninstall resolves it.
+@test "uninstall preserves the archive by default" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
+    mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
+    printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes
+    [ "$status" -eq 0 ]
+    # --yes must NOT purge the archive (mirrors --yes keeping the index).
+    [ -f "${REKOL_ARCHIVE_DIR}/projA/s.jsonl" ]
+}
+
+@test "uninstall --purge-archive removes the archive" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
+    mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
+    printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    [ ! -d "${REKOL_ARCHIVE_DIR}" ]
+}
+
+@test "uninstall --purge-archive still preserves user markdown" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
+    mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
+    printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    [ ! -d "${REKOL_ARCHIVE_DIR}" ]
+    # Markdown under $REKOL_HOME is never touched, even with --purge-archive.
+    [ -f "${REKOLH}/always/identity.md" ]
+    grep -q "my precious memory" "${REKOLH}/always/identity.md"
+}
+
+# SECURITY: a misconfigured REKOL_ARCHIVE_DIR that EQUALS $REKOL_HOME would make
+# `rm -rf "${ARCHIVE_DIR}"` delete the entire markdown memory home. --purge-archive
+# must REFUSE to purge when the resolved archive overlaps the resolved home, and
+# report it as a leftover instead. Markdown must survive.
+@test "uninstall --purge-archive refuses when archive equals REKOL_HOME" {
+    do_full_install
+    # Point the archive AT the markdown home itself (the worst overlap).
+    export REKOL_ARCHIVE_DIR="${REKOLH}"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    # The markdown home (and its contents) MUST still exist.
+    [ -d "${REKOLH}" ]
+    [ -f "${REKOLH}/always/identity.md" ]
+    grep -q "my precious memory" "${REKOLH}/always/identity.md"
+}
+
+# A second overlap shape: the archive sits INSIDE the markdown home, so
+# `rm -rf` would delete a subtree of the user's markdown. Same refusal.
+@test "uninstall --purge-archive refuses when archive is inside REKOL_HOME" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${REKOLH}/topics"
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    # The markdown subtree under the home must survive (never rm'd).
+    [ -f "${REKOLH}/topics/sailing.md" ]
+    [ -f "${REKOLH}/always/identity.md" ]
+}
