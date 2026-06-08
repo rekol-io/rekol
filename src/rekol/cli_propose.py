@@ -1,15 +1,23 @@
-"""memory-propose CLI: surface candidate memories from a notes file.
+"""memory-propose CLI: surface candidate memories for human review.
 
-Conservative auto-capture path: read a markdown file or stdin, find lines
-that look like memorable statements (TODO/Decision/Note/correction/preference
-markers), check them against existing memory via the semantic index, and write
-a proposal file under ``$MEMORY_HOME/pending-review/<timestamp>.md`` for the
-operator to review.
+Two input modes, both no-LLM and both write a review checklist to
+``$REKOL_HOME/pending-review/<timestamp>.md`` (never auto-captured):
 
-Does NOT call any LLM by default — heuristics only.  Privacy and cost
-implications of running an LLM over session transcripts are out of scope for
-v1.  The output is a checklist the user can act on manually with
-``memory-capture``.
+  - default (notes): read a markdown file or stdin, find lines that look like
+    memorable statements (TODO/Decision/Note/correction/preference markers).
+  - ``--from-corpus`` (#40): run instruction-signal queries against the indexed
+    SESSION corpus (reusing the FTS5 + vector search infra), collect the top
+    candidate transcript messages with provenance, and dedupe against curated
+    memory. This is the cold-start recall path: it distils "we always X /
+    repos live in Y / we decided Z" out of past conversations.
+
+Each candidate is checked against existing memory via the semantic index so the
+operator can decide: capture as new, update an existing memory, or drop it.
+
+Does NOT call any LLM in either mode — heuristics + semantic retrieval only.
+The privacy/cost reason LLM-over-transcripts was deferred is sidestepped: the
+extractor (T3) is the user's own Claude reading this review file. The output is
+a checklist the user acts on manually with ``rekol capture``.
 """
 
 from __future__ import annotations
@@ -23,7 +31,13 @@ import click
 
 from rekol.cli_common import guard_curated_schema
 from rekol.config import load_config
+from rekol.corpus_propose import (
+    dedupe_against_memory,
+    recall_corpus_candidates,
+    render_corpus_proposal,
+)
 from rekol.embeddings import get_embedder
+from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
 from rekol.store import IndexStore
 
 # Common leading whitespace + optional bullet marker, applied uniformly.
@@ -63,23 +77,20 @@ def extract_candidates(text: str) -> list[str]:
     return out
 
 
-@click.command()
-@click.option(
-    "--input-file",
-    "-i",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Read notes from a file. If omitted, reads stdin.",
-)
-@click.option("--quiet", is_flag=True, help="Suppress the summary line.")
-def main(input_file: str | None, quiet: bool) -> None:
-    """Scan notes for candidate memories; write a proposal for review.
+def _pending_proposal_path(cfg) -> tuple[Path, str]:
+    """Return ``(proposal_path, timestamp)`` under the memory-home review dir.
 
-    Output goes to ``$MEMORY_HOME/pending-review/<timestamp>.md``.  Each
-    candidate is annotated with the most-similar existing memory (if any) so
-    the operator can decide whether to capture as new, update an existing
-    memory, or drop the candidate.
+    Creates ``pending-review/`` if absent. The timestamp is the filename stem and
+    is reused in the proposal heading so the two always agree.
     """
-    cfg = load_config()
+    pending_dir = cfg.memory_home / "pending-review"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return pending_dir / f"{ts}.md", ts
+
+
+def _propose_from_notes(cfg, input_file: str | None, quiet: bool) -> None:
+    """Notes-file / stdin path: regex-extract candidate lines, dedupe, write review."""
     text = Path(input_file).read_text(encoding="utf-8") if input_file else sys.stdin.read()
 
     candidates = extract_candidates(text)
@@ -92,40 +103,128 @@ def main(input_file: str | None, quiet: bool) -> None:
     store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
     store.init_schema()
     guard_curated_schema(store)
+    try:
+        proposal, ts = _pending_proposal_path(cfg)
 
-    pending_dir = cfg.memory_home / "pending-review"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    proposal = pending_dir / f"{ts}.md"
+        lines: list[str] = [
+            f"# Candidate memories from {ts}",
+            "",
+            "Review each item.  For ones worth keeping, run `rekol capture` "
+            "with the suggested layer.  Delete this file when done.",
+            "",
+        ]
 
-    lines: list[str] = [
-        f"# Candidate memories from {ts}",
-        "",
-        "Review each item.  For ones worth keeping, run `memory-capture` "
-        "with the suggested layer.  Delete this file when done.",
-        "",
-    ]
-
-    new_count = 0
-    dup_count = 0
-    for cand in candidates:
-        vec = embedder.embed(cand)
-        hits = store.search(vec, top_k=1)
-        if hits and hits[0]["score"] >= DUPLICATE_THRESHOLD:
-            dup_count += 1
-            lines.append(
-                f"- ~~{cand}~~ — already captured "
-                f"({hits[0]['score']:.2f}: `{hits[0]['file_path']}`)"
-            )
-        else:
-            new_count += 1
-            lines.append(f"- [ ] {cand}")
-    lines.append("")
+        new_count = 0
+        dup_count = 0
+        for cand in candidates:
+            vec = embedder.embed(cand)
+            hits = store.search(vec, top_k=1)
+            if hits and hits[0]["score"] >= DUPLICATE_THRESHOLD:
+                dup_count += 1
+                lines.append(
+                    f"- ~~{cand}~~ — already captured "
+                    f"({hits[0]['score']:.2f}: `{hits[0]['file_path']}`)"
+                )
+            else:
+                new_count += 1
+                lines.append(f"- [ ] {cand}")
+        lines.append("")
+    finally:
+        store.close()
 
     proposal.write_text("\n".join(lines))
 
     if not quiet:
         click.echo(f"wrote {proposal} ({new_count} new, {dup_count} already-captured)")
+
+
+def _propose_from_corpus(cfg, quiet: bool) -> None:
+    """Corpus path (#40): recall instruction-signal candidates from the session index.
+
+    No-LLM, recall-oriented. Runs the instruction-signal queries against the
+    transcript store (FTS5 + vector), dedupes the hits against curated memory,
+    and writes a provenance-annotated review checklist. A fresh install with no
+    indexed sessions reports "no candidates" and exits 0 rather than erroring.
+    """
+    if not cfg.session_search_enabled:
+        click.echo(
+            "session_search_enabled=false in config; --from-corpus has nothing to "
+            "query. Enable it in rekol.config.yaml and run `rekol session-index --full`."
+        )
+        return
+
+    embedder = get_embedder(cfg.embedding_model)
+    memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    memory_store.init_schema()
+    guard_curated_schema(memory_store)
+    session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
+    session_store.init_schema()
+    try:
+        # The vector tier can only be queried at the index's own width; fail with
+        # the same actionable message the ingest/search paths use rather than
+        # letting sqlite-vec raise a cryptic width error mid-query.
+        try:
+            session_store.reconcile_embedding_dim(embedder.dim)
+        except SessionStoreDimMismatchError as exc:
+            click.echo(str(exc), err=True)
+            raise SystemExit(2) from exc
+
+        candidates = recall_corpus_candidates(session_store, embedder)
+        if not candidates:
+            if not quiet:
+                click.echo(
+                    "no candidates found (no matching transcripts indexed — "
+                    "run `rekol session-index --full` first?)"
+                )
+            return
+
+        new_candidates, already_captured = dedupe_against_memory(candidates, memory_store, embedder)
+    finally:
+        session_store.close()
+        memory_store.close()
+
+    proposal, ts = _pending_proposal_path(cfg)
+    proposal.write_text(render_corpus_proposal(new_candidates, already_captured, timestamp=ts))
+    if not quiet:
+        click.echo(
+            f"wrote {proposal} ({len(new_candidates)} new, "
+            f"{len(already_captured)} already-captured)"
+        )
+
+
+@click.command()
+@click.option(
+    "--input-file",
+    "-i",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read notes from a file. If omitted, reads stdin.",
+)
+@click.option(
+    "--from-corpus",
+    "from_corpus",
+    is_flag=True,
+    help="Recall candidates from the indexed SESSION corpus via instruction-signal "
+    "queries (no LLM), instead of reading a notes file. Reuses transcript search; "
+    "writes a provenance-annotated review checklist. Requires `rekol session-index`.",
+)
+@click.option("--quiet", is_flag=True, help="Suppress the summary line.")
+def main(input_file: str | None, from_corpus: bool, quiet: bool) -> None:
+    """Surface candidate memories for review; write a proposal, never auto-capture.
+
+    Output goes to ``$REKOL_HOME/pending-review/<timestamp>.md``.  Each candidate
+    is annotated with the most-similar existing memory (if any) so the operator
+    can decide whether to capture as new, update an existing memory, or drop it.
+
+    Default mode scans a notes file (or stdin); ``--from-corpus`` recalls from the
+    indexed session transcripts instead.
+    """
+    if from_corpus and input_file:
+        raise click.UsageError("--from-corpus reads the session index, not --input-file")
+    cfg = load_config()
+    if from_corpus:
+        _propose_from_corpus(cfg, quiet)
+    else:
+        _propose_from_notes(cfg, input_file, quiet)
 
 
 if __name__ == "__main__":
