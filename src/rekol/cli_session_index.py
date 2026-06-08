@@ -166,7 +166,11 @@ def _index_include_dirs_soft_fail(cfg, progress: bool) -> None:
         return
     try:
         result = index_include_dirs(cfg)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001
+        # The SessionEnd hook must NEVER crash (docstring contract). Beyond OSError,
+        # the docs_convert writer raises ValueError on a sanitized-filename collision
+        # (e.g. sibling dirs "my notes" and "my-notes") or a non-dir output path — any
+        # such conversion error must degrade to a non-fatal notice, not abort the hook.
         click.echo(f"include-scope indexing degraded (non-fatal): {exc}", err=True)
         click.echo(
             "include_dirs_converted=0 include_dirs_skipped_unchanged=0 "
