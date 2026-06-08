@@ -125,3 +125,22 @@ def test_cli_index_propagates_session_index_failure(tmp_path: Path, monkeypatch)
     assert result.exit_code == 3, result.output
     # JSONL was still written before the indexing attempt.
     assert (projects / "arc" / "Cassandra-Ops.jsonl").exists()
+
+
+def test_import_prints_deprecation_notice(tmp_path: Path, monkeypatch) -> None:
+    """`import` is deprecated in favor of include-scope (T8 #63): it must still
+    WORK (exit 0, transcripts written) but print a notice steering to include-scope.
+    """
+    home = tmp_path / "memhome"
+    projects = tmp_path / "projects"
+    _write_config(home, projects)
+    monkeypatch.setenv("MEMORY_HOME", str(home))
+
+    result = CliRunner().invoke(cli_main, [str(FIXTURE_TREE), "--prefix", "arc", "--no-index"])
+    assert result.exit_code == 0, result.output
+    # Still does its job — backstage-ai-archive workflow is not broken.
+    assert (projects / "arc" / "Cassandra-Ops.jsonl").exists()
+    # And steers the user to the new include-scope path.
+    out = result.output.lower()
+    assert "deprecated" in out
+    assert "include_dirs" in out or "include-scope" in out or "include scope" in out
