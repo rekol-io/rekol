@@ -218,10 +218,22 @@ def _delete_session_from_index(sessions_db_path: Path, session_id: str) -> int:
             # missing one is a benign no-op (the table simply isn't there).
             for vec_table in ("messages_vec", "messages_vec_numpy"):
                 if _table_exists(conn, vec_table):
-                    conn.executemany(
-                        f"DELETE FROM {vec_table} WHERE rowid = ?",
-                        [(rowid,) for rowid in rowids],
-                    )
+                    try:
+                        conn.executemany(
+                            f"DELETE FROM {vec_table} WHERE rowid = ?",
+                            [(rowid,) for rowid in rowids],
+                        )
+                    except sqlite3.OperationalError as exc:
+                        # ``messages_vec`` is a vec0 virtual table whose DELETE needs
+                        # the sqlite-vec extension. If it loaded at DB-creation time
+                        # but is unavailable now, the DELETE raises "no such module:
+                        # vec0". Don't crash the forget — messages + FTS rows are
+                        # still removed below; warn that embeddings weren't purged.
+                        click.echo(
+                            f"  warning: could not purge vector rows from {vec_table} "
+                            f"({exc}); sqlite-vec extension unavailable",
+                            err=True,
+                        )
             # Deleting the messages fires messages_ad, which removes the FTS
             # postings — so keyword search forgets the session as well.
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
