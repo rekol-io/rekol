@@ -294,6 +294,14 @@ _LAYER_WHEN = "when"
 _LAYER_TOPIC = "topic"
 _LAYER_KNOWLEDGE = "knowledge"
 
+# Canonical review order for the grouped review UX: MOST-AMBIENT-FIRST. Always-on
+# items are re-injected into every session (the highest-stakes, most expensive
+# layer), so they sit at the top of a batch's review file where they get the
+# reviewer's full attention before they scroll into the long non-ambient tail.
+# Knowledge (the safe non-ambient default, and usually the largest bucket on a
+# big corpus) sinks to the bottom.
+LAYER_REVIEW_ORDER: tuple[str, ...] = (_LAYER_ALWAYS, _LAYER_WHEN, _LAYER_TOPIC, _LAYER_KNOWLEDGE)
+
 # Conservative first-guess classifiers, checked in priority order. These are a
 # heuristic SEED the assistant refines — not the final word. The order matters:
 # "when ..." is the most specific (activity-scoped), then location facts
@@ -397,6 +405,61 @@ def suggested_frontmatter(content: str, *, layer: str | None = None) -> dict:
     }
 
 
+# --- scalable review UX: grouping + stop-early --------------------------------
+
+
+def group_by_layer(candidates: list[CorpusCandidate]) -> dict[str, list[CorpusCandidate]]:
+    """Bucket candidates by their suggested layer, confidence-ranked within each.
+
+    The scalable-review primitive: on a big corpus a flat list of hundreds of
+    proposals is unreviewable, so the review file is rendered GROUPED by suggested
+    layer (so a reviewer can scan one layer at a time, or bulk-approve a whole
+    group) and CONFIDENCE-RANKED within each group (highest :func:`refined_score`
+    first, so the strongest candidates sit at the top of every group).
+
+    Returns an ordered dict whose keys follow :data:`LAYER_REVIEW_ORDER`
+    (most-ambient-first) — only layers with at least one candidate appear. Pure;
+    drops nothing (every candidate lands in exactly one bucket), so the grouping
+    never causes silent recall loss.
+    """
+    buckets: dict[str, list[CorpusCandidate]] = {}
+    for candidate in candidates:
+        layer = classify_layer(candidate.content)
+        buckets.setdefault(layer, []).append(candidate)
+    # Rank each group by confidence (refined score), then emit groups in the
+    # canonical most-ambient-first order so the dict iteration order is stable.
+    ordered: dict[str, list[CorpusCandidate]] = {}
+    for layer in LAYER_REVIEW_ORDER:
+        if layer in buckets:
+            ordered[layer] = rerank_candidates(buckets[layer])
+    # Defensive: any layer outside the canonical order (should not happen, since
+    # classify_layer only returns known layers) still surfaces rather than being
+    # silently dropped — appended after the canonical ones, confidence-ranked.
+    for layer, cands in buckets.items():
+        if layer not in ordered:
+            ordered[layer] = rerank_candidates(cands)
+    return ordered
+
+
+def truncate_to_top(
+    candidates: list[CorpusCandidate], top_n: int | None
+) -> tuple[list[CorpusCandidate], list[CorpusCandidate]]:
+    """Split candidates into the top-N to review now and the deferred remainder.
+
+    The STOP-EARLY primitive: a huge batch can be reviewed in priority order N at
+    a time, deferring the long tail to a later pass rather than forcing the whole
+    batch in one sitting. Returns ``(kept, deferred)``; ``top_n=None`` (or a value
+    at/above the length) keeps everything and defers nothing. Pure — input order
+    is assumed already confidence-ranked, so the kept head is the highest-priority
+    slice. The deferred tail is RETURNED, never dropped: the caller renders it
+    below a divider so nothing is lost and a later pass can widen ``top_n``.
+    """
+    if top_n is None or top_n >= len(candidates):
+        return list(candidates), []
+    cut = max(0, top_n)
+    return list(candidates[:cut]), list(candidates[cut:])
+
+
 # --- incremental candidate writing --------------------------------------------
 
 
@@ -444,15 +507,74 @@ def _safe_capture_name(name: str) -> str:
     return '"<edit before running>"'
 
 
-def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
+def _capture_command(candidate: CorpusCandidate, *, layer: str, fm: dict) -> str:
+    """Build the injection-safe ``rekol capture`` command string for a candidate.
+
+    Single source of truth for BOTH the rendered ``capture:`` review line and the
+    machine-readable :func:`bulk_capture_commands` plan, so a copy-pasted command
+    and a bulk-approved one are byte-identical. The filename is a slug of the
+    suggested name and the ``--name`` is injection-safe (shell metachars become an
+    explicit placeholder), so the command is never a copy-paste shell hazard.
+    """
+    file_slug = re.sub(r"[^a-z0-9]+", "-", fm["name"].lower()).strip("-")[:50] or "candidate"
+    return (
+        f"rekol capture --layer {layer} --file {file_slug}.md "
+        f'--name {_safe_capture_name(fm["name"])} --description "..."'
+    )
+
+
+def _render_candidate_block(candidate: CorpusCandidate) -> list[str]:
+    """Render one candidate's review lines (checklist item + provenance + capture).
+
+    Shared by the grouped review renderer for both the active head and the
+    deferred tail, so every candidate is presented identically regardless of which
+    section it lands in.
+    """
+    layer = classify_layer(candidate.content)
+    fm = suggested_frontmatter(candidate.content, layer=layer)
+    # Collapse newlines so a multi-line transcript turn can't spoof extra
+    # checklist items / break the markdown (full content via the source file).
+    return [
+        f"- [ ] {_collapse_newlines(candidate.content)}",
+        f"      suggested layer: **{layer}** · name: {fm['name']!r} · "
+        f"confidence {refined_score(candidate):.2f}",
+        f"      source: session `{candidate.session_id}` · "
+        f"`{candidate.jsonl_path}`:{candidate.line_number} · "
+        f"[{candidate.role}] {candidate.timestamp_iso} · "
+        f"matched {candidate.matched_query!r} (score {candidate.score:.2f})",
+        f"      capture: `{_capture_command(candidate, layer=layer, fm=fm)}`",
+        "",
+    ]
+
+
+def render_batch_review(batch: BootstrapBatch, *, run_id: str, top_n: int | None = None) -> str:
     """Render the human-review markdown for one batch's candidates.
 
-    Mirrors the T2 corpus-proposal shape (a checklist item + provenance line per
-    candidate) but adds, per candidate, a SUGGESTED layer + a ready-to-edit
-    ``rekol capture`` invocation the assistant presents for approve/edit/skip.
-    The banner is explicit that nothing is auto-written — the EPIC's
-    non-negotiable human-review gate.
+    Scalable review UX (#62 §6.5): candidates are GROUPED by suggested layer
+    (most-ambient-first, so always-on items review first) and CONFIDENCE-RANKED
+    within each group, so a batch of hundreds is scannable a layer at a time.
+    Each candidate still carries a checklist item + provenance + a ready-to-edit
+    ``rekol capture`` line the assistant presents for approve/edit/skip.
+
+    Two scaling affordances the skill drives:
+
+    - **BULK-APPROVE** — a header command (``rekol bootstrap --bulk-approve
+      <batch>``) that emits a capture command for every reviewed candidate, so a
+      reviewer can approve a whole batch/group in one action instead of N gates.
+    - **STOP-EARLY** — when ``top_n`` is set, only the top-N highest-confidence
+      candidates are rendered as active review items; the remainder is moved
+      below a divider into a DEFERRED section (not dropped — a later pass widens
+      ``--top``). Resumable: nothing is lost, the batch stays one checkpoint unit.
+
+    The banner is explicit that nothing is auto-written — the EPIC's non-negotiable
+    human-review gate.
     """
+    total = len(batch.candidates)
+    # Confidence-rank the whole batch first so STOP-EARLY keeps the strongest head
+    # regardless of how the candidates were grouped per layer.
+    ranked = rerank_candidates(batch.candidates)
+    active, deferred = truncate_to_top(ranked, top_n)
+
     lines: list[str] = [
         f"# Bootstrap candidates — batch `{batch.batch_id}` (run {run_id})",
         "",
@@ -462,42 +584,77 @@ def render_batch_review(batch: BootstrapBatch, *, run_id: str) -> str:
         "items). Check the cited transcript before trusting a candidate. Delete this "
         "file when the batch is done.",
         "",
-        f"## Candidates ({len(batch.candidates)})",
+        "BULK-APPROVE this whole batch in one action with "
+        f"`rekol bootstrap --bulk-approve {batch.batch_id}` "
+        "(prints a capture command per reviewed candidate; still review-gated — "
+        "the assistant runs them only after the user approves the batch).",
         "",
     ]
-    if not batch.candidates:
+    if total == 0:
+        lines.append(f"## Candidates ({total})")
+        lines.append("")
         lines.append("_(none recalled for this batch)_")
         lines.append("")
         return "\n".join(lines)
 
-    for candidate in batch.candidates:
-        layer = classify_layer(candidate.content)
-        fm = suggested_frontmatter(candidate.content, layer=layer)
-        # Collapse newlines so a multi-line transcript turn can't spoof extra
-        # checklist items / break the markdown (full content via the source file).
-        lines.append(f"- [ ] {_collapse_newlines(candidate.content)}")
-        lines.append(f"      suggested layer: **{layer}** · name: {fm['name']!r}")
+    if deferred:
         lines.append(
-            f"      source: session `{candidate.session_id}` · "
-            f"`{candidate.jsonl_path}`:{candidate.line_number} · "
-            f"[{candidate.role}] {candidate.timestamp_iso} · "
-            f"matched {candidate.matched_query!r} (score {candidate.score:.2f})"
+            f"## Candidates — reviewing top {len(active)} of {total} ({len(deferred)} deferred)"
         )
-        # A ready-to-edit capture line the assistant can run verbatim for an
-        # approved item. Filename is a slug of the suggested name; the name is
-        # rendered injection-safe (shell metachars → an explicit placeholder), so
-        # the line is never a copy-paste shell hazard. The assistant adjusts
-        # layer/name/description/tags before running.
-        file_slug = re.sub(r"[^a-z0-9]+", "-", fm["name"].lower()).strip("-")[:50] or "candidate"
+    else:
+        lines.append(f"## Candidates ({total})")
+    lines.append("")
+
+    # Active head, grouped by layer (most-ambient-first), confidence-ranked within.
+    for layer, group in group_by_layer(active).items():
+        lines.append(f"### {layer} ({len(group)})")
+        lines.append("")
+        for candidate in group:
+            lines.extend(_render_candidate_block(candidate))
+
+    if deferred:
+        lines.append("---")
+        lines.append("")
+        lines.append(f"## Deferred ({len(deferred)}) — STOP-EARLY tail, not yet reviewed")
+        lines.append("")
         lines.append(
-            f"      capture: `rekol capture --layer {layer} --file {file_slug}.md "
-            f'--name {_safe_capture_name(fm["name"])} --description "..."`'
+            "These lower-confidence candidates were set aside to keep this pass "
+            "small. They are NOT dropped — re-run the batch with a larger "
+            "`--top` (or no `--top`) to review them. Listed for transparency:"
         )
         lines.append("")
+        for layer, group in group_by_layer(deferred).items():
+            lines.append(f"### {layer} ({len(group)}) — deferred")
+            lines.append("")
+            for candidate in group:
+                lines.extend(_render_candidate_block(candidate))
     return "\n".join(lines)
 
 
-def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: str) -> Path:
+def bulk_capture_commands(batch: BootstrapBatch, *, top_n: int | None = None) -> list[str]:
+    """Emit one ready-to-run ``rekol capture`` command per reviewed candidate.
+
+    The BULK-APPROVE engine half: the skill calls this (via ``rekol bootstrap
+    --bulk-approve <batch>``) to approve a whole batch/group in one action — it
+    returns the capture plan as a list of command strings the skill runs after the
+    user approves. It NEVER executes capture itself (review-gated — only the skill,
+    on an approved item, runs the commands). Honors ``top_n`` (STOP-EARLY): only
+    the reviewed head is emitted, so deferred candidates are not bulk-captured.
+    Each command is injection-safe (see :func:`_capture_command`).
+    """
+    ranked = rerank_candidates(batch.candidates)
+    active, _deferred = truncate_to_top(ranked, top_n)
+    commands: list[str] = []
+    for layer, group in group_by_layer(active).items():
+        for candidate in group:
+            fm = suggested_frontmatter(candidate.content, layer=layer)
+            commands.append(_capture_command(candidate, layer=layer, fm=fm))
+    return commands
+
+
+def write_batch_candidates(
+    batch: BootstrapBatch, *, pending_dir: Path, run_id: str, top_n: int | None = None
+) -> Path:
     """Write one batch's review file to ``pending_dir`` ATOMICALLY, returning its path.
 
     INCREMENTAL by design: each batch is written the moment it is planned/recalled
@@ -507,6 +664,10 @@ def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: 
     re-touches the last in-flight batch) overwrites in place rather than creating
     a duplicate file. Creates ``pending_dir`` if absent.
 
+    ``top_n`` (STOP-EARLY) caps how many candidates are rendered as active review
+    items; the remainder is written into a deferred section rather than dropped,
+    so the artifact is still complete and resumable.
+
     The write mirrors ``save_state``'s atomic pattern (temp file + flush + fsync +
     ``os.replace``): a process killed mid-write leaves either the previous
     complete review file or the new complete one, never a torn file the operator
@@ -514,7 +675,7 @@ def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: 
     """
     pending_dir.mkdir(parents=True, exist_ok=True)
     out_path = _batch_review_path(pending_dir, run_id, batch.batch_id)
-    body = render_batch_review(batch, run_id=run_id)
+    body = render_batch_review(batch, run_id=run_id, top_n=top_n)
     tmp = out_path.with_name(out_path.name + ".tmp")
     # Write + flush + fsync the temp file before the rename so the bytes are on
     # disk when the atomic rename publishes them; otherwise a power loss could
@@ -525,3 +686,173 @@ def write_batch_candidates(batch: BootstrapBatch, *, pending_dir: Path, run_id: 
         os.fsync(handle.fileno())
     os.replace(tmp, out_path)
     return out_path
+
+
+# --- always-on promotion → REKOL.md -------------------------------------------
+
+# The hand-curated always-on index re-injected into every Claude session. When an
+# approved candidate is captured at the ``always`` layer, its pointer/trigger line
+# is promoted here so the new always-on file is actually reachable ambiently
+# (capturing the file alone wouldn't surface it — REKOL.md is the index).
+REKOL_MD_FILENAME = "REKOL.md"
+
+# Heading under which bootstrap-promoted always-on pointers are collected, so the
+# operator can see (and prune) what the bootstrap added without it being mixed
+# into their hand-written sections.
+_PROMOTED_SECTION_HEADING = "## Bootstrapped always-on"
+
+
+@dataclass
+class PromoteResult:
+    """Outcome of a :func:`promote_to_rekol_md` call.
+
+    ``promoted`` is True only when a NEW pointer line was actually written;
+    ``reason`` carries why a promotion was a no-op (already present, or refused for
+    budget) so the caller can report it honestly rather than claiming a write that
+    didn't happen.
+    """
+
+    promoted: bool
+    reason: str | None = None
+
+
+def promote_to_rekol_md(
+    memory_home: Path,
+    *,
+    name: str,
+    rel_path: str,
+    trigger: str,
+    budget_bytes: int | None = None,
+) -> PromoteResult:
+    """Add an always-on pointer line for a captured ``always`` file into REKOL.md.
+
+    REKOL.md is the hand-curated always-on INDEX re-injected into every session;
+    capturing an ``always/`` file does not by itself make it ambient — its pointer
+    must land here. This promotes one captured always-on item to a trigger-phrased
+    pointer line under a dedicated "Bootstrapped always-on" section.
+
+    Idempotent: a pointer for ``rel_path`` already present is not re-added
+    (``promoted=False``). Creates REKOL.md (with the always-on banner) when absent,
+    so a fresh install still gets a valid index. Budget-capped: always-on context
+    is expensive (re-injected every session), so a promotion that would grow the
+    file past ``budget_bytes`` is REFUSED and surfaced (``promoted=False`` + a
+    reason), never silently written over the cap. ``name``/``trigger`` are
+    flattened to a single line so untrusted transcript text can't inject a heading
+    or extra list item into the index structure.
+    """
+    rekol_md = memory_home / REKOL_MD_FILENAME
+    existing = rekol_md.read_text(encoding="utf-8") if rekol_md.exists() else ""
+
+    # Already promoted? Idempotent no-op (the link target is the stable identity).
+    if f"]({rel_path})" in existing:
+        return PromoteResult(promoted=False, reason="already present in REKOL.md")
+
+    # Flatten untrusted name/trigger so an embedded newline / ``## heading`` /
+    # ``- [ ]`` fragment can't break out of the single pointer line.
+    safe_name = _collapse_newlines(name) or "always-on memory"
+    safe_trigger = _collapse_newlines(trigger)
+    pointer = (
+        f"- **{safe_trigger}** — [{safe_name}]({rel_path})"
+        if safe_trigger
+        else f"- [{safe_name}]({rel_path})"
+    )
+
+    new_text = _append_under_section(existing, _PROMOTED_SECTION_HEADING, pointer)
+
+    # Budget guard BEFORE writing: refuse to grow the always-on index past the cap.
+    if budget_bytes is not None and len(new_text.encode("utf-8")) > budget_bytes:
+        return PromoteResult(
+            promoted=False,
+            reason=(
+                f"promotion refused: REKOL.md would exceed the always-on budget "
+                f"({budget_bytes} bytes). Prune an existing always-on pointer or "
+                f"keep this item non-ambient."
+            ),
+        )
+
+    rekol_md.parent.mkdir(parents=True, exist_ok=True)
+    rekol_md.write_text(new_text, encoding="utf-8")
+    return PromoteResult(promoted=True)
+
+
+def _append_under_section(text: str, heading: str, line: str) -> str:
+    """Return ``text`` with ``line`` appended under ``heading`` (heading added if absent).
+
+    Keeps bootstrap-promoted pointers collected under one heading rather than
+    scattered, so the operator can audit/prune what the bootstrap added. When the
+    file lacks the always-on banner entirely (a fresh install), a minimal banner is
+    prepended so the resulting REKOL.md is still a valid always-on index.
+    """
+    body = text
+    if not body.strip():
+        body = (
+            "# Memory Index (always-on)\n\n"
+            "This file is re-injected into every Claude session. Pointers below "
+            "are phrased as triggers — read the referenced file when the trigger "
+            "matches the user's request.\n"
+        )
+    if heading in body:
+        # Insert the new pointer at the END of the existing section (just before
+        # the next heading or EOF), so promotions accumulate in capture order.
+        lines = body.splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == heading)
+        end = start + 1
+        while end < len(lines) and not lines[end].startswith("## "):
+            end += 1
+        # Trim trailing blanks inside the section, append the pointer, restore one
+        # blank separator before the next heading.
+        section_end = end
+        while section_end > start + 1 and not lines[section_end - 1].strip():
+            section_end -= 1
+        lines[section_end:section_end] = [line]
+        return "\n".join(lines) + ("\n" if body.endswith("\n") else "")
+    # No section yet: append a fresh one at EOF.
+    suffix = "" if body.endswith("\n") else "\n"
+    return f"{body}{suffix}\n{heading}\n\n{line}\n"
+
+
+# --- end refine pass ----------------------------------------------------------
+
+
+def render_refine_summary(captured_items: list[dict]) -> str:
+    """Render the end-of-bootstrap refine-pass summary the skill drives.
+
+    The END REFINE PASS affordance (#62): after the run captures items, the skill
+    offers the user one final customize/refine pass. This builds the summary it
+    presents — what was captured this run, grouped by layer with each file's path
+    — so the user can audit and the skill can drive edits (rename, re-layer, tweak
+    frontmatter) before declaring the bootstrap done.
+
+    ``captured_items`` is a list of dicts with ``layer``, ``name``, ``rel_path``.
+    An empty run yields a graceful "nothing captured" summary rather than a blank
+    string, so the skill always has something coherent to show.
+    """
+    lines: list[str] = [
+        "# Bootstrap refine pass",
+        "",
+        "The bootstrap captured the items below. This is your final customize/"
+        "refine pass — tell the assistant to rename, re-layer, edit frontmatter, "
+        "or remove any of these before they settle into memory (you can change "
+        "this anytime).",
+        "",
+    ]
+    if not captured_items:
+        lines.append("_Nothing was captured this run — nothing to refine._")
+        lines.append("")
+        return "\n".join(lines)
+
+    by_layer: dict[str, list[dict]] = {}
+    for item in captured_items:
+        by_layer.setdefault(str(item.get("layer", "knowledge")), []).append(item)
+    for layer in LAYER_REVIEW_ORDER:
+        group = by_layer.get(layer)
+        if not group:
+            continue
+        lines.append(f"## {layer} ({len(group)})")
+        lines.append("")
+        for item in group:
+            name = _collapse_newlines(str(item.get("name", "")).strip()) or "(unnamed)"
+            rel_path = str(item.get("rel_path", "")).strip()
+            lines.append(f"- **{name}** — `{rel_path}`")
+        lines.append("")
+    return "\n".join(lines)
