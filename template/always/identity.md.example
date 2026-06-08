@@ -11,5 +11,17 @@ updated: 2026-04-27T10:00:00-04:00
 
 # Identity
 
-Replace this with your own identity: name, role, team, primary technologies.
-Keep this file under 1 KB — the `always/` directory has a hard 8 KB budget.
+Replace this with your own identity. This file lives in `always/`, so it is
+re-injected into every session — keep it to the handful of facts worth that
+cost, and stay well under 1 KB (the whole `always/` directory has a hard 8 KB
+budget shared across all files).
+
+Good things to put here: who you are, your role/team, and the primary
+technologies or domain you work in. Anything more situational (per-project
+facts, task rules, reasoning) belongs in `topics/`, `when/`, or `knowledge/` —
+see `knowledge/anatomy-of-good-memory.md`.
+
+Example (delete and replace):
+
+> I'm a backend engineer on the payments team. I work mostly in Python and Go,
+> and I own the billing service.
