@@ -318,3 +318,45 @@ def test_doctor_warns_on_icloud_synced_archive(tmp_path, monkeypatch):
     assert location_findings, [f.label for f in findings]
     detail = " ".join(f.detail.lower() for f in location_findings)
     assert "cloud" in detail or "sync" in detail or "icloud" in detail
+
+
+def test_doctor_reports_include_scope_coverage(tmp_path: Path, monkeypatch) -> None:
+    """When include_dirs are configured, doctor reports an indexed-vs-discoverable
+    coverage line (T8 #63) — the "Z of ~Y discoverable files indexed (~C%)" signal.
+    """
+    from rekol.include_indexer import index_include_dirs
+
+    home = tmp_path / "home"
+    home.mkdir()
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    research = tmp_path / "research"
+    (research / "papers").mkdir(parents=True)
+    (research / "papers" / "a.md").write_text("alpha\n", encoding="utf-8")
+    (research / "papers" / "b.md").write_text("bravo\n", encoding="utf-8")
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {projects}\n"
+        f"include_dirs:\n  - {research}\ninclude_deny:\n  []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+
+    cfg = load_config()
+    index_include_dirs(cfg)  # convert -> 100% coverage
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "include scope"]
+    assert coverage, [f.label for f in report.findings]
+    detail = coverage[0].detail.lower()
+    assert "discoverable" in detail and "indexed" in detail
+    assert "2 of" in detail
+
+
+def test_doctor_silent_on_include_scope_when_unconfigured(tmp_path: Path, monkeypatch) -> None:
+    """With no include_dirs (the default), doctor must NOT emit a coverage finding —
+    additive feature, no noise for existing users (spec: silent-skip empty sources).
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    _build_curated_index(home)
+    cfg = load_config()
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    assert not [f for f in report.findings if f.label == "include scope"]

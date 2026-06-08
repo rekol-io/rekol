@@ -33,6 +33,13 @@ DEFAULTS: dict = dict(
     archive_enabled=True,  # default-ON: we disclose at install, not opt-in
     archive_dir=None,  # None → resolve_archive_dir() picks the XDG default
     exclude_paths=[],  # glob patterns for project/cwd paths never archived/indexed
+    # --- Include = scope (T8 #63) ---
+    # Directories whose text files are kept in ongoing-indexing scope. A dir
+    # included once auto-indexes new files on every session-index run; the
+    # deny-list governs which files. BOTH default empty so an existing user's
+    # behaviour is unchanged until they opt in (purely additive).
+    include_dirs=[],  # list[str]: dir paths (~ and relative allowed; resolved on read)
+    include_deny=[],  # list[str]: deny globs applied to files under include_dirs
 )
 
 
@@ -199,6 +206,11 @@ class Config:
     temporal_confirm_interval_days: int
     archive_enabled: bool
     exclude_paths: list[str]
+    # Include = scope (T8 #63): RAW string lists as written in the YAML. Paths are
+    # resolved lazily via resolved_include_dirs() (mirrors archive_dir) so a ~ or a
+    # relative path is expanded at call time, not frozen at load. Both default empty.
+    include_dirs: list[str]
+    include_deny: list[str]
     # NOTE: the RESOLVED archive_dir is intentionally NOT a stored field — it is
     # resolved lazily via the archive_dir property (mirrors index_dir), so an env
     # override is honored at call time rather than frozen at load time. We store
@@ -245,6 +257,29 @@ class Config:
         Resolved lazily so an env override is honored at call time.
         """
         return resolve_archive_dir(self.archive_dir_raw)
+
+    def resolved_include_dirs(self) -> list[Path]:
+        """Absolute, ~-expanded include-scope dirs (T8 #63).
+
+        Resolved lazily (not a frozen field) so a ``~`` or a relative path in the
+        YAML is expanded at call time — the same posture as ``archive_dir``. Order
+        follows the config list (deterministic). De-dupes exact repeats while
+        preserving first-seen order, so an accidental duplicate dir is not
+        indexed twice. A method (not a property) because it does filesystem-
+        agnostic path work that reads as a small computation, not an attribute.
+        """
+        seen: set[Path] = set()
+        resolved: list[Path] = []
+        for raw in self.include_dirs:
+            path = Path(os.path.expanduser(str(raw)))
+            if not path.is_absolute():
+                # Relative include dirs are anchored at the memory home so they
+                # mean the same thing regardless of the process's cwd.
+                path = (self.memory_home / path).resolve()
+            if path not in seen:
+                seen.add(path)
+                resolved.append(path)
+        return resolved
 
 
 def load_config() -> Config:
@@ -298,5 +333,47 @@ def load_config() -> Config:
         temporal_confirm_interval_days=int(data["temporal_confirm_interval_days"]),
         archive_enabled=bool(data["archive_enabled"]),
         exclude_paths=list(data["exclude_paths"]),
+        include_dirs=[str(d) for d in data["include_dirs"]],
+        include_deny=[str(d) for d in data["include_deny"]],
         archive_dir_raw=(str(data["archive_dir"]) if data["archive_dir"] is not None else None),
+    )
+
+
+def persist_include_scope(
+    memory_home: Path, include_dirs: list[str], include_deny: list[str]
+) -> None:
+    """Write the include-scope keys back into ``<memory_home>/rekol.config.yaml``.
+
+    This is what makes the scope "editable on rerun" (the spec): the onboarding
+    flow calls this with the user's current picks, overwriting any prior values
+    for these two keys while PRESERVING every other key in the file. We round-trip
+    through ``yaml.safe_load`` so we never clobber unrelated config; a missing or
+    empty file starts from ``{}``.
+
+    Reads the existing ``rekol.config.yaml`` (NOT the ``memory.config.yaml``
+    fallback — new writes always go to the current filename). On a malformed
+    existing file we raise rather than silently dropping the user's other keys.
+    """
+    config_file = memory_home / "rekol.config.yaml"
+    existing: dict = {}
+    if config_file.exists():
+        # A malformed config must not be silently overwritten — that would lose
+        # the user's other keys. Surface it so they can fix it.
+        try:
+            loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"Cannot persist include-scope: {config_file} is not valid YAML: {exc}"
+            ) from exc
+        if loaded is not None:
+            if not isinstance(loaded, dict):
+                raise ValueError(
+                    f"Cannot persist include-scope: {config_file} top level is not a mapping"
+                )
+            existing = loaded
+    existing["include_dirs"] = list(include_dirs)
+    existing["include_deny"] = list(include_deny)
+    memory_home.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
