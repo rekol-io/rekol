@@ -139,12 +139,21 @@ def _recall_and_dedupe(cfg: Config):
 
 
 def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
-    """Recall → scope → batch → write review files → return a fresh checkpoint.
+    """Recall → scope → batch → write review files → return a persisted checkpoint.
 
-    Writes each batch's review file incrementally as it plans, so even if the
-    process dies right after this call the artifacts are already on disk. Returns
-    ``None`` when nothing is in scope (a fresh install / over-narrow scope), so
-    the caller can report "no candidates" rather than write an empty run.
+    Persists the checkpoint INCREMENTALLY rather than only after every batch is
+    written: a "planning started" checkpoint (the full batch plan,
+    ``candidates_written=0``) lands BEFORE the write loop, then it is re-saved
+    after each batch's review file is written. So a crash mid-plan no longer
+    orphans review files behind a missing checkpoint and forces a full replan —
+    the resume path finds the checkpoint plus whatever batch files already landed.
+    ``completed`` stays empty here: planning only WRITES the review files; a batch
+    is marked done only after the skill fully PROCESSES it (capture + REKOL.md),
+    preserving the mark-done-after-processing ordering.
+
+    Returns ``None`` when nothing is in scope (a fresh install / over-narrow
+    scope), so the caller can report "no candidates" rather than write an empty
+    run. The returned (and on-disk) checkpoint is the final, complete one.
     """
     new_candidates = _recall_and_dedupe(cfg)
     scoped = apply_scope(new_candidates, scope, now_iso=_now_iso())
@@ -154,13 +163,10 @@ def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
 
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     pending_dir = cfg.memory_home / "pending-review"
-    written = 0
-    for batch in batches:
-        write_batch_candidates(batch, pending_dir=pending_dir, run_id=run_id)
-        written += len(batch.candidates)
+    state_path = state_path_for(cfg.memory_home)
 
     now = _now_iso()
-    return BootstrapState(
+    state = BootstrapState(
         run_id=run_id,
         embedding_model=cfg.embedding_model,
         scope=scope.as_dict(),
@@ -168,8 +174,21 @@ def _plan_run(cfg: Config, scope: ScopeFilter) -> BootstrapState | None:
         completed=[],
         created_iso=now,
         updated_iso=now,
-        candidates_written=written,
+        candidates_written=0,
     )
+    # "Planning started" checkpoint BEFORE any file write, so a crash on the very
+    # first batch still leaves a resumable plan rather than orphaned artifacts.
+    save_state(state, state_path)
+
+    for batch in batches:
+        write_batch_candidates(batch, pending_dir=pending_dir, run_id=run_id)
+        state.candidates_written += len(batch.candidates)
+        state.updated_iso = _now_iso()
+        # Persist progress after each batch's file lands (atomic), so the
+        # checkpoint never lags the artifacts on disk.
+        save_state(state, state_path)
+
+    return state
 
 
 def _load_or_fail(cfg: Config) -> BootstrapState | None:
@@ -254,7 +273,6 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
     a differing scope is refused so the user makes an explicit choice (resume vs
     reset) rather than silently desyncing the plan from the corpus.
     """
-    state_path = state_path_for(cfg.memory_home)
     existing = _load_or_fail(cfg)
 
     if existing is not None and not reset:
@@ -279,7 +297,10 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
         _emit_status(existing)
         return
 
-    # Fresh run (no prior checkpoint, or --reset). Plan, write artifacts, persist.
+    # Fresh run (no prior checkpoint, or --reset). _plan_run writes artifacts AND
+    # persists the checkpoint incrementally (a "planning started" checkpoint up
+    # front, re-saved after each batch), so it is already on disk by the time we
+    # report. ``--reset`` overwrites any prior checkpoint via that up-front save.
     new_state = _plan_run(cfg, scope)
     if new_state is None:
         click.echo(
@@ -288,7 +309,6 @@ def _handle_plan(cfg: Config, scope: ScopeFilter, *, resume: bool, reset: bool) 
             "--full` first, or widen with --all-time / --scope-days."
         )
         return
-    save_state(new_state, state_path)
     click.echo(
         f"planned run {new_state.run_id}: {len(new_state.batches)} batch(es), "
         f"{new_state.candidates_written} candidate(s) written to "
