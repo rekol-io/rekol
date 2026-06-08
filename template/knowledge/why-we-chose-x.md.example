@@ -1,0 +1,41 @@
+---
+name: Why we chose X over Y
+description: Example rationale doc — the reasoning behind a durable decision
+type: knowledge
+tags: [example, rationale, decision, knowledge]
+aliases: [why we chose, decision rationale, why x not y]
+see_also: [knowledge/anatomy-of-good-memory.md]
+created: 2026-04-27T10:00:00-04:00
+updated: 2026-04-27T10:00:00-04:00
+---
+
+<!--
+  This is an EXAMPLE knowledge file showing the "understanding" layer: not a
+  fact or a rule, but the REASONING behind a durable choice. Capturing the
+  *why* stops a future session from re-litigating a settled decision or quietly
+  undoing it. Copy this to knowledge/why-we-chose-<thing>.md and replace the
+  body with a real decision. Delete this comment when you do.
+
+  Keep it to roughly one screen. A rationale doc is read on demand (via search),
+  not injected every session — so it can hold the longer-form "story" that does
+  not belong in always/ or a one-line topics/ pointer.
+-->
+
+# Why we chose X over Y
+
+**Decision:** We use **X** for `<purpose>`. (Replace X/Y with the real options.)
+
+**Context:** What forced the choice and the constraints at the time — e.g. team
+size, deadline, existing stack, budget, the skills on hand.
+
+**Options considered:**
+
+- **X** — pro: `<main upside>`; con: `<main downside>`.
+- **Y** — pro: `<main upside>`; con: `<the downside that ruled it out>`.
+
+**Why X won:** The one or two factors that actually decided it. Be honest about
+the tradeoff accepted, not just the upside.
+
+**What would change this:** The condition under which revisiting Y is warranted
+(e.g. "if `<scale threshold>` is crossed" or "if `<constraint>` goes away").
+Naming this keeps the decision durable without making it dogma.
