@@ -44,6 +44,27 @@ from rekol.onboarding import (
 # corpus that would yield no durable signal.
 PATH_A_MIN_TRANSCRIPTS = 1
 
+# At or above this many transcripts, indexing is a multi-minute job (embedding
+# every message in a large corpus). The magnitude-aware refinement (#59 §6.4)
+# warns the user before they kick it off so a long first run isn't a surprise.
+# The detector caps its scan at 10_000 (see ``count_claude_transcripts``), so a
+# count at the cap reads as "a lot" and trips this warning, which is correct.
+HUGE_HISTORY_THRESHOLD = 1_000
+
+# The signature close line — the honest promise REKOL makes on every path.
+CLOSE_LINE = "It recalls what it has, faithfully — what it doesn't have, it'll tell you."
+
+# How REKOL grows over time, shown on the empty/light close (and always reachable).
+GROWS_HINT = (
+    "Grow REKOL over time:\n"
+    '  - Capture facts as you work: `rekol capture` (or say "remember this" '
+    "and let the rekol skill do it).\n"
+    "  - As your Claude Code history builds up, re-run `rekol init` to index it "
+    "and `rekol bootstrap` to distil recurring instructions into memory.\n"
+    "  - Include external knowledge dirs with `rekol include add <dir>` "
+    "(you can change this anytime)."
+)
+
 
 @click.command(name="init")
 @click.option(
@@ -58,15 +79,21 @@ def main(yes: bool) -> None:
 
     n_transcripts = count_claude_transcripts(cfg.claude_projects_dir)
     if n_transcripts >= PATH_A_MIN_TRANSCRIPTS:
-        _path_a(cfg, n_transcripts, yes=yes)
+        indexed_content = _path_a(cfg, n_transcripts, yes=yes)
     else:
         _path_b(cfg, yes=yes)
+        indexed_content = False
 
     # Shared tail: surface detected cloud-sync folders + optional legacy/notes
     # imports. These apply on both paths and are independent, opt-in steps.
     _offer_cloud_sync_hint()
     _offer_notes_import(yes=yes)
     _offer_legacy_migration(yes=yes)
+
+    # Adaptive close (#59 §6.1): WITH content (we just indexed a corpus) print the
+    # coverage report; on an empty/light install pivot to "how it grows" instead.
+    # Either way, end on the signature honesty line.
+    _adaptive_close(indexed_content=indexed_content)
 
     click.echo(
         "rekol init complete. Re-run `rekol init` any time — it never overwrites your files."
@@ -76,16 +103,31 @@ def main(yes: bool) -> None:
 # --- Path A: a real history to mine -------------------------------------------
 
 
-def _path_a(cfg: Config, n_transcripts: int, *, yes: bool) -> None:
-    """Three independent opt-in steps for an install with past transcripts."""
+def _path_a(cfg: Config, n_transcripts: int, *, yes: bool) -> bool:
+    """Three independent opt-in steps for an install with past transcripts.
+
+    Returns whether session content was indexed this run, so the adaptive close
+    knows whether there is fresh content to print a coverage report for.
+    """
     click.echo(f"Found {n_transcripts} past Claude Code sessions under {cfg.claude_projects_dir}.")
 
-    # Step 1 — index (default yes): makes history searchable (recall).
+    # Step 1 — index (default yes): makes history searchable (recall). Magnitude-
+    # aware (#59 §6.4): on a huge history, warn that indexing is a long job BEFORE
+    # the prompt, so a multi-minute first run isn't a surprise. The default stays
+    # yes — recall is the point — but the user makes an informed choice.
+    if n_transcripts >= HUGE_HISTORY_THRESHOLD:
+        click.echo(
+            f"  That's a large history — indexing all {n_transcripts} sessions may "
+            "take a while (it embeds every message). You can index now or skip and "
+            "do it later with `rekol session-index` (you can change this anytime)."
+        )
+    indexed_content = False
     if yes or click.confirm(
-        "Index them so REKOL can search your history?",
+        "Index them so REKOL can search your history? (you can change this anytime)",
         default=True,
     ):
         _invoke(["session-index", "--incremental"])
+        indexed_content = True
 
     # Step 2 — memory bootstrap (default: later). Distils recurring instructions
     # into curated, always-on memory (understanding). Independent of step 1 —
@@ -111,24 +153,46 @@ def _path_a(cfg: Config, n_transcripts: int, *, yes: bool) -> None:
     ):
         _seed_and_report(cfg)
 
+    return indexed_content
+
 
 # --- Path B: a fresh/light install --------------------------------------------
 
 
 def _path_b(cfg: Config, *, yes: bool) -> None:
-    """Light session for an install with no/few transcripts: seed + teach."""
+    """Light session for an install with no/few transcripts: seed + teach.
+
+    The "how it grows" guidance and the signature close line are emitted by the
+    shared :func:`_adaptive_close` after the tail, so this path just seeds the
+    pack — keeping the close copy in one place (no duplicate grows hint).
+    """
     click.echo(
         "No Claude Code history to mine yet — starting a light session. "
-        "Seeding the starter pack so your memory home isn't empty."
+        "Seeding the starter pack so your memory home isn't empty "
+        "(you can change this anytime)."
     )
     _seed_and_report(cfg)
-    click.echo(
-        "Grow REKOL over time:\n"
-        '  - Capture facts as you work: `rekol capture` (or say "remember this" '
-        "and let the rekol skill do it).\n"
-        "  - As your Claude Code history builds up, re-run `rekol init` to index it "
-        "and `rekol bootstrap` to distil recurring instructions into memory."
-    )
+
+
+# --- adaptive close (#59 §6.1) ------------------------------------------------
+
+
+def _adaptive_close(*, indexed_content: bool) -> None:
+    """End the flow honestly: a coverage report with content, "how it grows" without.
+
+    WITH content (a corpus was just indexed) we run ``rekol coverage`` so the user
+    sees the indexed-vs-discoverable signal; on an empty/light install there is
+    nothing to report, so we skip it and pivot to how REKOL grows over time.
+    Either way we end on the signature close line — the honest promise REKOL makes
+    on every path.
+    """
+    if indexed_content:
+        # Coverage is informational (exit 0) and silent-skips when no include-scope
+        # is configured, so this is safe to run unconditionally once we've indexed.
+        _invoke(["coverage"])
+    else:
+        click.echo(GROWS_HINT)
+    click.echo(CLOSE_LINE)
 
 
 # --- shared helpers -----------------------------------------------------------
