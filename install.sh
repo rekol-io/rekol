@@ -447,11 +447,14 @@ fi
 # the relocation. Both writes are idempotent — appended only if the key is absent.
 #
 # Resolve the config file to seed into, mirroring the Step 8.5 CONFIG_YAML block:
-# prefer rekol.config.yaml; fall back to memory.config.yaml so a root created by
-# an older install is still seeded. Step 8.5 runs much later in the script, so we
-# must resolve our own copy here rather than reuse its CONFIG_YAML.
+# prefer rekol.config.yaml; fall back to a legacy memory.config.yaml ONLY if one
+# already exists (an older root). On a fresh home (neither present) we seed the
+# CURRENT name and never create the legacy file. Step 8.5 runs much later in the
+# script, so we must resolve our own copy here rather than reuse its CONFIG_YAML.
 CONFIG_YAML_SEED="${RESOLVED_HOME}/rekol.config.yaml"
-[[ -f "${CONFIG_YAML_SEED}" ]] || CONFIG_YAML_SEED="${RESOLVED_HOME}/memory.config.yaml"
+if [[ ! -f "${CONFIG_YAML_SEED}" && -f "${RESOLVED_HOME}/memory.config.yaml" ]]; then
+  CONFIG_YAML_SEED="${RESOLVED_HOME}/memory.config.yaml"
+fi
 if [[ "$DO_ARCHIVE" == "0" ]]; then
   if ! grep -qs '^archive_enabled:' "${CONFIG_YAML_SEED}" 2>/dev/null; then
     run "printf 'archive_enabled: false\n' >> '${CONFIG_YAML_SEED}'"

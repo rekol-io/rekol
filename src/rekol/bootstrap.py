@@ -224,9 +224,13 @@ def apply_scope(
     if scope.max_sessions is not None:
         # Rank distinct sessions by their newest candidate timestamp, keep the
         # top N session ids, then retain only candidates from those sessions.
+        # An unparseable timestamp sorts LAST (oldest) here — unlike the days
+        # filter's fail-open above — so a garbage timestamp can't masquerade as
+        # the most-recent session and survive the cap over a genuinely-recent one.
+        oldest = dt.datetime.min.replace(tzinfo=dt.UTC)
         newest_per_session: dict[str, dt.datetime] = {}
         for c in kept:
-            ts = _parse_iso(c.timestamp_iso) or now
+            ts = _parse_iso(c.timestamp_iso) or oldest
             if c.session_id not in newest_per_session or ts > newest_per_session[c.session_id]:
                 newest_per_session[c.session_id] = ts
         top_sessions = {
