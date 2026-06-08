@@ -1080,6 +1080,14 @@ fi
 say ""
 say "done."
 say "journal: ${JOURNAL}"
+# Two-phase honesty (no day-1-magic overclaim): install makes history
+# searchable today; ambient "understanding" is something it earns over time.
+say ""
+say "what you get:"
+say "  Day 1   — your past sessions are searchable. Ask, and Claude recalls."
+say "  Over time — it learns how your project thinks (always-do rules, where things"
+say "              live, decisions you've made) and surfaces them on its own. That"
+say "              distilling is a separate step you opt into — see the README."
 # Disclosure (default-ON honesty): a single plain line, no per-session nag. The
 # archive holds verbatim transcripts on local disk; we say so and how to opt out.
 if [[ "${DO_ARCHIVE}" == "1" ]]; then
