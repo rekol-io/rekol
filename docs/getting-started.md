@@ -15,13 +15,15 @@ The installer asks where to keep your memory (default `~/rekol-memory`), sets up
 the `rekol` CLI, wires the Claude Code hooks + skill, seeds a starter memory from
 `template/`, and builds the first vector index.
 
+REKOL works anywhere Claude Code runs — the terminal, your IDE (VS Code or
+JetBrains), or the Claude Desktop app.
+
 What to expect, honestly: on **Day 1** your indexed history is *searchable* —
-recall. The assistant can find what you said before. What it does **not** do on
-Day 1 is *understand* your recurring habits ("repos live in `~/src`", "always run
-the linter before committing") as ambient, always-loaded memory. That
-distillation grows over time, and the optional [memory bootstrap](#run-the-memory-bootstrap-later)
-is how you accelerate it. No Day-1 magic — searchable first, understood as it
-learns.
+recall. The assistant can find what you said before. *Understanding* — your
+recurring habits ("repos live in `~/src`", "always run the linter before
+committing") as ambient, always-loaded memory — grows over time, and the optional
+[memory bootstrap](#run-the-memory-bootstrap-later) is how you accelerate it.
+Searchable first, understood as it learns.
 
 ---
 
@@ -47,8 +49,7 @@ through it changes nothing). It will:
 - Point out any cloud-sync folders (Dropbox, iCloud) where `REKOL_HOME` could
   live so your markdown syncs across devices.
 
-REKOL never indexes on its own. `init` (and the skill) only act after you
-confirm.
+Indexing is opt-in: `init` (and the skill) act after you confirm.
 
 ### 2. Verify it landed
 
@@ -65,10 +66,10 @@ you are. This file is re-injected at the start of every session.
 
 ### 4. Run the memory bootstrap later
 
-Indexing makes history *searchable*; it does not yet *distill* it into curated,
-always-on memory. See
-[Run the memory bootstrap later](#run-the-memory-bootstrap-later) for that next
-step — it's optional and best run once your history is indexed.
+Indexing makes history *searchable*; *distilling* it into curated, always-on
+memory is a separate step. See
+[Run the memory bootstrap later](#run-the-memory-bootstrap-later) — it's optional
+and best run once your history is indexed.
 
 ---
 
@@ -93,8 +94,8 @@ rekol import ~/Documents/ObsidianVault
 ```
 
 `import` is a *mechanical* conversion — it makes your docs findable via search.
-It does **not** use an LLM to file notes into the `always` / `when` / `topics`
-layers. That curation is the assistant's job (or yours, with `rekol capture`).
+Filing those notes into the `always` / `when` / `topics` layers is curation: the
+assistant's job (or yours, with `rekol capture`).
 
 ### 2. Edit your identity
 
@@ -123,11 +124,10 @@ memory — the same step Path A users run.
 ## Run the memory bootstrap later
 
 Indexing (Path A) and importing (Path B) make content **searchable** — that's
-recall. Neither one *distills* your recurring patterns ("always do X", "repos
-live in Y", "we chose Z") into the ambient, always-loaded layers that make the
-assistant *just know* things. That distillation is the **memory bootstrap**, and
-it's a separate, optional step you run when you're ready — not something that
-happens automatically on install.
+recall. *Distilling* your recurring patterns ("always do X", "repos live in Y",
+"we chose Z") into the ambient, always-loaded layers that make the assistant
+*just know* things is the **memory bootstrap** — a separate, optional step you
+run when you're ready.
 
 Two things to be honest about up front:
 
@@ -140,17 +140,14 @@ Two things to be honest about up front:
   *you* approve what lands in `always` / `when` / `topics` / `knowledge`. It
   never silently rewrites your memory.
 
-To run it, open Claude and ask it to **"bootstrap my rekol memory"** (or "set up
+To run it, open Claude Code and say: **"set up my rekol memory"** (or "bootstrap
 my rekol memory"). The assistant drives the flow; you review and accept the
-candidates. Because it operates over your indexed corpus, run it *after* you've
-indexed your history (Path A step 1), or anytime later once enough history has
-accumulated (Path B).
+candidates. Because it operates over your indexed corpus, run it once you've
+indexed your history (Path A step 1), or once enough history has accumulated
+(Path B).
 
-> This is the cold-start half of REKOL's onboarding. The bootstrap skill is the
-> subject of an in-progress workstream
-> ([EPIC #46](https://github.com/rekol-io/rekol/issues/46)); until it ships,
-> indexing + manual `rekol capture` are the way to build curated memory. The
-> honest framing above holds regardless: searchable on Day 1, understood as it
+> Indexing and manual `rekol capture` build curated memory you can rely on today.
+> The framing above holds throughout: searchable on Day 1, understood as it
 > learns.
 
 ---
