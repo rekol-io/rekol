@@ -470,10 +470,12 @@ fi
 # =============================================================================
 
 if [[ "$DO_SKILL" == "1" ]]; then
-  # Install both the canonical `rekol` skill and the `memory` back-compat shim.
-  # Claude Code derives the /<name> trigger from the directory name and has no
-  # aliases field, so the shim directory is what keeps `/memory` working.
-  for skill_name in rekol memory; do
+  # Install the canonical `rekol` skill, the `memory` back-compat shim, and the
+  # `rekol-bootstrap` cold-start routine (#41). Claude Code derives the /<name>
+  # trigger from the directory name and has no aliases field, so the shim
+  # directory is what keeps `/memory` working, and `rekol-bootstrap` gets its own
+  # /rekol-bootstrap trigger.
+  for skill_name in rekol memory rekol-bootstrap; do
     skill_dst_dir="${SKILL_BASE}/${skill_name}"
     run "mkdir -p '${skill_dst_dir}'"
 

@@ -18,6 +18,7 @@ EXPECTED_COMMANDS = {
     "capture",
     "invalidate",
     "propose",
+    "bootstrap",
     "review",
     "migrate",
     "session-index",
