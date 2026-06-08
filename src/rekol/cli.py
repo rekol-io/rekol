@@ -15,6 +15,7 @@ from rekol.cli_coverage import main as coverage_cmd
 from rekol.cli_docs_convert import main as import_cmd
 from rekol.cli_doctor import main as doctor_cmd
 from rekol.cli_hooks import hook_group
+from rekol.cli_include import main as include_grp
 from rekol.cli_index import main as index_grp
 from rekol.cli_init import main as init_cmd
 from rekol.cli_invalidate import main as invalidate_cmd
@@ -48,6 +49,7 @@ main.add_command(import_cmd, name="import")
 main.add_command(init_cmd, name="init")
 main.add_command(doctor_cmd, name="doctor")
 main.add_command(coverage_cmd, name="coverage")
+main.add_command(include_grp, name="include")
 main.add_command(hook_group, name="_hook")
 
 
