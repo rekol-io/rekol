@@ -1,3 +1,41 @@
+# Acceptance Record — 2026-06-08 (v0.1.0, post onboarding wave-2)
+
+Feature-complete alpha acceptance for `v0.1.0`. Covers the cold-clone install gate +
+the wave-2 surface (assistant-led onboarding, include-scope, the new CLI commands).
+
+## Cold-clone install (Linux) — PASS
+Truly fresh environment: a clean `ubuntu:24.04` Docker container (no cached deps, no
+prior rekol), `git clone` of the committed tree, then a real `./install.sh` with
+`REKOL_HOME` set. Verified:
+
+| # | Criterion | Result |
+|---|-----------|--------|
+| 1 | `apt` deps + `git clone` + cold `./install.sh` (fresh dep install incl. torch) | ✅ exit 0 |
+| 2 | Wave-2 CLI commands present | ✅ `bootstrap` · `coverage` · `include` · `init` · `invalidate` |
+| 3 | `rekol include` subcommands present | ✅ `add` · `allow` · `deny` · `discover` · `show` |
+| 4 | Search works on the fresh install | ✅ `always/identity.md` top hit (score 0.793) |
+| 5 | Skills installed | ✅ `rekol` · `rekol-bootstrap` · `rekol-init` · `memory` |
+| 6 | Post-install copy is positive-only + handoff line | ✅ "Day 1 / Over time" + "open Claude Code and say: 'set up my rekol memory'" |
+
+## Automated install coverage (both OSes)
+- **bats** `tests/test_install.bats` — 28 tests: dry-run safety, seed, rerun-idempotence,
+  manifest, shim, search-after-install, hook wiring, archive flags. Green on CI (Ubuntu)
+  + locally (macOS). Gated to install-touching PRs (#79).
+- **Python gate** — ruff / ruff-format / mypy / pytest (~580 tests) green on `main`.
+
+## macOS
+The installer is exercised by the bats suite on this Mac and by the verified live install
+here (skills + commands confirmed). A **true clean-account macOS** run is not headless-
+testable from here — tracked as a manual / future-CI-matrix gap, not claimed as passed.
+
+## Known limitations (non-blocking for the alpha)
+- bats install tests are slow on the self-hosted runner (#78).
+- macOS clean-account acceptance is manual (above).
+- `#65` — SessionStart hook firing inside VS Code / JetBrains is unverified (routed to QA);
+  terminal + the Claude Desktop app are proven.
+
+---
+
 # Acceptance Record — 2026-04-28
 
 Run: disposable `$MEMORY_HOME` at `$(mktemp -d)/mem`.
