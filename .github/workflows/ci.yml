@@ -29,22 +29,30 @@ jobs:
     runs-on: [self-hosted, linux]   # TEMP: was `macos-latest` — see header / revert before public
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the base commit present for the git-diff gate below
       # Gate the slow bats install tests (~18 min) to only run when the install
       # scripts — or their hooks, the bats tests, or this workflow — change. A
       # Python-only PR then skips bats entirely and the gate is just
       # ruff/format/mypy/pytest (~2 min). install.sh sources no separate libs, so
       # hooks/** + the two bats files are the full "or its libraries" surface.
-      - uses: dorny/paths-filter@v3
+      #
+      # Detected via plain `git diff` (NOT a GitHub-API action): the self-hosted
+      # runner's token can't call the PR-files API ("Resource not accessible by
+      # integration"). Fail-safe: if the diff can't be computed, RUN bats.
+      - name: Detect shell-script changes
         id: filter
-        with:
-          filters: |
-            shell:
-              - 'install.sh'
-              - 'uninstall.sh'
-              - 'hooks/**'
-              - 'tests/test_install.bats'
-              - 'tests/test_uninstall.bats'
-              - '.github/workflows/ci.yml'
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          if changed="$(git diff --name-only "$base" HEAD 2>/dev/null)"; then
+            if printf '%s\n' "$changed" | grep -qE '^(install|uninstall)\.sh$|^hooks/|^tests/test_(install|uninstall)\.bats$|^\.github/workflows/ci\.yml$'; then
+              echo 'shell=true' >> "$GITHUB_OUTPUT"; echo 'shell scripts changed -> bats WILL run'
+            else
+              echo 'shell=false' >> "$GITHUB_OUTPUT"; echo 'no shell-script changes -> bats skipped'
+            fi
+          else
+            echo 'shell=true' >> "$GITHUB_OUTPUT"; echo 'could not compute diff -> running bats (fail-safe)'
+          fi
       # No actions/setup-python: this self-hosted runner is Ubuntu 24.04 with Python
       # 3.12 (>=3.11), and setup-python has no arm64 build for older bases. Use the
       # system python via a venv (24.04 is PEP-668 "externally managed").
