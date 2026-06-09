@@ -16,8 +16,11 @@ from pathlib import Path
 from rekol.config import load_config
 from rekol.include_indexer import (
     IncludeIndexResult,
+    dir_is_current,
     include_prefix_for,
     index_include_dirs,
+    scoped_count_and_current,
+    scoped_file_count,
 )
 
 
@@ -150,3 +153,27 @@ def test_missing_include_dir_is_skipped_not_fatal(tmp_path: Path, monkeypatch) -
     # A configured-but-absent dir must not crash the run.
     result = index_include_dirs(cfg)
     assert missing.resolve() not in result.dirs_converted
+
+
+def test_scoped_count_and_current_matches_separate_helpers(tmp_path: Path, monkeypatch) -> None:
+    """#76: the single-walk helper returns the same (count, is_current) as the separate
+    scoped_file_count + dir_is_current — before and after an index run (current flips).
+    Pinning the equivalence guards the coverage double-scan TOCTOU fix."""
+    src = tmp_path / "notes"
+    _write(src / "a", "one.md")
+    _write(src / "b", "two.md")
+    cfg, _ = _make_cfg(tmp_path, monkeypatch, [src])
+
+    # Before any conversion: count matches, dir is NOT current (no marker yet).
+    count, current = scoped_count_and_current(cfg, src)
+    assert count == scoped_file_count(cfg, src) == 2
+    assert current is dir_is_current(cfg, src) is False
+
+    # After indexing: marker written → current True; count unchanged.
+    index_include_dirs(cfg)
+    count2, current2 = scoped_count_and_current(cfg, src)
+    assert count2 == scoped_file_count(cfg, src) == 2
+    assert current2 is dir_is_current(cfg, src) is True
+
+    # A missing dir is (0, False).
+    assert scoped_count_and_current(cfg, tmp_path / "nope") == (0, False)
