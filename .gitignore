@@ -8,3 +8,10 @@ __pycache__/
 htmlcov/
 dist/
 build/
+
+# Install-time artifacts and local secrets — never commit
+.install-logs/
+.env
+
+# macOS Finder cruft
+.DS_Store
