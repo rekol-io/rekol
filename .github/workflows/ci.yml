@@ -29,6 +29,22 @@ jobs:
     runs-on: [self-hosted, linux]   # TEMP: was `macos-latest` — see header / revert before public
     steps:
       - uses: actions/checkout@v4
+      # Gate the slow bats install tests (~18 min) to only run when the install
+      # scripts — or their hooks, the bats tests, or this workflow — change. A
+      # Python-only PR then skips bats entirely and the gate is just
+      # ruff/format/mypy/pytest (~2 min). install.sh sources no separate libs, so
+      # hooks/** + the two bats files are the full "or its libraries" surface.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shell:
+              - 'install.sh'
+              - 'uninstall.sh'
+              - 'hooks/**'
+              - 'tests/test_install.bats'
+              - 'tests/test_uninstall.bats'
+              - '.github/workflows/ci.yml'
       # No actions/setup-python: this self-hosted runner is Ubuntu 24.04 with Python
       # 3.12 (>=3.11), and setup-python has no arm64 build for older bases. Use the
       # system python via a venv (24.04 is PEP-668 "externally managed").
@@ -47,6 +63,10 @@ jobs:
       - name: pytest
         run: .venv/bin/pytest -q
       - name: bats install-script test
+        # Only when shell scripts changed (see the paths-filter above) — keeps
+        # Python-only PRs off the ~18-min install-script tests. A skipped step is
+        # neutral, so the `test` job still goes green on the fast checks alone.
+        if: steps.filter.outputs.shell == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bats jq
