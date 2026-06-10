@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class BaseEmbedder(ABC):
@@ -129,7 +132,28 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         """
         from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
-        self._model = SentenceTransformer(model_name)
+        # Offline-first load. rekol is local-first and caches this model at
+        # install, so the steady state needs NO network. Plain
+        # ``SentenceTransformer(model_name)`` instead runs an online HuggingFace
+        # freshness HEAD on every construction (every `rekol search`/index/etc.),
+        # which breaks under air-gap / egress limits / corporate TLS interception
+        # — and worse, on failure sentence-transformers can silently build a
+        # different mean-pooling model, degrading embeddings without an error.
+        # ``local_files_only=True`` uses the cache and makes zero network calls.
+        try:
+            self._model = SentenceTransformer(model_name, local_files_only=True)
+        except OSError:
+            # Not in the local cache yet (fresh install / changed model). This is
+            # the one legitimate time to reach the network; do the one-time fetch
+            # and log it so the network use is visible, not surprising. A genuinely
+            # broken cache raises a non-OSError and propagates loudly rather than
+            # silently rebuilding a wrong model.
+            logger.info(
+                "embedding model %r not in local cache; fetching from HuggingFace "
+                "(one-time, requires network)…",
+                model_name,
+            )
+            self._model = SentenceTransformer(model_name)
         dim = self._model.get_sentence_embedding_dimension()
         if dim is None:
             raise ValueError(
