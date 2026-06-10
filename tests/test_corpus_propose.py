@@ -270,8 +270,8 @@ def test_propose_from_corpus_writes_pending_review(tmp_path: Path, monkeypatch) 
     result = runner.invoke(propose_main, ["--from-corpus"])
     assert result.exit_code == 0, result.output
 
-    pending = list((memory_home / "pending-review").glob("*.md"))
-    assert len(pending) == 1, list((memory_home / "pending-review").iterdir())
+    pending = list(cfg.pending_review_dir.glob("*.md"))
+    assert len(pending) == 1, list(cfg.pending_review_dir.iterdir())
     body = pending[0].read_text()
     assert "docker compose pull" in body
     # Provenance present so the candidate is traceable to its transcript.

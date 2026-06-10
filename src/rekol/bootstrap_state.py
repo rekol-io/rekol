@@ -11,8 +11,8 @@ the batch plan (deterministic, ordered), which batches have finished, the scope
 params the plan was built from (so a resume can refuse to mix a different
 scope's batches into the same run), and a running candidate count. It is
 deliberately metadata-only — no verbatim transcript content lives here — so the
-checkpoint can sit next to the candidate artifacts it tracks under
-``$REKOL_HOME/pending-review/`` without becoming a secrets sink.
+checkpoint can sit next to the candidate artifacts it tracks in the local-only
+``pending-review/`` cache dir (#57) without becoming a secrets sink.
 
 Writes are atomic (temp file + ``os.replace``) so a process killed mid-write can
 never leave a half-written checkpoint that silently loses prior progress; the
@@ -48,21 +48,24 @@ class BootstrapStateError(ValueError):
     """
 
 
-def state_path_for(memory_home: Path) -> Path:
-    """Return the checkpoint path for a given memory home.
+def state_path_for(pending_review_dir: Path) -> Path:
+    """Return the checkpoint path inside a given pending-review queue dir.
 
-    Colocated with the per-batch candidate files under ``pending-review/`` so the
+    Colocated with the per-batch candidate files in ``pending_review_dir`` so the
     resume artifacts are self-contained: deleting that directory cleanly discards
-    both the candidates and the checkpoint together.
+    both the candidates and the checkpoint together. The queue lives in the
+    local-only cache, not ``$REKOL_HOME`` (#57) — see
+    :attr:`rekol.config.Config.pending_review_dir`.
 
     Args:
-        memory_home: The resolved ``$REKOL_HOME`` directory.
+        pending_review_dir: The pending-review queue directory (the cache-local
+            ``<cache>/pending-review``).
 
     Returns:
-        Path to ``<memory_home>/pending-review/.bootstrap-state.json`` (not
-        created here; :func:`save_state` makes the parent on first write).
+        Path to ``<pending_review_dir>/.bootstrap-state.json`` (not created here;
+        :func:`save_state` makes the parent on first write).
     """
-    return memory_home / "pending-review" / STATE_FILENAME
+    return pending_review_dir / STATE_FILENAME
 
 
 @dataclass
