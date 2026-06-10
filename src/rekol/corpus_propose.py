@@ -10,8 +10,8 @@ full provenance, and dedupes them against curated memory.
 
 Deliberately NO LLM and NO auto-write — this optimises RECALL and corpus-narrowing
 (cheap, zero tokens); T3 (#41) adds the LLM precision/classify pass on top. The
-output is a human-review checklist written to ``$REKOL_HOME/pending-review/`` by
-the CLI layer (``rekol propose --from-corpus``). Regex-over-notes stays the
+output is a human-review checklist written to the local-only ``pending-review/``
+cache dir (#57) by the CLI layer (``rekol propose --from-corpus``). Regex-over-notes stays the
 default ``propose`` path; this is the corpus path.
 """
 

@@ -35,10 +35,15 @@ def _fresh_state() -> BootstrapState:
     )
 
 
-def test_state_path_lives_under_pending_review(tmp_path: Path) -> None:
-    """The checkpoint file is colocated with the candidate artifacts it tracks."""
-    p = state_path_for(tmp_path)
-    assert p.parent == tmp_path / "pending-review"
+def test_state_path_lives_in_pending_review_dir(tmp_path: Path) -> None:
+    """The checkpoint file is colocated with the candidate artifacts it tracks.
+
+    ``state_path_for`` takes the pending-review queue dir directly (the cache-local
+    ``<cache>/pending-review`` per #57) and returns the checkpoint inside it.
+    """
+    pending_dir = tmp_path / "pending-review"
+    p = state_path_for(pending_dir)
+    assert p.parent == pending_dir
     assert p.name.startswith(".bootstrap-state")
     assert p.suffix == ".json"
 

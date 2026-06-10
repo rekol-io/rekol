@@ -47,8 +47,9 @@ rekol bootstrap --status
   ```
   rekol bootstrap
   ```
-  This recalls + scopes + batches and writes a per-batch review file under
-  `$REKOL_HOME/pending-review/` for each batch, plus a checkpoint. The default
+  This recalls + scopes + batches and writes a per-batch review file under the
+  local-only `pending-review/` cache dir (the command prints the exact path) for
+  each batch, plus a checkpoint. The default
   scope is a **bounded** recent window (last ~90 days, capped sessions) so the
   first run stays fast and reviewable. Widen explicitly when the user asks:
   - `rekol bootstrap --all-time` — the entire corpus
@@ -127,7 +128,7 @@ Project-specific facts: pass `--project <slug>` to scope a memory under
 ## Resumability — how it works (and why you drive it this way)
 
 `rekol bootstrap` writes a small JSON checkpoint
-(`$REKOL_HOME/pending-review/.bootstrap-state.json`) recording the ordered batch
+(`.bootstrap-state.json` inside the local-only `pending-review/` cache dir) recording the ordered batch
 plan, which batches are done, and the scope the plan was built from. Writes are
 atomic, so a crash never corrupts it. Because you `--mark-done` each batch only
 after finishing it, an interrupted run resumes at the first unfinished batch:

@@ -437,8 +437,12 @@ def test_memory_propose_writes_pending_review(tmp_path: Path, monkeypatch) -> No
     result = runner.invoke(propose_main, ["-i", str(notes)])
     assert result.exit_code == 0, result.output
 
-    pending = list((tmp_path / "pending-review").glob("*.md"))
-    assert len(pending) == 1, list((tmp_path / "pending-review").iterdir())
+    # #57: the review queue lives in the local-only cache, not REKOL_HOME/MEMORY_HOME.
+    from rekol.config import load_config
+
+    pending_dir = load_config().pending_review_dir
+    pending = list(pending_dir.glob("*.md"))
+    assert len(pending) == 1, list(pending_dir.iterdir())
     body = pending[0].read_text()
     # Each candidate gets a checklist item
     assert "use sqlite-vec for the index" in body

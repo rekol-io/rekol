@@ -73,17 +73,24 @@ def _setup(tmp_path: Path, monkeypatch) -> Path:
     return memory_home
 
 
+def _pending_dir() -> Path:
+    """The local-only review queue dir (#57: under the cache, not REKOL_HOME)."""
+    from rekol.config import load_config
+
+    return load_config().pending_review_dir
+
+
 def test_bootstrap_plans_batches_and_writes_review_files(tmp_path: Path, monkeypatch) -> None:
     """A fresh bootstrap recalls, batches per-project, and writes review files."""
     from rekol.cli_bootstrap import main as bootstrap_main
 
-    memory_home = _setup(tmp_path, monkeypatch)
+    _setup(tmp_path, monkeypatch)
     runner = CliRunner()
     # Widen scope so the seeded 2026-06 messages aren't excluded by the default window.
     result = runner.invoke(bootstrap_main, ["--all-time"])
     assert result.exit_code == 0, result.output
 
-    pending = memory_home / "pending-review"
+    pending = _pending_dir()
     review_files = sorted(pending.glob("bootstrap-*.md"))
     assert review_files, f"expected per-batch review files, got {list(pending.iterdir())}"
     bodies = "\n".join(p.read_text() for p in review_files)
@@ -288,12 +295,12 @@ def test_bootstrap_top_n_defers_tail_in_review_file(tmp_path: Path, monkeypatch)
     """`--top N` reviews the top-N candidates and DEFERS the rest (resumable, not dropped)."""
     from rekol.cli_bootstrap import main as bootstrap_main
 
-    memory_home = _setup_many(tmp_path, monkeypatch, n=6)
+    _setup_many(tmp_path, monkeypatch, n=6)
     runner = CliRunner()
     result = runner.invoke(bootstrap_main, ["--all-time", "--top", "2"])
     assert result.exit_code == 0, result.output
 
-    review = next((memory_home / "pending-review").glob("bootstrap-*project-rekol.md"))
+    review = next(_pending_dir().glob("bootstrap-*project-rekol.md"))
     body = review.read_text().lower()
     # The deferred tail is announced (transparency) and resumable, never dropped.
     assert "deferred" in body
@@ -305,10 +312,10 @@ def test_bootstrap_top_n_keeps_all_candidates_present(tmp_path: Path, monkeypatc
     """STOP-EARLY never drops a candidate — every recalled rule is still in the file."""
     from rekol.cli_bootstrap import main as bootstrap_main
 
-    memory_home = _setup_many(tmp_path, monkeypatch, n=6)
+    _setup_many(tmp_path, monkeypatch, n=6)
     runner = CliRunner()
     runner.invoke(bootstrap_main, ["--all-time", "--top", "1"])
-    review = next((memory_home / "pending-review").glob("bootstrap-*project-rekol.md"))
+    review = next(_pending_dir().glob("bootstrap-*project-rekol.md"))
     body = review.read_text()
     for i in range(6):
         assert f"rule {i}" in body, f"candidate rule {i} was silently dropped by --top"

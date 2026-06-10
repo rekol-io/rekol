@@ -250,6 +250,23 @@ class Config:
         return self.index_dir / "sessions.db"
 
     @property
+    def pending_review_dir(self) -> Path:
+        """Absolute path to the bootstrap/propose human-review queue.
+
+        Lives in the local-only cache (under :attr:`index_dir`), NOT in
+        ``$REKOL_HOME`` (#57). The queue holds recalled *raw transcript*
+        candidates the user hasn't curated yet, so keeping it out of the synced
+        tree means raw transcripts never reach a sync provider — the curated
+        memory the user approves is what lands in ``$REKOL_HOME`` and syncs.
+        Colocating it with the index also means a cache wipe / uninstall clears
+        the queue for free.
+
+        Returns:
+            Path at ``<cache>/pending-review`` (outside ``$REKOL_HOME``).
+        """
+        return self.index_dir / "pending-review"
+
+    @property
     def archive_dir(self) -> Path:
         """Absolute path to the durable transcript archive (see resolve_archive_dir).
 
