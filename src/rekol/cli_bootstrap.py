@@ -10,8 +10,8 @@ depend on an LLM being present:
      T2's ``recall_corpus_candidates`` + ``dedupe_against_memory``).
   2. **Scope** them to a bounded slice (recent N sessions / time window / chosen
      projects) — widenable; defaults conservative.
-  3. **Batch** per-project and write each batch's review file to
-     ``$REKOL_HOME/pending-review/`` INCREMENTALLY, with a pre-classified layer +
+  3. **Batch** per-project and write each batch's review file to the local-only
+     ``pending-review/`` cache dir (#57) INCREMENTALLY, with a pre-classified layer +
      a ready-to-edit ``rekol capture`` line per candidate.
   4. **Checkpoint** the batch plan + progress so a reaped run resumes without
      reprocessing finished batches.
@@ -183,8 +183,8 @@ def _plan_run(
         return None
 
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    pending_dir = cfg.memory_home / "pending-review"
-    state_path = state_path_for(cfg.memory_home)
+    pending_dir = cfg.pending_review_dir
+    state_path = state_path_for(cfg.pending_review_dir)
 
     now = _now_iso()
     state = BootstrapState(
@@ -221,7 +221,7 @@ def _load_or_fail(cfg: Config) -> BootstrapState | None:
     reprocess everything).
     """
     try:
-        return load_state(state_path_for(cfg.memory_home))
+        return load_state(state_path_for(cfg.pending_review_dir))
     except BootstrapStateError as exc:
         click.echo(str(exc), err=True)
         raise SystemExit(2) from exc
@@ -263,7 +263,7 @@ def _handle_next(cfg: Config) -> None:
         return
     from rekol.bootstrap import _batch_review_path
 
-    pending_dir = cfg.memory_home / "pending-review"
+    pending_dir = cfg.pending_review_dir
     click.echo(str(_batch_review_path(pending_dir, state.run_id, pending[0])))
 
 
@@ -279,7 +279,7 @@ def _handle_mark_done(cfg: Config, batch_id: str) -> None:
         click.echo(str(exc), err=True)
         raise SystemExit(2) from exc
     state.updated_iso = _now_iso()
-    save_state(state, state_path_for(cfg.memory_home))
+    save_state(state, state_path_for(cfg.pending_review_dir))
     remaining = len(state.pending_batches())
     click.echo(f"marked {batch_id} done ({remaining} batch(es) remaining)")
 
@@ -306,7 +306,7 @@ def _handle_bulk_approve(cfg: Config, batch_id: str) -> None:
         raise SystemExit(2)
     from rekol.bootstrap import _batch_review_path
 
-    pending_dir = cfg.memory_home / "pending-review"
+    pending_dir = cfg.pending_review_dir
     review_path = _batch_review_path(pending_dir, state.run_id, batch_id)
     if not review_path.exists():
         click.echo(
@@ -434,7 +434,7 @@ def _handle_plan(
     click.echo(
         f"planned run {new_state.run_id}: {len(new_state.batches)} batch(es), "
         f"{new_state.candidates_written} candidate(s) written to "
-        f"{cfg.memory_home / 'pending-review'}/"
+        f"{cfg.pending_review_dir}/"
     )
     _emit_status(new_state)
 
@@ -536,7 +536,7 @@ def main(
     """Resumable engine for the memory-bootstrap skill (recall → scope → batch → checkpoint).
 
     Default (no subflag): plan a run — recall + scope + batch, write per-batch
-    review files incrementally to ``$REKOL_HOME/pending-review/``, and persist a
+    review files incrementally to the local-only ``pending-review/`` cache dir, and persist a
     resume checkpoint. The ``rekol-bootstrap`` skill then loops: ``--next`` to get
     the next batch's file, process it (approve/edit/skip + ``rekol capture``),
     then ``--mark-done <batch>``. ``--resume`` continues an interrupted run;
