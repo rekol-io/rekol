@@ -1,7 +1,7 @@
 """memory-propose CLI: surface candidate memories for human review.
 
-Two input modes, both no-LLM and both write a review checklist to
-``$REKOL_HOME/pending-review/<timestamp>.md`` (never auto-captured):
+Two input modes, both no-LLM and both write a review checklist to the local-only
+``pending-review/<timestamp>.md`` cache dir (#57; never auto-captured):
 
   - default (notes): read a markdown file or stdin, find lines that look like
     memorable statements (TODO/Decision/Note/correction/preference markers).
@@ -78,12 +78,14 @@ def extract_candidates(text: str) -> list[str]:
 
 
 def _pending_proposal_path(cfg) -> tuple[Path, str]:
-    """Return ``(proposal_path, timestamp)`` under the memory-home review dir.
+    """Return ``(proposal_path, timestamp)`` under the local-only review queue dir.
 
     Creates ``pending-review/`` if absent. The timestamp is the filename stem and
-    is reused in the proposal heading so the two always agree.
+    is reused in the proposal heading so the two always agree. The queue lives in
+    the local-only cache, not ``$REKOL_HOME`` (#57), so raw transcript candidates
+    never reach a sync provider.
     """
-    pending_dir = cfg.memory_home / "pending-review"
+    pending_dir = cfg.pending_review_dir
     pending_dir.mkdir(parents=True, exist_ok=True)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     return pending_dir / f"{ts}.md", ts
@@ -226,7 +228,7 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
 def main(input_file: str | None, from_corpus: bool, quiet: bool) -> None:
     """Surface candidate memories for review; write a proposal, never auto-capture.
 
-    Output goes to ``$REKOL_HOME/pending-review/<timestamp>.md``.  Each candidate
+    Output goes to the local-only ``pending-review/<timestamp>.md`` cache dir.  Each candidate
     is annotated with the most-similar existing memory (if any) so the operator
     can decide whether to capture as new, update an existing memory, or drop it.
 

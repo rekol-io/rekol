@@ -208,8 +208,8 @@ def test_bootstrap_plan_writes_only_pending_review_no_memory_layer(
     result = CliRunner().invoke(bootstrap_main, ["--all-time"])
     assert result.exit_code == 0, result.output
 
-    # Review artifacts landed under pending-review/ ...
-    pending = memory_home / "pending-review"
+    # Review artifacts landed under the local-only pending-review/ cache (#57) ...
+    pending = cfg.pending_review_dir
     assert sorted(pending.glob("bootstrap-*.md")), "expected per-batch review files"
     assert (pending / ".bootstrap-state.json").exists()
     # ... and NOTHING new landed in any memory layer dir.
@@ -234,7 +234,7 @@ def test_propose_from_corpus_writes_only_pending_review_no_memory_layer(
     result = CliRunner().invoke(propose_main, ["--from-corpus"])
     assert result.exit_code == 0, result.output
 
-    assert sorted((memory_home / "pending-review").glob("*.md")), "expected a review file"
+    assert sorted(cfg.pending_review_dir.glob("*.md")), "expected a review file"
     after = {p.read_bytes() for p in _memory_layer_files(memory_home)}
     assert after == before, "propose must not write any curated-memory file"
 
@@ -632,7 +632,7 @@ def test_save_state_overwrites_stale_tmp_leaving_only_final(tmp_path: Path) -> N
         scope={"projects": [], "days": 90, "max_sessions": 200},
         batches=["project-rekol"],
     )
-    path = state_path_for(tmp_path)
+    path = state_path_for(pending)
     save_state(state, path)
 
     leftovers = [p.name for p in path.parent.iterdir() if p != path]
@@ -707,7 +707,8 @@ def test_plan_persists_checkpoint_before_writing_all_batches(tmp_path: Path, mon
 
     # The checkpoint landed BEFORE the crash, with the full two-batch plan, so a
     # resume picks it up rather than replanning from scratch over orphaned files.
-    state = load_state(state_path_for(memory_home))
+    # #57: the queue lives in the local-only cache, not memory_home.
+    state = load_state(state_path_for(cfg.pending_review_dir))
     assert state is not None, "no checkpoint persisted — a resume would replan from scratch"
     assert len(state.batches) == 2, "checkpoint must carry the full batch plan"
     assert state.completed == [], "planning writes files only; no batch is processed/done yet"
