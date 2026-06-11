@@ -158,7 +158,7 @@ prompt_for_memory_home() {
       printf '(or any local folder; the index lives in a local cache outside it, so syncing your memory never syncs the index)\n'
     } >&2
   fi
-  printf 'Memory folder [%s]: ' "$default_home" >&2
+  printf 'Memory folder — type a path, or press Enter to use the default [%s]: ' "$default_home" >&2
   read -r reply || true
   if [[ -z "$reply" ]]; then
     reply="$default_home"
