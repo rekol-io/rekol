@@ -28,6 +28,11 @@
 #
 # Logs to ~/.claude/logs/rekol-reindex.log for audit / debugging.
 
+# Strict mode is deliberately PARTIAL: `set -u` (catch unset vars) but NOT `-e`
+# or `pipefail`. This hook fires on every Write/Edit and must NEVER block or fail
+# the user's edit — every failure mode above is a clean `exit 0`, so aborting on
+# the first non-zero (`set -e`) would defeat that contract. The omission is
+# intentional, not an oversight.
 set -u
 
 input=$(cat)
