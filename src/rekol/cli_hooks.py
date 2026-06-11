@@ -1,8 +1,10 @@
-"""Hidden Claude Code hook subcommands: time-context + record-stop.
+"""Hidden Claude Code hook subcommands: time-context + record-stop + session-confidence.
 
-Stdlib-only and soft-fail by design — any error degrades and exits 0 so a hook
-problem never blocks a prompt. Per-session state lives at
-``~/.claude/session-env/time-context-<session_id>.json``.
+Soft-fail by design — any error degrades and exits 0 so a hook problem never blocks
+a prompt (or, for ``session-confidence``, never breaks the SessionStart injection it
+rides on). Per-session state lives at
+``~/.claude/session-env/time-context-<session_id>.json``. ``session-confidence``
+additionally reads the curated memory config (#87) to flag unverified always-on facts.
 """
 
 from __future__ import annotations
@@ -123,3 +125,85 @@ def record_stop() -> None:
         path.write_text(json.dumps(prev))
     except OSError as exc:
         click.echo(f"record-stop: state write failed: {exc}", err=True)
+
+
+# Cap the always-on confidence footer so it stays a glanceable nudge, not a wall
+# (a fresh store has every always-on file "never confirmed" — show a few, count the rest).
+_CONFIDENCE_FOOTER_MAX = 6
+
+
+def _parse_iso_date(value: object) -> dt.date | None:
+    """Parse a YYYY-MM-DD(-ish) frontmatter value to a date, or None."""
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _always_confidence_lines() -> list[str]:
+    """Confidence flags for the always-on layer, severity-ordered (#87, item 4).
+
+    The always-on memories are the ones the agent volunteers *proactively,
+    unprompted* — so a stale one is the most dangerous. Returns compact lines for
+    suspect → overdue → never-confirmed always-layer files. Empty when all are
+    confirmed-current (stay quiet). Best-effort: unreadable files are skipped.
+    """
+    from rekol.config import load_config
+    from rekol.model import ValidationError, parse_file
+
+    cfg = load_config()
+    always_dir = cfg.memory_home / "always"
+    if not always_dir.is_dir():
+        return []
+    interval = cfg.temporal_confirm_interval_days
+    today = dt.date.today()
+
+    suspect: list[str] = []
+    overdue: list[str] = []
+    never: list[str] = []
+    for path in sorted(always_dir.glob("*.md")):
+        try:
+            mf = parse_file(path)
+        except (ValidationError, OSError):
+            continue  # invalid/unreadable frontmatter — skip silently
+        if mf.invalidated_at:
+            continue  # already retired; not volunteered
+        name = f"always/{path.name}"
+        if mf.suspected_at:
+            reason = f" — {mf.suspect_reason}" if mf.suspect_reason else ""
+            suspect.append(f"  · {name}: ⚠ suspected (since {mf.suspected_at}{reason})")
+        elif mf.last_confirmed is None:
+            never.append(f"  · {name}: never confirmed")
+        else:
+            ref = _parse_iso_date(mf.last_confirmed)
+            if ref is not None and (today - ref).days > interval:
+                overdue.append(f"  · {name}: confirmed {mf.last_confirmed} (overdue)")
+    return suspect + overdue + never
+
+
+@hook_group.command(name="session-confidence")
+def session_confidence() -> None:
+    """Append a confidence footer for always-on memories to the SessionStart injection.
+
+    Rides on the SessionStart ``cat REKOL.md`` (appended with ``|| true``), so it
+    must NEVER fail the injection: ANY error prints nothing and exits 0. When some
+    always-on facts are suspect / overdue / never-confirmed, it prints a compact
+    ⚠ footer so the agent hedges (or runs ``rekol confirm``) before asserting them
+    unprompted — surface only, the agent decides.
+    """
+    try:
+        lines = _always_confidence_lines()
+    except Exception:  # noqa: BLE001 — a hook must never break the session injection
+        return
+    if not lines:
+        return
+    shown, extra = lines[:_CONFIDENCE_FOOTER_MAX], len(lines) - _CONFIDENCE_FOOTER_MAX
+    click.echo("")
+    click.echo(
+        "⚠ rekol confidence — these always-on facts are unverified; confirm "
+        "(`rekol confirm <file>`) or hedge before asserting them unprompted:"
+    )
+    for line in shown:
+        click.echo(line)
+    if extra > 0:
+        click.echo(f"  …and {extra} more — run `rekol review`.")
