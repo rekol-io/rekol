@@ -6,6 +6,41 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- **Memory confidence metadata (#87):** `rekol confirm <file>` (stamp
+  `last_confirmed`, distinct from an edit) and `rekol flag-suspect <file>
+  --reason` (mark a contradiction without rewriting), completing a
+  live → suspect → invalid lifecycle. Search hits now show a confidence tag
+  (`· confirmed Nago` / `· unconfirmed` / `⚠ suspected (since X — reason)`), and
+  the always-on SessionStart injection gains a footer flagging unverified
+  always-on facts so the agent hedges before asserting them. Surface-only —
+  rekol shows the signal, the agent decides.
+- **`rekol doctor --deep`:** post-install acceptance probe — verifies the
+  embedding model loads + embeds meaningfully (catches the silent mean-pooling
+  degradation class) and that end-to-end curated recall works.
+- `.github/FUNDING.yml` (GitHub Sponsors button).
+
+### Changed
+- The bootstrap/propose **pending-review queue moved to the local-only cache**
+  (out of the synced `REKOL_HOME`), so raw transcript candidates never reach a
+  sync provider (#57).
+- The embedding model now **loads offline-first** (`local_files_only`) — no
+  online HuggingFace check on every search; works offline and under corporate
+  TLS interception, and won't silently fall back to a degraded model.
+- Hardened secret-shape detection in the bootstrap review gate (Slack, JWT,
+  OAuth Bearer tokens).
+- Removed dead sqlite-vec setup from the curated `IndexStore`; documented its
+  search as a deliberate full numpy scan (vec0 KNN tracked in #90).
+
+### Fixed
+- `install.sh` crashed on its final index/session/archive steps when the memory
+  home was answered via the prompt (`REKOL_HOME` not exported) — the resolved
+  home is now exported once for all subprocesses (#99).
+- Intel (x86_64) macOS install crashed on the first embedding (NumPy 2.x vs the
+  older torch ABI) — NumPy is capped to `<2` on Intel macs, and `rekol doctor
+  --deep` surfaces the exact remedy (#101).
+
+## [0.1.0] - 2026-06-09
+### Added
 - Open-source scaffolding: Apache-2.0 license, README, CONTRIBUTING, Code of
   Conduct, issue/PR templates.
 - Quality gate: Ruff (lint+format), mypy, pre-commit, GitHub Actions CI.
