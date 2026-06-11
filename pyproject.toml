@@ -14,7 +14,13 @@ dependencies = [
     "click>=8.1,<9",
     "pyyaml>=6.0,<7",
     "python-frontmatter>=1.1,<2",
-    "numpy>=1.26,<3",
+    # NumPy is capped to <2 on Intel macOS: PyTorch stopped publishing recent
+    # x86_64-darwin wheels, so the newest installable torch there is compiled
+    # against NumPy 1.x and crashes ("_ARRAY_API not found") under NumPy 2.x on
+    # the first embedding. arm64 macOS + Linux ship a torch that supports NumPy 2,
+    # so they keep <3. (QA finding, clean Intel-mac install.)
+    "numpy>=1.26,<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy>=1.26,<3; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 
 [project.optional-dependencies]
