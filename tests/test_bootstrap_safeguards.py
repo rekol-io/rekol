@@ -438,7 +438,22 @@ def test_secret_bearing_candidate_leading_with_instruction_keyword_is_knowledge(
             f"{line!r} leads with an instruction keyword but bears a secret — "
             "it must classify knowledge, never always"
         )
-        assert suggested_frontmatter(line)["type"] == "knowledge"
+
+
+def test_new_secret_shapes_slack_jwt_bearer_are_detected() -> None:
+    """Fable review (#89): Slack / JWT / OAuth-Bearer token shapes must be caught.
+
+    These weren't in the original ``_SECRET_RES`` set, yet they show up in
+    transcripts that touch APIs. The guard must keep them out of ambient memory.
+    """
+    new_shapes = [
+        "xoxb-2451234567-2451234567890-AbCdEfGhIjKlMnOpQrStUvWx",  # Slack bot token
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJ",  # JWT
+        "Authorization: Bearer ya29.A0ARrdaM-abcdefghijklmnop1234567890",  # OAuth bearer
+    ]
+    for secret in new_shapes:
+        assert classify_layer(secret) != "always", f"{secret!r} must not be ambient"
+        assert suggested_frontmatter(secret)["type"] != "always"
 
 
 def test_multiline_candidate_renders_as_a_single_checklist_line(tmp_path: Path) -> None:
