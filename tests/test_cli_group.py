@@ -17,6 +17,8 @@ EXPECTED_COMMANDS = {
     "index",
     "capture",
     "invalidate",
+    "confirm",
+    "flag-suspect",
     "propose",
     "bootstrap",
     "review",

@@ -48,10 +48,14 @@ def _review_tag(
     interval_days: int,
     today: date,
 ) -> str:
-    """Return ' [review?]' for an overdue durable (exempt-layer) hit, else ''."""
+    """Return ' [review?]' for an overdue durable (exempt-layer) hit, else ''.
+
+    Confirmation age keys off ``last_confirmed`` (#87, fallback ``updated``/
+    ``created``) so the tag aligns with ``rekol review``'s overdue logic.
+    """
     if _layer_of(hit["file_path"], memory_home) not in set(exempt_layers):
         return ""
-    ref = _as_date(hit.get("updated") or hit.get("created"))
+    ref = _as_date(hit.get("last_confirmed") or hit.get("updated") or hit.get("created"))
     if ref is None or (today - ref).days > interval_days:
         return " [review?]"
     return ""
@@ -137,6 +141,29 @@ def _relative_age(day: date, *, today: date) -> str:
     return "today"
 
 
+def _confidence_tag(h: dict) -> str:
+    """Build the #87 confidence segment for a memory hit (surface, never enforce).
+
+    Order: a suspected-stale warning (exclude-but-explain — the fact still shows,
+    just flagged with its evidence), then confirmation recency. ``last_confirmed``
+    is distinct from ``updated`` (an edit is not a confirmation), so ``unconfirmed``
+    means "never verified against reality" — the signal that lets the agent hedge.
+    Invalidated hits already carry ``[INVALIDATED]`` from the caller, so we skip the
+    confirmation noise there.
+    """
+    if h.get("invalidated_at"):
+        return ""
+    parts: list[str] = []
+    if h.get("suspected_at"):
+        reason = f" — {h['suspect_reason']}" if h.get("suspect_reason") else ""
+        parts.append(f" ⚠ suspected (since {h['suspected_at']}{reason})")
+    if h.get("last_confirmed"):
+        parts.append(f" · confirmed {h.get('confirmed_rel') or h['last_confirmed']}")
+    else:
+        parts.append(" · unconfirmed")
+    return "".join(parts)
+
+
 def _render_text(
     result,
     top_k_memory: int,
@@ -162,7 +189,7 @@ def _render_text(
             lines.append(
                 f"{h.get('final_score', h['cosine_score']):.3f}  "
                 f"{h['file_path']}{heading}  (L{h['line_start']}-{h['line_end']}){ts}{inv}"
-                f"{h.get('review_tag', '')}"
+                f"{_confidence_tag(h)}{h.get('review_tag', '')}"
             )
             for snippet_line in h["text"].strip().splitlines()[:3]:
                 lines.append(f"    {snippet_line}")
@@ -310,6 +337,12 @@ def main(
             hit["updated_rel"] = (
                 _relative_age(updated_date, today=review_today) if updated_date else ""
             )
+            # #87 confidence signal: relative age of the last confirmation (distinct
+            # from `updated` — an edit is not a confirmation). Empty when never confirmed.
+            confirmed_date = _as_date(hit.get("last_confirmed"))
+            hit["confirmed_rel"] = (
+                _relative_age(confirmed_date, today=review_today) if confirmed_date else ""
+            )
         for hit in result.session_hits:
             try:
                 session_date = datetime.fromtimestamp(hit["timestamp_unix"]).date()
@@ -331,6 +364,9 @@ def main(
                                 updated=h.get("updated"),
                                 valid_from=h.get("valid_from"),
                                 invalidated_at=h.get("invalidated_at"),
+                                last_confirmed=h.get("last_confirmed"),
+                                suspected_at=h.get("suspected_at"),
+                                suspect_reason=h.get("suspect_reason"),
                                 cosine_score=h["cosine_score"],
                                 final_score=h.get("final_score", h["cosine_score"]),
                                 tags=h.get("tags", []),
