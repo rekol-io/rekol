@@ -216,6 +216,15 @@ fi
 RESOLVED_HOME="${REKOL_HOME:-$MEMORY_HOME}"
 readonly RESOLVED_HOME
 
+# Export the resolved home so EVERY `rekol`/python subprocess below inherits it.
+# When the user answers the prompt instead of pre-exporting REKOL_HOME, the
+# assignment above is a non-exported shell var, so an un-prefixed subprocess
+# (index rebuild / session-index / archive / migrate) would hit
+# `load_config()` with no REKOL_HOME and crash the install on its last steps
+# (launch-blocker found in clean-account testing). One export fixes the whole
+# class — no per-call prefix to forget.
+export REKOL_HOME="${RESOLVED_HOME}"
+
 # --- Journal setup ---
 # Journal records every mutation for post-install auditing.
 # The journal lives in RESOLVED_HOME/.install-logs/ so it does not pollute the
