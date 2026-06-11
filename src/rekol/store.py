@@ -1,4 +1,9 @@
-"""SQLite-backed index store. Uses sqlite-vec when available; falls back to numpy cosine."""
+"""SQLite-backed curated index store.
+
+Search is a full numpy-cosine scan over the curated chunks (small corpus); the
+vec0 KNN path is intentionally NOT wired here yet — tracked in #90. (SessionStore,
+in sessions/store.py, does use vec0 KNN.)
+"""
 
 from __future__ import annotations
 
@@ -111,7 +116,12 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 
 class IndexStore:
-    """SQLite-backed vector index. Fallback path (numpy cosine) is always available."""
+    """SQLite-backed curated index. Search is a full numpy-cosine scan (see ``search``).
+
+    The curated corpus is small, so a full scan is correct and fast; wiring vec0
+    KNN here (as ``SessionStore`` does) is tracked in #90, to be done if ``include``
+    grows the curated set large enough to matter. No vec extension is loaded here.
+    """
 
     def __init__(
         self,
@@ -128,8 +138,10 @@ class IndexStore:
         self.db_path = Path(db_path)
         self.dim = dim
         self.embedding_model = embedding_model
-        # Retained so the atomic rebuild (indexer.rebuild) can build a temp store
-        # with the SAME vec-extension intent as this one, then swap it in.
+        # ``use_sqlite_vec`` is accepted for constructor symmetry with SessionStore
+        # and reserved for the curated vec0 KNN wiring (#90); the curated store does
+        # NOT load a vec extension today — search is a full numpy scan. Kept as an
+        # attribute so indexer.rebuild can pass the same value to its temp store.
         self.use_sqlite_vec = use_sqlite_vec
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
@@ -143,9 +155,6 @@ class IndexStore:
             self.conn.execute("PRAGMA journal_mode = WAL;")
             self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
-            self._vec_loaded = False
-            if use_sqlite_vec:
-                self._try_load_vec()
         except Exception:
             self.conn.close()
             raise
@@ -168,24 +177,9 @@ class IndexStore:
             self.conn.execute("PRAGMA journal_mode = WAL;")
             self.conn.execute("PRAGMA busy_timeout = 30000;")
             self.conn.execute("PRAGMA foreign_keys = ON;")
-            self._vec_loaded = False
-            if self.use_sqlite_vec:
-                self._try_load_vec()
         except Exception:
             self.conn.close()
             raise
-
-    def _try_load_vec(self) -> None:
-        try:
-            import sqlite_vec
-
-            self.conn.enable_load_extension(True)
-            sqlite_vec.load(self.conn)
-            self.conn.enable_load_extension(False)
-            self._vec_loaded = True
-        except Exception:
-            # sqlite-vec extension unavailable; cosine fallback will be used instead
-            self._vec_loaded = False
 
     def init_schema(self) -> None:
         """Create the files, chunks, and metadata tables if they do not yet exist.
@@ -580,7 +574,14 @@ class IndexStore:
         ]
 
     def search(self, query_vec: np.ndarray, top_k: int = 5) -> list[dict[str, Any]]:
-        """Return the ``top_k`` chunks most similar to ``query_vec`` by cosine similarity."""
+        """Return the ``top_k`` chunks most similar to ``query_vec`` by cosine similarity.
+
+        Deliberate full scan: every chunk's embedding is loaded and scored in numpy.
+        Correct and fast for the curated corpus (hundreds–low-thousands of chunks).
+        If ``include`` ever grows the curated set into the tens of thousands, swap
+        this for a vec0 KNN path (the extension load + KNN query SessionStore already
+        uses) — tracked in #90. Until then a full scan is the honest, simplest choice.
+        """
         if query_vec.dtype != np.float32:
             query_vec = query_vec.astype(np.float32)
         rows = self.conn.execute(
