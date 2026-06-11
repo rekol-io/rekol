@@ -19,7 +19,10 @@ import numpy as np
 #     now derived from the store (C5) instead of a second filesystem walk, so the
 #     display name must live in the index. A version-3 index has no `name` column,
 #     so it is rebuilt rather than read with a missing field.
-CURATED_SCHEMA_VERSION = 4
+# 5 = with the confidence columns (last_confirmed/suspected_at/suspect_reason, #87).
+#     A version-4 index has no confidence columns, so it is rebuilt rather than read
+#     with missing fields (the index is a disposable local cache — a rebuild is cheap).
+CURATED_SCHEMA_VERSION = 5
 
 
 class CuratedSchemaOutdatedError(RuntimeError):
@@ -88,6 +91,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     updated        TEXT,
     valid_from     TEXT,
     invalidated_at TEXT,
+    last_confirmed TEXT,
+    suspected_at   TEXT,
+    suspect_reason TEXT,
     embedding    BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
@@ -312,13 +318,24 @@ class IndexStore:
             )
 
     def distinct_file_timestamps(self) -> list[dict[str, Any]]:
-        """One row per indexed file: ``{file_path, updated, created}``."""
+        """One row per indexed file: ``{file_path, updated, created, last_confirmed}``.
+
+        ``last_confirmed`` (#87) lets review/overdue key off confirmation age rather
+        than edit age — a recently *confirmed* memory is not overdue even if it was
+        last *edited* long ago.
+        """
         rows = self.conn.execute(
-            "SELECT file_path, MAX(updated) AS updated, MAX(created) AS created "
-            "FROM chunks GROUP BY file_path"
+            "SELECT file_path, MAX(updated) AS updated, MAX(created) AS created, "
+            "MAX(last_confirmed) AS last_confirmed FROM chunks GROUP BY file_path"
         ).fetchall()
         return [
-            dict(file_path=r["file_path"], updated=r["updated"], created=r["created"]) for r in rows
+            dict(
+                file_path=r["file_path"],
+                updated=r["updated"],
+                created=r["created"],
+                last_confirmed=r["last_confirmed"],
+            )
+            for r in rows
         ]
 
     def _upsert_file_no_commit(
@@ -415,6 +432,9 @@ class IndexStore:
         updated: str | None = None,
         valid_from: str | None = None,
         invalidated_at: str | None = None,
+        last_confirmed: str | None = None,
+        suspected_at: str | None = None,
+        suspect_reason: str | None = None,
     ) -> None:
         """Delete-and-reinsert a file's chunks WITHOUT committing.
 
@@ -432,7 +452,8 @@ class IndexStore:
             cur.execute(
                 "INSERT INTO chunks(file_path, heading, line_start, line_end, "
                 "text, tags_json, aliases_json, created, updated, valid_from, "
-                "invalidated_at, embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "invalidated_at, last_confirmed, suspected_at, suspect_reason, "
+                "embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     file_path,
                     c.get("heading"),
@@ -445,6 +466,9 @@ class IndexStore:
                     updated,
                     valid_from,
                     invalidated_at,
+                    last_confirmed,
+                    suspected_at,
+                    suspect_reason,
                     emb.tobytes(),
                 ),
             )
@@ -458,8 +482,11 @@ class IndexStore:
         updated: str | None = None,
         valid_from: str | None = None,
         invalidated_at: str | None = None,
+        last_confirmed: str | None = None,
+        suspected_at: str | None = None,
+        suspect_reason: str | None = None,
     ) -> None:
-        """Replace a file's chunks; the four file-level timestamps go on each row.
+        """Replace a file's chunks; the file-level timestamps go on each row.
 
         Standalone committing wrapper. The indexing path does NOT use this — it
         goes through ``replace_file_and_chunks`` so chunks commit together with
@@ -473,6 +500,9 @@ class IndexStore:
             updated=updated,
             valid_from=valid_from,
             invalidated_at=invalidated_at,
+            last_confirmed=last_confirmed,
+            suspected_at=suspected_at,
+            suspect_reason=suspect_reason,
         )
         self.conn.commit()
 
@@ -488,6 +518,9 @@ class IndexStore:
         updated: str | None = None,
         valid_from: str | None = None,
         invalidated_at: str | None = None,
+        last_confirmed: str | None = None,
+        suspected_at: str | None = None,
+        suspect_reason: str | None = None,
     ) -> None:
         """Atomically (re)write a file's identity row AND its chunks in ONE txn.
 
@@ -515,6 +548,9 @@ class IndexStore:
                 updated=updated,
                 valid_from=valid_from,
                 invalidated_at=invalidated_at,
+                last_confirmed=last_confirmed,
+                suspected_at=suspected_at,
+                suspect_reason=suspect_reason,
             )
             # Keep the recorded identity current with every write, so it always
             # names the model that actually produced the on-disk vectors. Stamped
@@ -550,7 +586,8 @@ class IndexStore:
         rows = self.conn.execute(
             "SELECT id, file_path, heading, line_start, line_end, text, "
             "tags_json, aliases_json, created, updated, valid_from, "
-            "invalidated_at, embedding FROM chunks"
+            "invalidated_at, last_confirmed, suspected_at, suspect_reason, "
+            "embedding FROM chunks"
         ).fetchall()
         if not rows:
             return []
@@ -577,6 +614,9 @@ class IndexStore:
                     updated=r["updated"],
                     valid_from=r["valid_from"],
                     invalidated_at=r["invalidated_at"],
+                    last_confirmed=r["last_confirmed"],
+                    suspected_at=r["suspected_at"],
+                    suspect_reason=r["suspect_reason"],
                     cosine_score=float(scores[i]),
                     score=float(scores[i]),  # back-compat alias (= cosine; pre-ranking readers)
                 )

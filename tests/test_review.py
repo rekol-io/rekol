@@ -90,7 +90,8 @@ def test_review_nudge_prints_only_when_overdue(tmp_path, monkeypatch):
     assert res.exit_code == 0 and "due for review" in res.output
 
 
-def test_review_confirm_bumps_updated(tmp_path, monkeypatch):
+def test_review_confirm_stamps_last_confirmed_not_updated(tmp_path, monkeypatch):
+    """Confirm bumps `last_confirmed` (verification), NOT `updated` (edit) — #87."""
     import frontmatter
 
     monkeypatch.setenv("REKOL_HOME", str(tmp_path))
@@ -100,7 +101,10 @@ def test_review_confirm_bumps_updated(tmp_path, monkeypatch):
 
     res = CliRunner().invoke(main, [], input="c\n")
     assert res.exit_code == 0, res.output
-    assert str(frontmatter.load(str(target))["updated"]) == dt.date.today().isoformat()
+    post = frontmatter.load(str(target))
+    assert str(post["last_confirmed"]) == dt.date.today().isoformat()
+    # `updated` (the edit timestamp) must be untouched — a confirmation is not an edit.
+    assert str(post["updated"]) == "2020-01-01"
 
 
 def _legacy_index(home):

@@ -11,6 +11,8 @@ import click
 from rekol.cli_archive import main as archive_cmd
 from rekol.cli_bootstrap import main as bootstrap_cmd
 from rekol.cli_capture import main as capture_cmd
+from rekol.cli_confidence import confirm as confirm_cmd
+from rekol.cli_confidence import flag_suspect as flag_suspect_cmd
 from rekol.cli_coverage import main as coverage_cmd
 from rekol.cli_docs_convert import main as import_cmd
 from rekol.cli_doctor import main as doctor_cmd
@@ -39,6 +41,8 @@ main.add_command(search_cmd, name="search")
 main.add_command(index_grp, name="index")
 main.add_command(capture_cmd, name="capture")
 main.add_command(invalidate_cmd, name="invalidate")
+main.add_command(confirm_cmd, name="confirm")
+main.add_command(flag_suspect_cmd, name="flag-suspect")
 main.add_command(propose_cmd, name="propose")
 main.add_command(bootstrap_cmd, name="bootstrap")
 main.add_command(review_cmd, name="review")

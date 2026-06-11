@@ -42,7 +42,11 @@ def _overdue(cfg: Config) -> list[dict]:
 
 
 def _confirm(file_path: str, cfg: Config) -> bool:
-    """Bump ``updated`` to today on the memory file; return True on success.
+    """Stamp ``last_confirmed`` to today on the memory file; return True on success.
+
+    Confirmation is DISTINCT from an edit (#87): it bumps ``last_confirmed``, not
+    ``updated`` — so "I verified this still holds" is recorded without masquerading
+    as a content change. A confirmation also clears any prior suspect flag.
 
     The path comes from the curated index, so confine it to ``$MEMORY_HOME``
     (resolving ``..``) before writing — a poisoned/synced index row must not be
@@ -55,7 +59,9 @@ def _confirm(file_path: str, cfg: Config) -> bool:
         click.echo(f"  refused: {target} is outside {cfg.memory_home}", err=True)
         return False
     post = frontmatter.load(str(target))
-    post["updated"] = dt.date.today().isoformat()
+    post["last_confirmed"] = dt.date.today().isoformat()
+    post.metadata.pop("suspected_at", None)
+    post.metadata.pop("suspect_reason", None)
     with open(target, "w", encoding="utf-8") as handle:
         handle.write(frontmatter.dumps(post))
     return True
@@ -65,7 +71,8 @@ def _interactive(overdue: list[dict], cfg: Config) -> None:
     """Prompt confirm/invalidate/skip for each overdue durable memory."""
     confirmed = 0
     for item in overdue:
-        click.echo(f"{item['file_path']} (updated {item['updated'] or 'never'})")
+        last = item.get("last_confirmed") or item.get("updated") or "never"
+        click.echo(f"{item['file_path']} (last confirmed {last})")
         choice = click.prompt("[c]onfirm / [i]nvalidate / [s]kip", default="s").strip().lower()
         if choice.startswith("c"):
             if _confirm(item["file_path"], cfg):
@@ -74,8 +81,8 @@ def _interactive(overdue: list[dict], cfg: Config) -> None:
         elif choice.startswith("i"):
             click.echo(f"  to invalidate, run: rekol invalidate {item['file_path']}")
     if confirmed:
-        # Confirm only bumps the markdown `updated`; the curated index keeps the
-        # old date (and thus the [review?] tag) until the next reindex.
+        # Confirm writes `last_confirmed` to the markdown; the curated index keeps the
+        # old value (and thus the [review?] tag) until the next reindex.
         click.echo(f"confirmed {confirmed} — run `rekol index update` to refresh search tags")
 
 

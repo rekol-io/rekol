@@ -62,6 +62,15 @@ class MemoryFile:
             ``None`` means the memory is still valid.
             ``ranking.apply_temporal_ranking`` excludes invalidated memories
             from default recall (opt-in via ``--include-invalidated``).
+        last_confirmed: ISO-8601 date the facts were last confirmed still true
+            (#87). Distinct from ``updated`` — a plain edit is NOT a
+            confirmation; only ``rekol confirm``/``review`` stamp this. ``None``
+            means never confirmed → treat as unverified.
+        suspected_at: ISO-8601 datetime a contradiction was observed and the
+            memory was flagged suspect (#87), without yet being invalidated.
+            ``None`` means not flagged. The middle state in live→suspect→invalid.
+        suspect_reason: Free-text evidence for why it was flagged suspect, so the
+            next session has the repair context. ``None`` when not flagged.
     """
 
     path: Path
@@ -77,11 +86,19 @@ class MemoryFile:
     updated: str | None = None
     valid_from: str | None = None
     invalidated_at: str | None = None
+    last_confirmed: str | None = None
+    suspected_at: str | None = None
+    suspect_reason: str | None = None
 
     @property
     def is_invalidated(self) -> bool:
         """True if this memory has been explicitly invalidated."""
         return self.invalidated_at is not None
+
+    @property
+    def is_suspect(self) -> bool:
+        """True if flagged suspect (contradiction observed) and not yet invalidated."""
+        return self.suspected_at is not None and self.invalidated_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +176,11 @@ def parse_file(path: Path) -> MemoryFile:
         updated=_normalize_ts(meta.get("updated"), date_only=True),
         valid_from=_normalize_ts(meta.get("valid_from"), date_only=True),
         invalidated_at=_normalize_ts(meta.get("invalidated_at"), date_only=False),
+        last_confirmed=_normalize_ts(meta.get("last_confirmed"), date_only=True),
+        suspected_at=_normalize_ts(meta.get("suspected_at"), date_only=False),
+        suspect_reason=(str(meta["suspect_reason"]).strip() or None)
+        if meta.get("suspect_reason") not in (None, "")
+        else None,
     )
 
 
