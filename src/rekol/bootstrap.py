@@ -335,13 +335,19 @@ _ALWAYS_RE = re.compile(r"^\s*(?:always|never|don'?t|do not|prefer|use)\b", re.I
 # sees). Anchored where it matters (key/token assignments, known vendor prefixes,
 # explicit "password is X" / "token: X" phrasings).
 _SECRET_RES: tuple[re.Pattern[str], ...] = (
-    # OpenAI-style ``sk-...`` and GitHub ``ghp_/gho_/ghs_/ghr_...`` token prefixes.
+    # OpenAI-style ``sk-...`` (also covers Anthropic ``sk-ant-...``) and GitHub
+    # ``ghp_/gho_/ghs_/ghr_...`` token prefixes.
     re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}", re.IGNORECASE),
     re.compile(r"\bgh[posru]_[A-Za-z0-9]{8,}"),
+    # Slack tokens (``xoxb-``/``xoxp-``/``xoxa-``/``xoxr-``/``xoxs-``).
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    # JWTs / OAuth bearer tokens — both common in transcripts that touch APIs.
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]*"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=\-]{12,}"),
     # AWS access-key id (``AKIA...``) and the canonical secret-key env var name.
     re.compile(r"\bAKIA[0-9A-Z]{12,}"),
     re.compile(r"\bAWS_SECRET_ACCESS_KEY\b", re.IGNORECASE),
-    # PEM block headers (private keys, certificates).
+    # PEM block headers (private keys, certificates) — covers ``-----BEGIN ... PRIVATE KEY-----``.
     re.compile(r"-----BEGIN\b"),
     # A ``KEY=<long value>`` / ``TOKEN=<value>`` / ``api_key=<value>`` assignment:
     # a name containing key/token/secret/password followed by ``=`` and a value.
