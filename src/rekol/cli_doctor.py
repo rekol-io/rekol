@@ -503,12 +503,127 @@ def _check_include_scope(cfg: Config) -> list[Finding]:
     ]
 
 
-def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
+# Deep-probe semantic pair: a healthy model separates the related sentence from
+# the unrelated one by a clear margin. A model that failed to load and silently
+# fell back to a different (mean-pooling) model keeps the SAME recorded identity
+# but produces meaningless vectors — the gap collapses. This is the runtime catch
+# the model-identity check (which only compares the recorded name) cannot make.
+_DEEP_BASE = "how do I reset my account password"
+_DEEP_RELATED = "steps to recover access to my login"
+_DEEP_UNRELATED = "the geological formation of volcanic basalt rock"
+_DEEP_MARGIN = 0.10
+
+
+def _check_deep(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
+    """Deep probes (``--deep``) for the post-install acceptance check.
+
+    Prove the model loads AND embeds meaningfully, and that curated recall works
+    end-to-end. Catches the silent-degradation class that a clean install can
+    exhibit while every shallow check still passes.
+    """
+    import numpy as np
+
+    findings: list[Finding] = []
+
+    # 1. Embedding runtime + semantic separation.
+    try:
+        base = embedder.embed(_DEEP_BASE)
+        related = embedder.embed(_DEEP_RELATED)
+        unrelated = embedder.embed(_DEEP_UNRELATED)
+    except Exception as exc:  # noqa: BLE001 — ANY load/run failure means a broken model
+        findings.append(
+            Finding(
+                label="embedding runtime",
+                status=Status.PROBLEM,
+                detail=f"embedding model failed to run: {exc}",
+                remedy="verify the model cache; check it loads offline (local_files_only)",
+            )
+        )
+        return findings  # no working embedder → can't probe recall
+    sim_related = float(np.dot(base, related))
+    sim_unrelated = float(np.dot(base, unrelated))
+    margin = sim_related - sim_unrelated
+    if margin < _DEEP_MARGIN:
+        findings.append(
+            Finding(
+                label="embedding semantics",
+                status=Status.PROBLEM,
+                detail=(
+                    f"semantic separation collapsed (related {sim_related:.2f} vs unrelated "
+                    f"{sim_unrelated:.2f}, margin {margin:.2f} < {_DEEP_MARGIN}) — the model may "
+                    "have loaded degraded (wrong/mean-pooling)"
+                ),
+                remedy="rebuild the model cache; verify the embedding model loads offline",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                label="embedding semantics",
+                status=Status.OK,
+                detail=(
+                    f"related {sim_related:.2f} vs unrelated {sim_unrelated:.2f} "
+                    f"(margin {margin:.2f})"
+                ),
+            )
+        )
+
+    # 2. End-to-end curated recall: a known chunk must come back from its own text.
+    db_path = cfg.index_db_path
+    if not db_path.exists():
+        findings.append(
+            Finding(
+                label="recall probe",
+                status=Status.INFO,
+                detail="no curated index to probe (build it with `rekol index rebuild`)",
+            )
+        )
+        return findings
+    store = IndexStore(db_path=db_path, dim=embedder.dim)
+    try:
+        store.init_schema()
+        row = store.conn.execute(
+            "SELECT text, file_path FROM chunks WHERE text != '' LIMIT 1"
+        ).fetchone()
+        if row is None:
+            findings.append(
+                Finding(
+                    label="recall probe",
+                    status=Status.INFO,
+                    detail="curated index has no chunks to probe",
+                )
+            )
+            return findings
+        hits = store.search(embedder.embed(row["text"]), top_k=3)
+    finally:
+        store.close()
+    if any(h["file_path"] == row["file_path"] for h in hits):
+        findings.append(
+            Finding(
+                label="recall probe",
+                status=Status.OK,
+                detail="a known chunk is retrievable end-to-end (embed → vector search)",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                label="recall probe",
+                status=Status.PROBLEM,
+                detail="a known chunk did not return from its own text — the search path is broken",
+                remedy="rekol index rebuild",
+            )
+        )
+    return findings
+
+
+def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> DoctorReport:
     """Run every health check and return the collected findings.
 
     Pure (no I/O beyond reading the stores), so it is unit-testable against a
     sandboxed config without invoking the CLI. The cache-location finding is
-    always first so the report leads with WHERE the index lives.
+    always first so the report leads with WHERE the index lives. ``deep=True``
+    adds the runtime model + end-to-end recall probes (``--deep``).
     """
     findings: list[Finding] = [
         Finding(
@@ -521,6 +636,8 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder) -> DoctorReport:
     findings.extend(_check_session_index(cfg, embedder))
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
+    if deep:
+        findings.extend(_check_deep(cfg, embedder))
     return DoctorReport(findings=findings)
 
 
@@ -528,16 +645,24 @@ _STATUS_GLYPH = {Status.OK: "✓", Status.INFO: "·", Status.PROBLEM: "✗"}
 
 
 @click.command(name="doctor")
-def main() -> None:
+@click.option(
+    "--deep",
+    is_flag=True,
+    help="Also run runtime probes: that the embedding model loads + embeds "
+    "meaningfully (catches silent degradation) and that curated recall works "
+    "end-to-end. Used as the post-install acceptance check.",
+)
+def main(deep: bool) -> None:
     """Report index health; exit 1 if any check is degraded.
 
     Runs the curated-index and transcript-index health checks and prints one line
     per finding with an actionable remedy for each problem. A missing/empty index
-    is reported, not treated as a crash.
+    is reported, not treated as a crash. ``--deep`` adds runtime model + recall
+    probes — the one-command "is this install genuinely working" acceptance check.
     """
     cfg = load_config()
     embedder = get_embedder(cfg.embedding_model)
-    report = run_doctor(cfg, embedder)
+    report = run_doctor(cfg, embedder, deep=deep)
 
     for finding in report.findings:
         glyph = _STATUS_GLYPH[finding.status]
