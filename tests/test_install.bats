@@ -381,6 +381,55 @@ manifest_index_dir() {
   [ "$status" -eq 0 ]
 }
 
+@test "install with NO REKOL_HOME preset (prompt-driven) completes and builds the index" {
+  # Regression (launch-blocker): the documented customer flow is `./install.sh`
+  # answering the memory-home PROMPT, NOT pre-exporting REKOL_HOME. The prompt's
+  # `REKOL_HOME=$(...)` is a non-exported shell var, so install must `export` the
+  # resolved home or its `rekol` subprocesses (index rebuild / session-index /
+  # archive / migrate) hit load_config() with no REKOL_HOME and crash on the last
+  # steps. The Docker acceptance set ENV REKOL_HOME, which masked it — so here we
+  # run with NO REKOL_HOME / MEMORY_HOME and answer the prompt over a real PTY
+  # (so `[[ -t 0 ]]` is true), then assert install finished AND the index built.
+  command -v python3 >/dev/null 2>&1 || skip "python3 required to drive the PTY prompt"
+  unset TEST_MODE || true
+  local memhome="$TESTROOT/prompted-mem"
+  mkdir -p "$TESTROOT/home-prompt"
+  run env -u TEST_MODE -u REKOL_HOME -u MEMORY_HOME HOME="$TESTROOT/home-prompt" \
+    python3 - "$BATS_TEST_DIRNAME/../install.sh" "$memhome" \
+      "$TESTROOT/tools-prompt" "$TESTROOT/bin-prompt" <<'PY'
+import os, pty, select, sys
+install, answer, tools, bindir = sys.argv[1], sys.argv[2] + "\n", sys.argv[3], sys.argv[4]
+argv = ["bash", install, "--no-hook", "--no-skill", "--no-shellrc",
+        "--tools-home", tools, "--bin-dir", bindir]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv("/bin/bash", argv)  # child: stdin is the PTY slave -> [[ -t 0 ]] true
+written = False
+while True:
+    try:
+        r, _, _ = select.select([fd], [], [], 300)
+    except OSError:
+        break
+    if not r:
+        break
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    sys.stdout.buffer.write(data)
+    if not written:           # answer the memory-home prompt exactly once
+        os.write(fd, answer.encode()); written = True
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+PY
+  [ "$status" -eq 0 ]
+  # The post-resolve subprocesses ran (didn't die on load_config): search works.
+  run env REKOL_HOME="$memhome" "$TESTROOT/tools-prompt/.venv/bin/rekol" search "identity" --top 3
+  [ "$status" -eq 0 ]
+}
+
 @test "install wires UserPromptSubmit time-context and Stop record-stop hooks" {
   # Verifies Phase B: install.sh Steps 7E/7F merge REKOL's own time hooks so the
   # <env-time> block comes from rekol, not the external mac_setup component.
