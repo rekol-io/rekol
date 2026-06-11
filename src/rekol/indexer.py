@@ -165,6 +165,9 @@ class Indexer:
             updated=mf.updated,
             valid_from=mf.valid_from,
             invalidated_at=mf.invalidated_at,
+            last_confirmed=mf.last_confirmed,
+            suspected_at=mf.suspected_at,
+            suspect_reason=mf.suspect_reason,
         )
         return len(records)
 
