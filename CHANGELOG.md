@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- First-run polish (QA macOS pass): the memory-folder prompt now says you can
+  press Enter for the default; `install.sh` picks a suitable Python more reliably
+  — it probes `python3.12`/`3.11` and the keg-only `python@3.12`/`@3.11` Homebrew
+  prefixes, and **stops early with a clear fix** if no interpreter has Python
+  ≥3.11 + `sqlite3.enable_load_extension` (instead of silently degrading search).
+- README gains **Prerequisites** and **Troubleshooting** sections (Python/sqlite
+  extension, keg-only Homebrew, Intel-mac NumPy, `rekol doctor --deep`).
+
 ### Added
 - **Memory confidence metadata (#87):** `rekol confirm <file>` (stamp
   `last_confirmed`, distinct from an edit) and `rekol flag-suspect <file>

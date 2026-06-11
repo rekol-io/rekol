@@ -28,6 +28,21 @@ Your memory is plain **markdown you own** (Obsidian, grep, git), and REKOL
 searches your past **session transcripts** alongside your curated notes — these
 are table stakes done well, not the headline.
 
+## Prerequisites
+- macOS or Linux; **Claude Code** installed (REKOL is a memory layer for it).
+- **Python ≥3.11 whose `sqlite3` has `enable_load_extension`** — required for
+  `sqlite-vec` vector search. macOS's *system* python and the python.org
+  installer ship this **disabled**, which degrades search to a keyword/numpy
+  fallback. Reliable options (`install.sh` auto-detects and prefers these):
+  - `brew install uv && uv python install 3.12` — uv's Python always has the
+    extension; the installer picks it up automatically.
+  - or `brew install python` — Homebrew's default `python@3` is built with extensions.
+- **jq** (optional) — only for automatic `~/.claude/settings.json` hook wiring;
+  without it the installer prints the snippet to merge by hand.
+
+If no suitable interpreter is found, `install.sh` now stops early with the exact
+fix rather than installing a degraded setup.
+
 ## Install (macOS)
 ```bash
 git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh
@@ -140,6 +155,28 @@ lives in a local cache *outside* your memory folder, so syncing your memory
 never syncs the index — there is no per-tool ignore file to maintain. The cache
 also holds `sessions.db`, which records your transcripts verbatim; keeping it
 out of the synced tree means a pasted secret can never leak through sync.
+
+## Troubleshooting
+- **Searches warn about "mean pooling" / a numpy fallback, or recall is poor:**
+  your venv's Python lacks `sqlite3.enable_load_extension`. Rebuild on a good
+  interpreter:
+  ```bash
+  rm -rf ~/.local/share/rekol/.venv
+  brew install uv && uv python install 3.12
+  ./install.sh
+  ```
+- **`brew install python@3.12` "didn't take":** it's keg-only (no `python3` on
+  PATH). `install.sh` now probes `python@3.12`/`@3.11` opt-prefixes directly, so
+  re-running it should find it; otherwise use the uv path above, or
+  `export PATH="$(brew --prefix python@3.12)/libexec/bin:$PATH"` before installing.
+- **Install fails at `pip install` with `requires-python >=3.11`:** your
+  `python3` is too old (e.g. macOS's 3.9). Use the uv path above.
+- **Intel (x86_64) Mac — `_ARRAY_API not found` / "Numpy is not available" on the
+  first search:** the installable torch wheel there is built against NumPy 1.x.
+  Fresh installs pin `numpy<2` automatically; an already-broken venv is fixed with
+  `~/.local/share/rekol/.venv/bin/pip install 'numpy<2'`.
+- **Verify any install** with `rekol doctor --deep` — it checks the model loads,
+  embeds meaningfully, and that recall works end-to-end.
 
 ## Uninstalling
 rekol is yours to remove cleanly. From the repo:
