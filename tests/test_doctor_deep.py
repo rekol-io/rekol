@@ -88,6 +88,27 @@ class _BrokenEmbedder(BaseEmbedder):
         raise RuntimeError("model failed to load")
 
 
+class _NumpyAbiEmbedder(BaseEmbedder):
+    """Intel-mac torch built against NumPy 1.x, run under NumPy 2.x."""
+
+    @property
+    def dim(self) -> int:
+        return 384
+
+    def embed(self, text: str) -> np.ndarray:
+        raise ImportError(
+            "A module that was compiled using NumPy 1.x cannot be run in NumPy 2.4.6 … "
+            "_ARRAY_API not found"
+        )
+
+
+def test_deep_numpy_abi_crash_gives_intel_mac_remedy(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    f = _finding(_check_deep(load_config(), _NumpyAbiEmbedder()), "embedding runtime")
+    assert f.status is Status.PROBLEM
+    assert f.remedy is not None and "numpy<2" in f.remedy
+
+
 def test_deep_semantic_ok_with_a_separating_model(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
     findings = _check_deep(load_config(), _SeparatingEmbedder())

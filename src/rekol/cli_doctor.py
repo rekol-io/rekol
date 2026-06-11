@@ -531,12 +531,23 @@ def _check_deep(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
         related = embedder.embed(_DEEP_RELATED)
         unrelated = embedder.embed(_DEEP_UNRELATED)
     except Exception as exc:  # noqa: BLE001 — ANY load/run failure means a broken model
+        msg = str(exc)
+        # Intel macOS ships an older torch (NumPy 1.x ABI); under NumPy 2.x the
+        # first embedding raises "_ARRAY_API not found" / "Numpy is not available".
+        # Give the exact fix instead of a generic model-cache hint.
+        if any(s in msg for s in ("_ARRAY_API", "NumPy 1.x", "Numpy is not available")):
+            remedy = (
+                "Intel-mac torch/NumPy ABI mismatch — pin NumPy 1.x in the venv:\n"
+                "    ~/.local/share/rekol/.venv/bin/pip install 'numpy<2'"
+            )
+        else:
+            remedy = "verify the model cache; check it loads offline (local_files_only)"
         findings.append(
             Finding(
                 label="embedding runtime",
                 status=Status.PROBLEM,
                 detail=f"embedding model failed to run: {exc}",
-                remedy="verify the model cache; check it loads offline (local_files_only)",
+                remedy=remedy,
             )
         )
         return findings  # no working embedder → can't probe recall
