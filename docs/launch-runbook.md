@@ -6,6 +6,37 @@ and that runner becomes a remote-code-execution risk the instant the repo is pub
 steps below must run in order, and the breaking steps must **not** fire before the
 coordinated go.
 
+## Launch date & gate conditions
+
+**Target: Tuesday, June 16 2026** (fallback Wed June 17), per product
+(`from-business/20260609-0332`). Run this runbook that morning **on product's explicit
+coordinated go** — not on the date alone. The flip is gated on BOTH:
+
+1. **macOS clean-install acceptance is green** — the primary platform, verified on a clean
+   environment (see "macOS acceptance" below). This is the real remaining gate.
+2. **The date arrives and product gives the explicit go.**
+
+Until both hold, every breaking step here stays **held**.
+
+## macOS acceptance (gate #1)
+
+macOS is the primary platform and must be verified on a **clean** environment before the flip
+(neither maintainer Mac is clean — both carry prior rekol state). Use a **borrowed/clean Mac**
+(zero GitHub minutes; macOS CI runners bill 10×), and assert with the one-command check:
+
+```sh
+./install.sh           # non-interactive: preset REKOL_HOME to skip the prompt
+rekol doctor --deep    # MUST exit 0
+```
+
+`rekol doctor --deep` is the acceptance backbone — a clean install can exit 0 yet be silently
+broken, so it isn't enough that `install.sh` returns 0. `--deep` proves the index is non-empty
+and schema-current, the embedding model **loads offline and embeds meaningfully** (catches the
+silent mean-pooling degradation class), and **end-to-end recall** returns a known chunk.
+Then spot-check: the wave-2 subcommands are present, skills installed, the SessionStart hook is
+present and `REKOL_HOME` resolves. Record the result in `tests/acceptance.md`. (QA's hosted
+`macos-latest` CI job calls the same `doctor --deep` — deferred post-launch to save the 10× minutes.)
+
 ## Why the ordering is load-bearing
 
 During the pre-launch window, GitHub-hosted Actions minutes are exhausted, so CI runs on a
@@ -15,9 +46,9 @@ stored **outside the repo** at `~/.rekol-runner-pat`.
 - A self-hosted runner attached to a **public** repo will execute arbitrary code from any
   fork's pull request → RCE on the maintainer's machine. So the runner must be gone *before*
   the repo is public.
-- But the hosted-CI config can't be merged *before* the flip either: public repos get
-  unlimited hosted minutes, but the account is **out of hosted minutes until then**, so a
-  hosted gate would fail every PR while still private.
+- GitHub Actions **billing has since been added** (~2026-06-11), so hosted minutes now work on
+  the private repo too. The runner nonetheless **stays serving CI until launch day** by
+  product's decision (`from-business/20260609-0332`) — we do NOT decouple/deregister it early.
 
 The resolution is an atomic-ish flip: deregister the runner, swap CI to hosted, then make the
 repo public — close together, in this order. The hosted-revert change is **prepared and pushed
@@ -25,8 +56,11 @@ as an unmerged branch** (`revert/ci-hosted`) so it can be merged the moment the 
 
 ## Preconditions (do not start until all true)
 
-- [ ] Product gives the explicit go for the public push (coordination channel).
-- [ ] QA acceptance pass on `v0.1.0` is recorded.
+- [ ] **Product gives the explicit go** for the public push (coordination channel).
+- [ ] **macOS clean-install acceptance is green** (gate #1; `install.sh && rekol doctor --deep`
+      on a clean Mac, recorded in `tests/acceptance.md`).
+- [ ] Linux cold-clone acceptance is green (`tests/acceptance.md`).
+- [ ] **`.github/FUNDING.yml` is present on `main`** (Sponsor button live day one).
 - [ ] `revert/ci-hosted` branch exists, is pushed, and has been eyeballed (see step 3).
 - [ ] You are at a keyboard that can reach the maintainer's Mac (the runner host) and GitHub.
 
