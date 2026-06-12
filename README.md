@@ -102,9 +102,11 @@ you already have:
 
 There are two phases, and they're honestly different.
 
-**Day 1 — searchable history (recall).** The moment you install, your past
-Claude Code sessions become searchable. Ask about something you worked on and
-Claude finds it. That's real and immediate — search over everything you've done.
+**Day 1 — searchable history (recall).** As soon as you run setup ("set up my
+rekol memory" in Claude Code), your past Claude Code sessions are indexed and
+become searchable — ask about something you worked on and Claude finds it.
+Indexing is pull-based: it runs when you ask for it, not silently in the
+background, so the first search isn't empty by surprise.
 
 **Over time — it learns how your project thinks (understanding).** The payoff is
 ambient memory: the recurring "always do X", "repos live in Y", "we chose Z"

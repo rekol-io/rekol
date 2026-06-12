@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Post-install terminal output slimmed to a single call-to-action ("set up my
+  rekol memory" in a new Claude Code session), with the two genuine fresh-start
+  prerequisites and the local/never-uploaded line. The manual checklist
+  (edit identity, `rekol search` verify) and feature explainer move to the
+  assistant-led flow / README — the terminal just gets you there.
+- README: the "Day 1 searchable" claim is gated on running setup (indexing is
+  pull-based, not at install) so the first search isn't empty-by-surprise.
+- `--help` opt-out hint now shows valid YAML (`archive_enabled: false`, with the
+  space) so a copy-paste actually disables the archive.
 - Launch runbook: require the final acceptance run against the *actual* launch
   commit/tag (not an earlier fix commit) before the public flip.
 - First-run polish (QA macOS pass): the memory-folder prompt now says you can
