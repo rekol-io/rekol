@@ -60,6 +60,10 @@ as an unmerged branch** (`revert/ci-hosted`) so it can be merged the moment the 
 - [ ] **macOS clean-install acceptance is green** (gate #1; `install.sh && rekol doctor --deep`
       on a clean Mac, recorded in `tests/acceptance.md`).
 - [ ] Linux cold-clone acceptance is green (`tests/acceptance.md`).
+- [ ] **Acceptance was run against the ACTUAL launch commit/tag**, not an earlier fix commit —
+      `origin/main` keeps moving (version bumps, follow-up PRs), so run QA's `run-acceptance.sh`
+      (+ `rekol doctor --deep`) once more on the exact commit being shipped, so the launch stamp
+      is *verified*, not inferred. (Per QA `qa-to-dev/20260611-1656`.)
 - [ ] **`.github/FUNDING.yml` is present on `main`** (Sponsor button live day one).
 - [ ] `revert/ci-hosted` branch exists, is pushed, and has been eyeballed (see step 3).
 - [ ] You are at a keyboard that can reach the maintainer's Mac (the runner host) and GitHub.
