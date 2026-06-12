@@ -5,6 +5,9 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- README contact line (`leon@rekol.io`) for questions/feedback.
+
 ### Changed
 - Post-install terminal output slimmed to a single call-to-action ("set up my
   rekol memory" in a new Claude Code session), with the two genuine fresh-start
