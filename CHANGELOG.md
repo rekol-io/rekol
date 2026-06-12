@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Changed
+- Launch runbook: require the final acceptance run against the *actual* launch
+  commit/tag (not an earlier fix commit) before the public flip.
 - First-run polish (QA macOS pass): the memory-folder prompt now says you can
   press Enter for the default; `install.sh` picks a suitable Python more reliably
   — it probes `python3.12`/`3.11` and the keg-only `python@3.12`/`@3.11` Homebrew
