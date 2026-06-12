@@ -218,4 +218,5 @@ uninstalling, run `source ~/.zshrc` (or open a new terminal). Re-running
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under [Apache-2.0](./LICENSE).
 
 ## Contact
-Questions? **hello@rekol.io** · Security? **security@rekol.io** (see [SECURITY.md](./SECURITY.md)).
+Questions or feedback? **leon@rekol.io** · General: **hello@rekol.io** · Security:
+**security@rekol.io** (see [SECURITY.md](./SECURITY.md)).
