@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
+- **bash shell support**: `install.sh`/`uninstall.sh` now write/remove the PATH +
+  `REKOL_HOME` exports in the rc for the user's login shell (`$SHELL`) — `~/.zshrc`
+  for zsh, `~/.bashrc` (Linux) or `~/.bash_profile` (macOS) for bash — so the
+  `rekol` CLI works in a bash terminal, not only zsh. (Claude Code already got
+  `REKOL_HOME` via `settings.json` regardless of shell.)
 
 ### Changed
 - Pre-public hygiene: removed internal planning docs (`docs/plans/`); Code of

@@ -278,6 +278,29 @@ manifest_index_dir() {
     [ "$output" = "$TESTROOT/home/rekol-memory" ]
 }
 
+@test "install writes PATH + REKOL_HOME to the bash rc when SHELL is bash" {
+    # bash users must get a working CLI too: with SHELL=bash the exports go to a
+    # bash rc (.bashrc on Linux, .bash_profile on macOS), NOT ~/.zshrc.
+    unset TEST_MODE || true
+    local sbhome="${TESTROOT}/home-bash" rekolh="${TESTROOT}/rekolhome-bash"
+    mkdir -p "${sbhome}/.claude" "${rekolh}"
+    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+        > "${rekolh}/rekol.config.yaml"
+    run env -u TEST_MODE -u MEMORY_HOME \
+        REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/bash" \
+        "${COMPONENT_DIR}/install.sh" --no-hook --no-skill \
+        --tools-home "${TESTROOT}/tools-bash" --bin-dir "${sbhome}/bin"
+    [ "$status" -eq 0 ]
+    # The rekol exports landed in a bash rc (whichever the OS uses)...
+    rc=""
+    if [ -f "${sbhome}/.bashrc" ] && grep -q '^export REKOL_HOME=' "${sbhome}/.bashrc"; then rc="${sbhome}/.bashrc"; fi
+    if [ -f "${sbhome}/.bash_profile" ] && grep -q '^export REKOL_HOME=' "${sbhome}/.bash_profile"; then rc="${sbhome}/.bash_profile"; fi
+    [ -n "$rc" ]
+    grep -q '# rekol' "$rc"
+    # ...and NOT in ~/.zshrc (a bash user's zshrc must be untouched / absent).
+    [ ! -f "${sbhome}/.zshrc" ]
+}
+
 # ---------------------------------------------------------------------------
 # Test 7 — --test-mode does not modify ~/.zshrc
 # ---------------------------------------------------------------------------
