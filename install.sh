@@ -77,13 +77,13 @@ Flags:
   --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
   --bin-dir P     override default ~/bin (where the rekol shim lives)
   --migrate       import legacy ~/.claude/projects/*/memory/ content (opt-in)
-  --no-archive    disable the durable transcript archive (seeds archive_enabled:false)
+  --no-archive    disable the durable transcript archive (seeds 'archive_enabled: false')
   --archive-dir P set the durable archive location (default ~/.local/share/rekol/archive)
   --help          show this help and exit
 
 rekol keeps a local copy of your sessions so your memory survives Claude Code
 rotating its transcripts — on your disk, never uploaded. Turn it off with
---no-archive (or archive_enabled:false in rekol.config.yaml).
+--no-archive (or set 'archive_enabled: false' in rekol.config.yaml).
 EOF
 }
 
@@ -1124,25 +1124,26 @@ fi
 say ""
 say "done."
 say "journal: ${JOURNAL}"
-# Two-phase honesty (no day-1-magic overclaim): install makes history
-# searchable today; ambient "understanding" is something it earns over time.
+# ONE call-to-action. The assistant-led "/rekol init" flow owns identity,
+# indexing, verification, and explaining what rekol does — in context. The
+# terminal's only job is to get the user there, with the two genuine
+# fresh-start prerequisites stated. Everything else lives in the assistant
+# flow / README (issue: post-install copy drifted into a manual checklist).
 say ""
-say "what you get:"
-say "  Day 1   — your past sessions are searchable. Ask, and Claude recalls."
-say "  Over time — it learns how your project thinks (always-do rules, where things"
-say "              live, decisions you've made) and surfaces them on its own. That"
-say "              distilling is a separate step you opt into — see the README."
-# Disclosure (default-ON honesty): a single plain line, no per-session nag. The
-# archive holds verbatim transcripts on local disk; we say so and how to opt out.
+say "✓ rekol installed. Your memory lives at ${RESOLVED_HOME} — local, never uploaded."
+# Default-ON honesty: one plain line disclosing the local transcript archive
+# (verbatim sessions on disk). The opt-out instruction lives in the README.
 if [[ "${DO_ARCHIVE}" == "1" ]]; then
-  say ""
-  say "rekol keeps a local copy of your sessions so your memory survives — it's on your"
-  say "disk, never uploaded. Turn it off anytime: set archive_enabled:false in rekol.config.yaml."
+  say "  (rekol keeps a local copy of your sessions so memory survives — on your disk, never uploaded; opt out in the README.)"
 fi
 say ""
-say "next steps:"
-say "  1. source ${ZSHRC}   (or open a new terminal)"
-say "  2. edit ${RESOLVED_HOME}/always/identity.md   to tell Claude who you are"
-say "  3. rekol search \"identity\"   to verify"
-say "  4. open Claude Code and say: \"set up my rekol memory\""
-say "     to bring your history in — indexing runs when you ask"
+say "Open a NEW terminal and start a NEW Claude Code session, then say:"
+say ""
+say "    \"set up my rekol memory\""
+say ""
+say "Claude takes it from there."
+say ""
+# Why both must be fresh — stated so it's not a mysterious instruction:
+say "(New terminal: re-sources your shell so \`rekol\` is on PATH. New Claude"
+say " session: loads the SessionStart hook + rekol skill the install just wired —"
+say " an already-open session won't have them, so the phrase won't work there.)"
