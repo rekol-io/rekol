@@ -9,6 +9,12 @@ follow [Semantic Versioning](https://semver.org/).
 - README contact line (`leon@rekol.io`) for questions/feedback.
 
 ### Changed
+- Pre-public hygiene: removed internal planning docs (`docs/plans/`); Code of
+  Conduct contact uses a project address (`conduct@rekol.io`); launch runbook
+  gains a privacy/hygiene pre-flip checklist (commit authorship, generic test
+  environments, identifier scrub).
+
+### Changed
 - Post-install terminal output slimmed to a single call-to-action ("set up my
   rekol memory" in a new Claude Code session), with the two genuine fresh-start
   prerequisites and the local/never-uploaded line. The manual checklist

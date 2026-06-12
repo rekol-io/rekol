@@ -68,6 +68,19 @@ as an unmerged branch** (`revert/ci-hosted`) so it can be merged the moment the 
 - [ ] `revert/ci-hosted` branch exists, is pushed, and has been eyeballed (see step 3).
 - [ ] You are at a keyboard that can reach the maintainer's Mac (the runner host) and GitHub.
 
+### Privacy / hygiene (public repos carry no machine-specific or personal identifiers)
+- [ ] **Commit history authored under the personal identity only** — `git log --format='%ae' | sort -u`
+      shows just the personal email, no employer/work address. (The early commits were re-authored
+      from a work email; if any landed since, re-run the mailmap rewrite + re-tag + force-push.)
+- [ ] **No internal planning docs in the public tree** (`docs/plans/` removed).
+- [ ] **Test/acceptance docs describe environments generically** ("Intel macOS, real hardware" /
+      "Linux arm64, Docker") — no named machine or person.
+- [ ] **Public files use a project contact**, not a personal email where avoidable
+      (CoC → `conduct@rekol.io`; README → `leon@rekol.io`/`hello@`/`security@`).
+- [ ] **Final identifier scrub clean** — no stray usernames, hostnames, internal absolute paths
+      (`/Users/<name>/…`), or employer names in tracked files:
+      `git grep -niE "ticketmaster|/Users/[a-z]+|/home/[a-z]+" -- . ':(exclude)docs/transcript-archiving-*'`
+
 ## The sequence
 
 ### 1. Freeze merges to `main`
