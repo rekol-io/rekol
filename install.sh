@@ -9,7 +9,7 @@
 #   --dry-run       print actions without executing them
 #   --no-hook       skip SessionStart hook installation (settings.json only)
 #   --no-skill      skip Claude skill installation
-#   --no-shellrc    skip ~/.zshrc edits (PATH + REKOL_HOME export)
+#   --no-shellrc    skip shell-rc edits (~/.zshrc or ~/.bashrc: PATH + REKOL_HOME)
 #   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
 #   --tools-home P  override default ~/.local/share/rekol
 #   --bin-dir P     override default ~/bin
@@ -34,7 +34,21 @@ TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/
 BIN_DIR_DEFAULT="$HOME/bin"
 readonly SETTINGS_JSON="$HOME/.claude/settings.json"
 readonly SKILL_BASE="$HOME/.claude/skills"
-readonly ZSHRC="$HOME/.zshrc"
+
+# The interactive shell rc where we add the PATH + REKOL_HOME exports. Detected
+# from the user's login shell ($SHELL) so bash users get a working CLI too, not
+# just zsh. Defaults to ~/.zshrc (macOS default) when $SHELL is unset/unrecognized.
+detect_shell_rc() {
+  case "$(basename "${SHELL:-zsh}")" in
+    bash)
+      # bash login shells read ~/.bash_profile on macOS, ~/.bashrc on most Linux.
+      if [[ "$(uname -s)" == "Darwin" ]]; then printf '%s\n' "$HOME/.bash_profile"
+      else printf '%s\n' "$HOME/.bashrc"; fi ;;
+    *) printf '%s\n' "$HOME/.zshrc" ;;
+  esac
+}
+SHELL_RC="$(detect_shell_rc)"
+readonly SHELL_RC
 
 # Mutable config (set by flag parsing)
 DRY_RUN=0
@@ -72,7 +86,7 @@ Flags:
   --dry-run       print actions without executing them
   --no-hook       skip SessionStart hook installation (settings.json only)
   --no-skill      skip Claude skill installation
-  --no-shellrc    skip ~/.zshrc edits (PATH + REKOL_HOME export)
+  --no-shellrc    skip shell-rc edits (~/.zshrc or ~/.bashrc: PATH + REKOL_HOME)
   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
   --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
   --bin-dir P     override default ~/bin (where the rekol shim lives)
@@ -414,32 +428,32 @@ run "ln -sf '${rekol_shim_src}' '${rekol_shim_dst}'"
 log_journal "SYMLINK ${rekol_shim_dst} -> ${rekol_shim_src}"
 
 # =============================================================================
-# Step 3 — PATH in ~/.zshrc
+# Step 3 — PATH in the shell rc
 # =============================================================================
 
 # Skipped when --no-shellrc or --test-mode is in effect — avoids polluting the
-# real ~/.zshrc during acceptance tests and CI runs.
+# real shell rc during acceptance tests and CI runs.
 if [[ "$DO_SHELLRC" == "1" ]]; then
   # Only appends when BIN_DIR is not already referenced — avoids duplicate entries
-  if ! grep -qs "${BIN_DIR}" "${ZSHRC}" 2>/dev/null; then
-    say "adding ${BIN_DIR} to PATH in ${ZSHRC}"
-    run "printf '\n# rekol\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${ZSHRC}'"
-    log_journal "APPENDED-PATH ${ZSHRC}"
+  if ! grep -qs "${BIN_DIR}" "${SHELL_RC}" 2>/dev/null; then
+    say "adding ${BIN_DIR} to PATH in ${SHELL_RC}"
+    run "printf '\n# rekol\nexport PATH=\"%s:\$PATH\"\n' '${BIN_DIR}' >> '${SHELL_RC}'"
+    log_journal "APPENDED-PATH ${SHELL_RC}"
   fi
 fi
 
 # =============================================================================
-# Step 4 — REKOL_HOME export in ~/.zshrc
+# Step 4 — REKOL_HOME export in the shell rc
 # =============================================================================
 
 # Skipped when --no-shellrc or --test-mode is in effect.
 # Exports REKOL_HOME (the primary data-directory variable); guarded so it is not
 # re-added on reruns.
 if [[ "$DO_SHELLRC" == "1" ]]; then
-  if ! grep -qs "^export REKOL_HOME=" "${ZSHRC}" 2>/dev/null; then
-    say "adding REKOL_HOME export to ${ZSHRC}"
-    run "printf 'export REKOL_HOME=\"%s\"\n' '${RESOLVED_HOME}' >> '${ZSHRC}'"
-    log_journal "APPENDED-REKOL_HOME ${ZSHRC}"
+  if ! grep -qs "^export REKOL_HOME=" "${SHELL_RC}" 2>/dev/null; then
+    say "adding REKOL_HOME export to ${SHELL_RC}"
+    run "printf 'export REKOL_HOME=\"%s\"\n' '${RESOLVED_HOME}' >> '${SHELL_RC}'"
+    log_journal "APPENDED-REKOL_HOME ${SHELL_RC}"
   fi
 fi
 
@@ -614,7 +628,7 @@ fi
 # =============================================================================
 # Step 7.5 — REKOL_HOME into ~/.claude/settings.json env block
 # =============================================================================
-# Claude Code sessions do NOT source ~/.zshrc, so the shell-level REKOL_HOME
+# Claude Code sessions do NOT source your shell rc, so the shell-level REKOL_HOME
 # export from Step 4 isn't visible to the SessionStart hook subshell or to the
 # Bash tool.  Empirically verified: only settings.json's `env` block propagates
 # to subprocess shells — settings.local.json's `env` block does NOT.  Without

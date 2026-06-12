@@ -42,7 +42,20 @@ TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/
 BIN_DIR_DEFAULT="$HOME/bin"
 readonly SETTINGS_JSON="$HOME/.claude/settings.json"
 readonly SKILL_BASE="$HOME/.claude/skills"
-readonly ZSHRC="$HOME/.zshrc"
+
+# Mirror install.sh: clean the rekol exports from the same shell rc install would
+# have written, detected from the user's login shell ($SHELL). Defaults to
+# ~/.zshrc when $SHELL is unset/unrecognized.
+detect_shell_rc() {
+  case "$(basename "${SHELL:-zsh}")" in
+    bash)
+      if [[ "$(uname -s)" == "Darwin" ]]; then printf '%s\n' "$HOME/.bash_profile"
+      else printf '%s\n' "$HOME/.bashrc"; fi ;;
+    *) printf '%s\n' "$HOME/.zshrc" ;;
+  esac
+}
+SHELL_RC="$(detect_shell_rc)"
+readonly SHELL_RC
 
 # Mutable config (set by flag parsing). TOOLS_HOME/BIN_DIR start UNSET so the
 # precedence resolver below can distinguish "user passed a flag" from "fall back
@@ -75,7 +88,7 @@ What it removes:
   - ~/.local/share/rekol/ (the venv + tools home)
   - rekol hook handlers from ~/.claude/settings.json (SessionStart, PostToolUse,
     SessionEnd, UserPromptSubmit, Stop) and env.REKOL_HOME
-  - the rekol PATH + REKOL_HOME (and matching MEMORY_HOME) export lines in ~/.zshrc
+  - the rekol PATH + REKOL_HOME (and matching MEMORY_HOME) export lines in your shell rc (~/.zshrc or ~/.bashrc)
 
 What it PRESERVES:
   - all markdown memory under $REKOL_HOME (always/, when/, topics/, knowledge/,
@@ -107,7 +120,7 @@ Flags:
   --bin-dir P     override the shim dir (else manifest, else ~/bin)
   --help          show this help and exit
 
-Backups: settings.json and .zshrc are copied to timestamped .bak files before
+Backups: settings.json and the shell rc are copied to timestamped .bak files before
 any edit. Your memory markdown is never touched.
 EOF
 }
@@ -479,7 +492,7 @@ if [[ -f "$SETTINGS_JSON" ]]; then
 fi
 
 # =============================================================================
-# Step 5 — remove rekol lines from ~/.zshrc (surgical)
+# Step 5 — remove rekol lines from the shell rc (surgical)
 # =============================================================================
 # install.sh Step 3 appended a `# rekol` comment line immediately followed by an
 # `export PATH="<bindir>:$PATH"` line; Step 4 appended `export REKOL_HOME="..."`.
@@ -491,30 +504,30 @@ fi
 # Everything else (including the user's own lines) is left byte-for-byte intact.
 # Implemented in awk for precise line-pair handling; no edit in dry-run mode.
 
-if [[ -f "$ZSHRC" ]]; then
+if [[ -f "$SHELL_RC" ]]; then
   # Detect whether there is anything to do, to keep the no-op path side-effect
   # free (no backup churn on a clean .zshrc).
   needs_edit=0
-  if grep -qs '^# rekol$' "$ZSHRC" 2>/dev/null; then needs_edit=1; fi
-  if grep -qs '^export REKOL_HOME=' "$ZSHRC" 2>/dev/null; then needs_edit=1; fi
-  if grep -qs "${BIN_DIR}" "$ZSHRC" 2>/dev/null; then needs_edit=1; fi
+  if grep -qs '^# rekol$' "$SHELL_RC" 2>/dev/null; then needs_edit=1; fi
+  if grep -qs '^export REKOL_HOME=' "$SHELL_RC" 2>/dev/null; then needs_edit=1; fi
+  if grep -qs "${BIN_DIR}" "$SHELL_RC" 2>/dev/null; then needs_edit=1; fi
   # A MEMORY_HOME export pointing at the resolved rekol home (legacy).
   if [[ -n "$RESOLVED_HOME" ]] \
-     && grep -qs "^export MEMORY_HOME=\"\\?${RESOLVED_HOME}\"\\?\$" "$ZSHRC" 2>/dev/null; then
+     && grep -qs "^export MEMORY_HOME=\"\\?${RESOLVED_HOME}\"\\?\$" "$SHELL_RC" 2>/dev/null; then
     needs_edit=1
   fi
 
   if [[ "$needs_edit" == "0" ]]; then
-    say "no rekol lines in ${ZSHRC} — nothing to remove"
+    say "no rekol lines in ${SHELL_RC} — nothing to remove"
   else
-    zshrc_backup="${ZSHRC}.bak-${TS}"
-    say "backing up ${ZSHRC} -> ${zshrc_backup}"
-    run "cp '${ZSHRC}' '${zshrc_backup}'"
+    zshrc_backup="${SHELL_RC}.bak-${TS}"
+    say "backing up ${SHELL_RC} -> ${zshrc_backup}"
+    run "cp '${SHELL_RC}' '${zshrc_backup}'"
 
     if [[ "$DRY_RUN" == "1" ]]; then
-      say "DRY-RUN: would remove rekol PATH/REKOL_HOME (and matching MEMORY_HOME) lines from ${ZSHRC}"
+      say "DRY-RUN: would remove rekol PATH/REKOL_HOME (and matching MEMORY_HOME) lines from ${SHELL_RC}"
     else
-      local_tmp="${ZSHRC}.tmp.$$"
+      local_tmp="${SHELL_RC}.tmp.$$"
       # awk reads the whole file; BIN_DIR and RESOLVED_HOME passed as vars so we
       # never interpolate them into the program text. The `# rekol` marker
       # suppresses itself and a following rekol-PATH line (the install pair).
@@ -544,10 +557,10 @@ if [[ -f "$ZSHRC" ]]; then
           }
         }
         { print }
-      ' "${ZSHRC}" > "${local_tmp}" && mv "${local_tmp}" "${ZSHRC}"
-      say "removed rekol lines from ${ZSHRC}"
+      ' "${SHELL_RC}" > "${local_tmp}" && mv "${local_tmp}" "${SHELL_RC}"
+      say "removed rekol lines from ${SHELL_RC}"
     fi
-    note_removed "rekol lines in ${ZSHRC} (backup: ${zshrc_backup})"
+    note_removed "rekol lines in ${SHELL_RC} (backup: ${zshrc_backup})"
   fi
 fi
 
@@ -677,7 +690,7 @@ fi
 
 say ""
 say "next steps:"
-say "  1. source ${ZSHRC}   (or open a new terminal) so the removed PATH/exports clear"
+say "  1. source ${SHELL_RC}   (or open a new terminal) so the removed PATH/exports clear"
 say "  2. your memory markdown is untouched at ${RESOLVED_HOME:-<\$REKOL_HOME unset>}"
 if [[ "$DRY_RUN" == "1" ]]; then
   say ""

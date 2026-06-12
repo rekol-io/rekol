@@ -30,7 +30,10 @@ setup() {
     printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
         > "${REKOLH}/rekol.config.yaml"
 
-    export COMPONENT_DIR TOOLS_HOME BIN_DIR REKOLH SBHOME TESTROOT
+    # Pin the login shell so install/uninstall target .zshrc deterministically
+    # (the host CI may run bash; the bash path is covered in test_install.bats).
+    SHELL="/bin/zsh"
+    export COMPONENT_DIR TOOLS_HOME BIN_DIR REKOLH SBHOME TESTROOT SHELL
 }
 
 teardown() {
