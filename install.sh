@@ -158,7 +158,7 @@ prompt_for_memory_home() {
       printf '(or any local folder; the index lives in a local cache outside it, so syncing your memory never syncs the index)\n'
     } >&2
   fi
-  printf 'Memory folder [%s]: ' "$default_home" >&2
+  printf 'Memory folder — type a path, or press Enter to use the default [%s]: ' "$default_home" >&2
   read -r reply || true
   if [[ -z "$reply" ]]; then
     reply="$default_home"
@@ -261,24 +261,48 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   # venv inherits the broken sqlite3 module — sqlite-vec silently falls
   # back to a numpy cosine scan, with a warning on every search.
   #
-  # Preference order:
-  #   1. uv-managed Python (python-build-standalone — always has extensions)
-  #   2. Homebrew Python (built with extensions)
-  #   3. Fall back to whatever python3 is first on PATH
-  PY3="$(command -v python3 || true)"
-  if command -v uv >/dev/null 2>&1; then
+  # A SUITABLE interpreter is Python >=3.11 AND has sqlite3.enable_load_extension
+  # (so sqlite-vec's vec0 KNN can load instead of silently degrading to a numpy
+  # scan). We probe candidates in preference order and HARD-FAIL with guidance if
+  # none qualify — a clear early error beats a too-old python failing later at
+  # pip, or a no-extension python silently degrading search.
+  _py_suitable() {
+    [[ -n "$1" && -x "$1" ]] && "$1" -c 'import sys,sqlite3;sys.exit(0 if sys.version_info>=(3,11) and hasattr(sqlite3.connect(":memory:"),"enable_load_extension") else 1)' >/dev/null 2>&1
+  }
+  PY3=""
+  # 1. uv-managed Python (python-build-standalone — always has extensions).
+  if [[ -z "$PY3" ]] && command -v uv >/dev/null 2>&1; then
     uv_py="$(uv python find 2>/dev/null || true)"
-    if [[ -n "$uv_py" ]] && [[ -x "$uv_py" ]]; then
-      PY3="$uv_py"
-    fi
+    _py_suitable "$uv_py" && PY3="$uv_py"
   fi
-  if [[ -z "$PY3" || ! -x "$PY3" ]] || ! "$PY3" -c "import sqlite3; c=sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension')" >/dev/null 2>&1; then
-    for candidate in /opt/homebrew/bin/python3 /usr/local/opt/python@3/bin/python3; do
-      if [[ -x "$candidate" ]] && "$candidate" -c "import sqlite3; c=sqlite3.connect(':memory:'); assert hasattr(c, 'enable_load_extension')" >/dev/null 2>&1; then
+  # 2. Versioned / Homebrew pythons (incl. keg-only python@3.12 / @3.11, which the
+  #    default `python@3` opt-prefix misses), then whatever python3 is on PATH.
+  if [[ -z "$PY3" ]]; then
+    for candidate in \
+        "$(command -v python3.12 2>/dev/null || true)" \
+        "$(command -v python3.11 2>/dev/null || true)" \
+        /opt/homebrew/opt/python@3.12/bin/python3.12 \
+        /opt/homebrew/opt/python@3.11/bin/python3.11 \
+        /usr/local/opt/python@3.12/bin/python3.12 \
+        /usr/local/opt/python@3.11/bin/python3.11 \
+        /opt/homebrew/bin/python3 \
+        /usr/local/opt/python@3/bin/python3 \
+        "$(command -v python3 2>/dev/null || true)"; do
+      if _py_suitable "$candidate"; then
         PY3="$candidate"
         break
       fi
     done
+  fi
+  if [[ -z "$PY3" ]]; then
+    {
+      printf 'error: no suitable Python found. rekol needs Python >=3.11 whose sqlite3 has\n'
+      printf '       enable_load_extension (required for sqlite-vec vector search). macOS\n'
+      printf '       system python and the python.org installer ship this disabled. Install one:\n'
+      printf '         brew install uv && uv python install 3.12   # install.sh picks it up automatically\n'
+      printf '       or: brew install python\n'
+    } >&2
+    exit 2
   fi
   say "creating venv at ${TOOLS_HOME}/.venv using ${PY3}"
   run "'${PY3}' -m venv '${TOOLS_HOME}/.venv'"
