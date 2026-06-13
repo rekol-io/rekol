@@ -43,7 +43,7 @@ are table stakes done well, not the headline.
 If no suitable interpreter is found, `install.sh` now stops early with the exact
 fix rather than installing a degraded setup.
 
-## Install (macOS)
+## Install (macOS & Linux)
 ```bash
 git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh
 ```
@@ -102,11 +102,11 @@ you already have:
 
 There are two phases, and they're honestly different.
 
-**Day 1 — searchable history (recall).** As soon as you run setup ("set up my
-rekol memory" in Claude Code), your past Claude Code sessions are indexed and
-become searchable — ask about something you worked on and Claude finds it.
-Indexing is pull-based: it runs when you ask for it, not silently in the
-background, so the first search isn't empty by surprise.
+**Day 1 — searchable history (recall).** Install indexes your existing Claude
+Code sessions into a local searchable store, so right after installing you can
+ask about something you worked on and Claude finds it. It's all on your
+disk — your transcripts are never uploaded. (The assistant-led "set up my rekol
+memory" interview tops this up and is also where the curated layer below comes from.)
 
 **Over time — it learns how your project thinks (understanding).** The payoff is
 ambient memory: the recurring "always do X", "repos live in Y", "we chose Z"

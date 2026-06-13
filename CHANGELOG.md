@@ -7,6 +7,12 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
+
+### Changed
+- README accuracy: "Day 1 searchable history" now reflects that install indexes
+  your existing Claude Code sessions (searchable right after install), not gated
+  on the post-install interview. Install section retitled "macOS & Linux"
+  (Ubuntu 24.04 x86_64/arm64 verified + bash shell support).
 - **bash shell support**: `install.sh`/`uninstall.sh` now write/remove the PATH +
   `REKOL_HOME` exports in the rc for the user's login shell (`$SHELL`) — `~/.zshrc`
   for zsh, `~/.bashrc` (Linux) or `~/.bash_profile` (macOS) for bash — so the
