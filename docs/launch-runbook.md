@@ -119,10 +119,21 @@ Personal access tokens**, then delete the local copy:
 rm -f ~/.rekol-runner-pat
 ```
 
-### 5. Flip the repo public
+### 5. Stamp the launch version — v0.2.0
+The public launch is the **minor** bump (per the versioning convention; dev ran on 0.1.x). On `main`,
+after the hosted-revert is merged (step 3) and the final acceptance is green on this commit:
+- set `version = "0.2.0"` in `pyproject.toml` and `__version__ = "0.2.0"` in `src/rekol/__init__.py`;
+- move CHANGELOG `## [Unreleased]` → `## [0.2.0] - <flip date>`;
+- commit, then `git tag -a v0.2.0 -m "v0.2.0 — public launch"` and push the tag;
+- create the GitHub release for `v0.2.0` (mark Latest).
+
+This is the exact commit/tag the public repo launches at — the "actual launch commit" the acceptance
+precondition refers to.
+
+### 6. Flip the repo public
 **GitHub → Settings → General → Danger Zone → Change visibility → Make public.** Confirm.
 
-### 6. Post-flip verification
+### 7. Post-flip verification
 - [ ] No self-hosted runner attached to the repo.
 - [ ] CI runs on hosted runners and is green.
 - [ ] PAT revoked and local file removed.

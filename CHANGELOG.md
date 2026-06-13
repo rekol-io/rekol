@@ -9,6 +9,10 @@ follow [Semantic Versioning](https://semver.org/).
 - README contact line (`leon@rekol.io`) for questions/feedback.
 
 ### Changed
+- Launch runbook: the public launch is **v0.2.0** (the minor bump per the
+  versioning convention) — added the stamp-version-and-tag step before the flip.
+
+### Changed
 - README accuracy: "Day 1 searchable history" now reflects that install indexes
   your existing Claude Code sessions (searchable right after install), not gated
   on the post-install interview. Install section retitled "macOS & Linux"
