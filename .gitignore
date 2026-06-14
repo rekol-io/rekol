@@ -15,3 +15,7 @@ build/
 
 # macOS Finder cruft
 .DS_Store
+
+# Dev-internal session/handoff notes — never ship in the public repo
+SESSION-TODOS.md
+HANDOFF.md

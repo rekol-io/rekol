@@ -9,6 +9,10 @@ follow [Semantic Versioning](https://semver.org/).
 - README contact line (`leon@rekol.io`) for questions/feedback.
 
 ### Changed
+- `.gitignore`: ignore dev-internal session/handoff notes (`SESSION-TODOS.md`,
+  `HANDOFF.md`) so they can't be swept into the public repo.
+
+### Changed
 - Launch runbook: the public launch is **v0.2.0** (the minor bump per the
   versioning convention) — added the stamp-version-and-tag step before the flip.
 - Launch runbook: added a dev-owned step to attach the `rekol.io` custom domain
