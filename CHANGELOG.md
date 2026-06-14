@@ -11,6 +11,10 @@ follow [Semantic Versioning](https://semver.org/).
 ### Changed
 - Launch runbook: the public launch is **v0.2.0** (the minor bump per the
   versioning convention) — added the stamp-version-and-tag step before the flip.
+- Launch runbook: added a dev-owned step to attach the `rekol.io` custom domain
+  to the Cloudflare Pages site *after* the repo is public (kept dark until then
+  so "View on GitHub" doesn't 404), plus a note that the site is Direct-Upload —
+  a new build needs a manual `wrangler pages deploy` until git auto-deploy is wired.
 
 ### Changed
 - README accuracy: "Day 1 searchable history" now reflects that install indexes

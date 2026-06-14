@@ -133,11 +133,28 @@ precondition refers to.
 ### 6. Flip the repo public
 **GitHub → Settings → General → Danger Zone → Change visibility → Make public.** Confirm.
 
-### 7. Post-flip verification
+### 7. Attach the `rekol.io` custom domain (dev-owned)
+The marketing site (`leonkatz/rekol-site` → Cloudflare Pages project `rekol-site`) is deployed and
+live on `rekol-site.pages.dev`, but the `rekol.io` custom domain is **deliberately unattached** until
+now — attaching it earlier would 404 the page's "View on GitHub" link while the repo was still private.
+Do this **only after step 6** (repo is public), so the GitHub link resolves:
+
+- **Cloudflare → Pages → `rekol-site` → Custom domains → Set up a custom domain → `rekol.io`.** Confirm
+  the DNS record Cloudflare proposes, then wait for the cert to issue (status: Active).
+- [ ] `https://rekol.io` serves the latest deploy (currently commit `573c850` / deployment `bd5550ec`).
+- [ ] The page's **"View on GitHub" link resolves** (no 404) now that the repo is public.
+
+> **Deploy mechanism:** if the site is still **Direct Upload** (no GitHub→Pages git integration), a new
+> build requires a manual `wrangler pages deploy .` from the `rekol-site` repo — **pushing to the repo
+> alone does not deploy.** If git auto-deploy has since been wired up, a merge to `main` deploys
+> automatically; verify which is in effect before assuming a push went live.
+
+### 8. Post-flip verification
 - [ ] No self-hosted runner attached to the repo.
 - [ ] CI runs on hosted runners and is green.
 - [ ] PAT revoked and local file removed.
 - [ ] `install.sh` cold-clone path still works from the now-public URL (see `tests/acceptance.md`).
+- [ ] `rekol.io` resolves and serves the site; "View on GitHub" works.
 - [ ] Announce the freeze is lifted.
 
 ## Rollback
