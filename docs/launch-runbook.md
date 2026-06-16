@@ -1,5 +1,12 @@
 # Launch Runbook — making `rekol` public
 
+> # 🛑 ON HOLD — DO NOT EXECUTE
+> **The launch is postponed indefinitely** (product `from-business/20260615-2204`, eve of the
+> originally-planned Jun 16). An **external clearance is pending; the new date is TBD.** Do **not**
+> run any step below — repo stays **private**, `rekol.io` stays **dark**, no `v0.2.0` tag/release,
+> no PAT revoke, no CI revert. **Resume only on product's explicit new go**, and re-date the section
+> below when that date is set. This banner stays until product signals a go.
+
 This is the ordered procedure for flipping the repo from private to public. It exists
 because the pre-launch CI setup uses a **self-hosted runner on the maintainer's machine**,
 and that runner becomes a remote-code-execution risk the instant the repo is public. The
@@ -8,15 +15,18 @@ coordinated go.
 
 ## Launch date & gate conditions
 
-**Target: Tuesday, June 16 2026** (fallback Wed June 17), per product
-(`from-business/20260609-0332`). Run this runbook that morning **on product's explicit
-coordinated go** — not on the date alone. The flip is gated on BOTH:
+**Target date: TBD — POSTPONED.** The original target was Tuesday, June 16 2026 (fallback Wed
+June 17, per product `from-business/20260609-0332`), but the launch is **postponed indefinitely**
+pending an external clearance (`from-business/20260615-2204`). When product sets a new date, replace
+this line with it. Run this runbook that morning **on product's explicit coordinated go** — not on
+the date alone. The flip is gated on ALL of:
 
 1. **macOS clean-install acceptance is green** — the primary platform, verified on a clean
-   environment (see "macOS acceptance" below). This is the real remaining gate.
-2. **The date arrives and product gives the explicit go.**
+   environment (see "macOS acceptance" below). *Already met across all surfaces as of 2026-06-13.*
+2. **The external clearance lands** and product sets a new date.
+3. **Product gives the explicit go** on that date.
 
-Until both hold, every breaking step here stays **held**.
+Until all hold, every breaking step here stays **held**.
 
 ## macOS acceptance (gate #1)
 

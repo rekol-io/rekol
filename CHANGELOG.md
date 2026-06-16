@@ -9,6 +9,9 @@ follow [Semantic Versioning](https://semver.org/).
 - README contact line (`leon@rekol.io`) for questions/feedback.
 
 ### Changed
+- Launch runbook: **launch postponed indefinitely** (external clearance pending,
+  new date TBD) — added a prominent "ON HOLD — do not execute" banner and replaced
+  the hard "June 16" target with "TBD" so the runbook can't be misread as a live go.
 - `.gitignore`: ignore dev-internal session/handoff notes (`SESSION-TODOS.md`,
   `HANDOFF.md`) so they can't be swept into the public repo.
 
