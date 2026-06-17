@@ -57,6 +57,13 @@ DO_SKILL=1
 DO_SHELLRC=1
 DO_MIGRATE=0
 TEST_MODE=0
+# --skip-deps (#78): reuse an already-provisioned venv and skip the pip install
+# step entirely. Off by default — production installs always provision deps. Used
+# by the bats suite to share one prebuilt venv across tests (the pip install of
+# torch dominated runtime), and handy for re-running install to re-wire hooks.
+# Also settable via REKOL_INSTALL_SKIP_DEPS=1 (mirrors REKOL_INSTALL_SOURCE_ONLY)
+# so a test harness can enable reuse for many invocations without editing each.
+SKIP_DEPS="${REKOL_INSTALL_SKIP_DEPS:-0}"
 TOOLS_HOME="$TOOLS_HOME_DEFAULT"
 BIN_DIR="$BIN_DIR_DEFAULT"
 # Durable transcript archive (#8). Default-ON: with no flag we write nothing and
@@ -76,7 +83,7 @@ usage() {
 rekol install — idempotent installer; safe to rerun on an already-set-up machine.
 
 Usage: ./install.sh [--dry-run] [--no-hook] [--no-skill] [--no-shellrc]
-                    [--test-mode] [--tools-home PATH] [--bin-dir PATH]
+                    [--test-mode] [--skip-deps] [--tools-home PATH] [--bin-dir PATH]
                     [--migrate] [--no-archive] [--archive-dir PATH] [--help]
 
 Set REKOL_HOME to your memory folder (MEMORY_HOME accepted as a fallback); the
@@ -88,6 +95,8 @@ Flags:
   --no-skill      skip Claude skill installation
   --no-shellrc    skip shell-rc edits (~/.zshrc or ~/.bashrc: PATH + REKOL_HOME)
   --test-mode     shorthand for --no-hook --no-skill --no-shellrc (use in tests)
+  --skip-deps     reuse an existing venv and skip the pip install (requires a venv
+                  that already has rekol; for fast re-wiring and the test harness)
   --tools-home P  override default ~/.local/share/rekol (the venv + tools home)
   --bin-dir P     override default ~/bin (where the rekol shim lives)
   --migrate       import legacy ~/.claude/projects/*/memory/ content (opt-in)
@@ -197,6 +206,7 @@ while [[ $# -gt 0 ]]; do
     --no-shellrc) DO_SHELLRC=0;                         shift ;;
     --migrate)    DO_MIGRATE=1;                         shift ;;
     --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
+    --skip-deps)  SKIP_DEPS=1;                          shift ;;
     --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
     --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
     --no-archive) DO_ARCHIVE=0;                         shift ;;
@@ -323,9 +333,22 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   log_journal "CREATED venv ${TOOLS_HOME}/.venv interpreter=${PY3}"
 fi
 
-say "installing/upgrading rekol into venv"
-run "'${TOOLS_HOME}/.venv/bin/pip' install -U pip"
-run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
+if [[ "$SKIP_DEPS" == "1" ]]; then
+  # #78: reuse a pre-provisioned venv (test harness / fast re-wiring). The pip
+  # install of rekol's deps — dominated by torch — is the slow step; skip it and
+  # trust the existing venv. Hard-fail if rekol isn't actually there, so a missing
+  # venv surfaces as a clear error rather than a later cryptic "rekol: not found".
+  if [[ ! -x "${TOOLS_HOME}/.venv/bin/rekol" ]]; then
+    printf 'error: --skip-deps needs an existing venv with rekol at %s\n' \
+      "${TOOLS_HOME}/.venv" >&2
+    exit 2
+  fi
+  say "skipping dependency install (--skip-deps); reusing venv at ${TOOLS_HOME}/.venv"
+else
+  say "installing/upgrading rekol into venv"
+  run "'${TOOLS_HOME}/.venv/bin/pip' install -U pip"
+  run "'${TOOLS_HOME}/.venv/bin/pip' install -U -e '${COMPONENT_DIR}'"
+fi
 
 # --- Resolve the local-only index/cache dir (single source of truth) ---
 # SECURITY: the index (index.db + the secrets-bearing sessions.db + INDEX.md)

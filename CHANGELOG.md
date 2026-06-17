@@ -14,6 +14,14 @@ follow [Semantic Versioning](https://semver.org/).
   hand-editing the two literals each PR; the post-launch CI bump-on-merge step (still
   part of #102) will call it once CI is on hosted runners.
 
+### Changed
+- Install tests (`tests/test_install.bats`) no longer rebuild a venv per test (#78):
+  a single shared venv is built once in `setup_file()` and reused via a new opt-in
+  `install.sh --skip-deps` (also `REKOL_INSTALL_SKIP_DEPS=1`). Each test used to run a
+  full installer → `pip install` pulling torch (731 MB), ~18 min/test and CI
+  cancellations; the suite now builds deps once. `--skip-deps` is off by default, so
+  production installs are unchanged. Added a per-test timeout safety net.
+
 ### Fixed
 - Installed `REKOL_HOME` rc export is now a default-if-unset guard
   (`export REKOL_HOME="${REKOL_HOME:-<path>}"`) instead of a hardcoded value (#83).
