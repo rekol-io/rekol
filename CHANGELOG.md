@@ -7,6 +7,10 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
+- rekol skill: a fifth behavioral rule, **"Ask only after searching"** (#35 phase 1) —
+  run `rekol search` before asking the user for information you might already have;
+  split asks into *knowledge* (look it up) vs *judgment* (ask); ground questions as
+  disambiguation over open "how?"; stay silent on a strong hit (precision over nagging).
 - `scripts/bump_version.py` (#102): bumps the patch `y` and keeps `pyproject.toml`
   `version` and `src/rekol/__init__.py __version__` in lockstep (refuses on drift).
   `--baseline-ref` skips the bump when the minor/major already changed (a deliberate
