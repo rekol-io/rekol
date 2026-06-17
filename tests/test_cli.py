@@ -617,6 +617,13 @@ def test_index_rebuild_quiet_when_nothing_skipped(tmp_path: Path, monkeypatch) -
 
 
 def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
+    """The NON-self-healing paths still loud-fail with the rebuild instruction.
+
+    `rekol index update` is the background-hook path: it must stay fast and must
+    NOT auto-rebuild, so on a stale schema it keeps instructing the user to run
+    `rekol index rebuild`. (The interactive `rekol search` path self-heals instead
+    — see tests/test_schema_autoheal.py for #97.)
+    """
     import sqlite3
 
     monkeypatch.setenv("REKOL_HOME", str(tmp_path))
@@ -634,7 +641,8 @@ def test_outdated_schema_instructs_rebuild(tmp_path: Path, monkeypatch) -> None:
     )
     con.commit()
     con.close()
-    res = CliRunner().invoke(search_main, ["something", "--source", "memory"])
+    res = CliRunner().invoke(index_main, ["update"])
+    assert res.exit_code == 1
     assert "rekol index rebuild" in res.output
 
 

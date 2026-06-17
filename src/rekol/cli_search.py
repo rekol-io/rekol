@@ -24,6 +24,7 @@ from pathlib import Path
 
 import click
 
+from rekol.cli_common import ensure_curated_schema_current
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.ranking import _as_date, _layer_of
@@ -276,13 +277,11 @@ def main(
             db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
         )
         memory_store.init_schema()
-        if memory_store.needs_schema_migration():
-            memory_store.close()
-            click.echo(
-                "curated index schema is out of date — run `rekol index rebuild`",
-                err=True,
-            )
-            sys.exit(1)
+        # #97: self-heal a stale curated schema instead of returning empty stdout
+        # that the agent can't distinguish from a legitimate miss. Auto-rebuilds in
+        # place (crash-safe) on a genuine schema-version bump, then continues with
+        # real results; falls back to a loud one-command message if it can't.
+        ensure_curated_schema_current(memory_store, cfg, embedder, auto_rebuild=True)
         # Identity guard: searching an index built by a DIFFERENT embedding model
         # returns confidently-wrong nearest neighbours (the #22 emptiness backstop
         # can't catch this — the wrong results aren't empty). Fail loudly instead.
