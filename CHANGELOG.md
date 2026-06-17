@@ -15,6 +15,12 @@ follow [Semantic Versioning](https://semver.org/).
   part of #102) will call it once CI is on hosted runners.
 
 ### Fixed
+- Installed `REKOL_HOME` rc export is now a default-if-unset guard
+  (`export REKOL_HOME="${REKOL_HOME:-<path>}"`) instead of a hardcoded value (#83).
+  A fresh shell still resolves to the installed path (no change for the common
+  single-store user), but an inherited `REKOL_HOME` — automation/CI/tests redirecting
+  to a throwaway store, or `settings.json` relocating it — now survives re-sourcing the
+  rc instead of being silently clobbered back to the baked-in path.
 - Search no longer goes silently empty after a curated-index **schema bump** (#97).
   Previously an upgrade that bumped the index schema made `rekol search` exit with
   a stderr-only "run `rekol index rebuild`" message and **empty stdout** — which the

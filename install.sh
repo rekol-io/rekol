@@ -452,7 +452,14 @@ fi
 if [[ "$DO_SHELLRC" == "1" ]]; then
   if ! grep -qs "^export REKOL_HOME=" "${SHELL_RC}" 2>/dev/null; then
     say "adding REKOL_HOME export to ${SHELL_RC}"
-    run "printf 'export REKOL_HOME=\"%s\"\n' '${RESOLVED_HOME}' >> '${SHELL_RC}'"
+    # #83: write a default-if-unset guard, NOT a hardcoded value. A fresh shell has
+    # REKOL_HOME unset → still resolves to the installed path (no change for the
+    # common single-store user). But an inherited REKOL_HOME (automation/CI/tests
+    # redirecting to a throwaway store, or settings.json relocating it) now SURVIVES
+    # re-sourcing the rc instead of being silently clobbered back to the baked path.
+    # The \$ is escaped so the literal ${REKOL_HOME:-...} lands in the rc — install.sh
+    # itself has REKOL_HOME set, so an unescaped form would expand here at write time.
+    run "printf 'export REKOL_HOME=\"\${REKOL_HOME:-%s}\"\n' '${RESOLVED_HOME}' >> '${SHELL_RC}'"
     log_journal "APPENDED-REKOL_HOME ${SHELL_RC}"
   fi
 fi
