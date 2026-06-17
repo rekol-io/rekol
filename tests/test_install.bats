@@ -10,13 +10,46 @@
 # These tests deliberately export MEMORY_HOME (not REKOL_HOME) so the installer's
 # MEMORY_HOME-fallback path stays exercised — that path guards existing installs.
 
+# #78: build ONE venv for the whole file and reuse it across tests. Each test used
+# to run the full installer → a fresh venv → `pip install` pulling torch (731 MB),
+# ~18 min/test and CI cancellations. We build the venv once here (a real install,
+# so the venv-creation + pip path stays covered), then per-test setup() points
+# TOOLS_HOME at it and exports REKOL_INSTALL_SKIP_DEPS=1 so install.sh reuses it
+# instead of reinstalling. Per-test HOME/REKOL_HOME/XDG_* stay isolated; only the
+# immutable venv is shared.
+setup_file() {
+    SHARED_TOOLS="${BATS_FILE_TMPDIR}/shared-tools"
+    export SHARED_TOOLS
+    local cdir seed
+    cdir="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+    seed="${BATS_FILE_TMPDIR}/seed"
+    mkdir -p "${seed}/mem" "${seed}/home"
+    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+        > "${seed}/mem/rekol.config.yaml"
+    # Real install (no --skip-deps): builds the venv + pip installs rekol once.
+    REKOL_HOME="${seed}/mem" HOME="${seed}/home" \
+        XDG_CACHE_HOME="${seed}/cache" XDG_DATA_HOME="${seed}/data" \
+        "${cdir}/install.sh" --test-mode \
+        --tools-home "${SHARED_TOOLS}" --bin-dir "${seed}/bin" >/dev/null 2>&1
+    if [ ! -x "${SHARED_TOOLS}/.venv/bin/rekol" ]; then
+        echo "setup_file: shared venv build failed (no rekol in ${SHARED_TOOLS}/.venv)" >&2
+        return 1
+    fi
+}
+
 setup() {
     TESTROOT="$(mktemp -d)"
     # Export MEMORY_HOME (the fallback) and unset REKOL_HOME so the resolver
     # exercises the fallback path; the missing-home test unsets both.
     export MEMORY_HOME="${TESTROOT}/mem"
     unset REKOL_HOME || true
-    TOOLS_HOME="${TESTROOT}/tools"
+    # #78: reuse the shared venv (built in setup_file) and skip the pip reinstall.
+    # Tests needing a fresh/empty venv (e.g. the shim-missing-venv test) override
+    # TOOLS_HOME locally. Per-test timeout is a safety net so a pathological test
+    # fails fast instead of cancelling the whole job.
+    TOOLS_HOME="${SHARED_TOOLS}"
+    export REKOL_INSTALL_SKIP_DEPS=1
+    export BATS_TEST_TIMEOUT=300
     BIN_DIR="${TESTROOT}/bin"
     # SECURITY/test-hygiene: the index now lives in ${XDG_CACHE_HOME:-~/.cache}/
     # rekol/<hash>. Sandbox XDG_CACHE_HOME so building the index in these tests
@@ -191,7 +224,9 @@ manifest_index_dir() {
 # Test 4 — the rekol shim errors clearly when the venv is absent
 # ---------------------------------------------------------------------------
 @test "shim exits 2 with helpful message when venv is missing" {
-    run env REKOL_TOOLS_HOME="${TOOLS_HOME}" \
+    # Must point at a genuinely EMPTY tools-home (not the shared venv) — this test
+    # asserts the shim's behavior when no venv exists.
+    run env REKOL_TOOLS_HOME="${TESTROOT}/empty-tools" \
         "${COMPONENT_DIR}/bin/rekol" search identity --top 1
 
     [ "$status" -eq 2 ]
@@ -289,7 +324,7 @@ manifest_index_dir() {
     run env -u TEST_MODE -u MEMORY_HOME \
         REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/bash" \
         "${COMPONENT_DIR}/install.sh" --no-hook --no-skill \
-        --tools-home "${TESTROOT}/tools-bash" --bin-dir "${sbhome}/bin"
+        --tools-home "${SHARED_TOOLS}" --bin-dir "${sbhome}/bin"
     [ "$status" -eq 0 ]
     # The rekol exports landed in a bash rc (whichever the OS uses)...
     rc=""
@@ -315,7 +350,7 @@ manifest_index_dir() {
     run env -u TEST_MODE -u MEMORY_HOME \
         REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/zsh" \
         "${COMPONENT_DIR}/install.sh" --no-hook --no-skill \
-        --tools-home "${TESTROOT}/tools-83" --bin-dir "${sbhome}/bin"
+        --tools-home "${SHARED_TOOLS}" --bin-dir "${sbhome}/bin"
     [ "$status" -eq 0 ]
     local rc="${sbhome}/.zshrc"
     [ -f "$rc" ]
@@ -424,12 +459,12 @@ manifest_index_dir() {
     HOME="$TESTROOT/home" \
     "$BATS_TEST_DIRNAME/../install.sh" \
       --no-hook --no-skill --no-shellrc \
-      --tools-home "$TESTROOT/tools" --bin-dir "$TESTROOT/bin"
+      --tools-home "$SHARED_TOOLS" --bin-dir "$TESTROOT/bin"
   [ "$status" -eq 0 ]
   # Template seeded REKOL.md + identity example into the empty root
   [ -f "$TESTROOT/mem/REKOL.md" ]
   # Search over the seeded content returns a hit (index was built by install)
-  run env REKOL_HOME="$TESTROOT/mem" "$TESTROOT/tools/.venv/bin/rekol" search "identity" --top 3
+  run env REKOL_HOME="$TESTROOT/mem" "$SHARED_TOOLS/.venv/bin/rekol" search "identity" --top 3
   [ "$status" -eq 0 ]
 }
 
@@ -448,7 +483,7 @@ manifest_index_dir() {
   mkdir -p "$TESTROOT/home-prompt"
   run env -u TEST_MODE -u REKOL_HOME -u MEMORY_HOME HOME="$TESTROOT/home-prompt" \
     python3 - "$BATS_TEST_DIRNAME/../install.sh" "$memhome" \
-      "$TESTROOT/tools-prompt" "$TESTROOT/bin-prompt" <<'PY'
+      "$SHARED_TOOLS" "$TESTROOT/bin-prompt" <<'PY'
 import os, pty, select, sys
 install, answer, tools, bindir = sys.argv[1], sys.argv[2] + "\n", sys.argv[3], sys.argv[4]
 argv = ["bash", install, "--no-hook", "--no-skill", "--no-shellrc",
@@ -478,7 +513,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
 PY
   [ "$status" -eq 0 ]
   # The post-resolve subprocesses ran (didn't die on load_config): search works.
-  run env REKOL_HOME="$memhome" "$TESTROOT/tools-prompt/.venv/bin/rekol" search "identity" --top 3
+  run env REKOL_HOME="$memhome" "$SHARED_TOOLS/.venv/bin/rekol" search "identity" --top 3
   [ "$status" -eq 0 ]
 }
 
