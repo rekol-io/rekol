@@ -8,6 +8,19 @@ follow [Semantic Versioning](https://semver.org/).
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
 
+### Fixed
+- Search no longer goes silently empty after a curated-index **schema bump** (#97).
+  Previously an upgrade that bumped the index schema made `rekol search` exit with
+  a stderr-only "run `rekol index rebuild`" message and **empty stdout** — which the
+  assistant couldn't tell apart from a legitimate "no results". `rekol search` now
+  **self-heals**: on a genuine schema-version mismatch it rebuilds the index in place
+  (crash-safe temp-DB swap, offline-first) and returns real results, emitting a
+  one-time notice to stderr only so `--json` stdout stays valid. Self-heal is scoped
+  to schema bumps — a model-identity mismatch still fails loudly (it must not silently
+  re-embed under a different model), and if a rebuild can't run (another index op holds
+  the lock, or the cache is read-only) it falls back to the actionable message. The
+  background `rekol index update` path intentionally keeps instructing a manual rebuild.
+
 ### Changed
 - Launch runbook: **launch postponed indefinitely** (external clearance pending,
   new date TBD) — added a prominent "ON HOLD — do not execute" banner and replaced
