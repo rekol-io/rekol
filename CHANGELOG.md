@@ -7,6 +7,12 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
+- `scripts/bump_version.py` (#102): bumps the patch `y` and keeps `pyproject.toml`
+  `version` and `src/rekol/__init__.py __version__` in lockstep (refuses on drift).
+  `--baseline-ref` skips the bump when the minor/major already changed (a deliberate
+  release), `--set X.Y.Z` for an explicit version, `--check` for a dry run. Replaces
+  hand-editing the two literals each PR; the post-launch CI bump-on-merge step (still
+  part of #102) will call it once CI is on hosted runners.
 
 ### Fixed
 - Search no longer goes silently empty after a curated-index **schema bump** (#97).

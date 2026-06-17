@@ -121,6 +121,12 @@ This branch restores the hosted configuration:
 Merge it. Verify the next PR (or the post-merge push run) executes on a GitHub-hosted runner,
 not self-hosted, and goes green.
 
+> **Now-unblocked follow-up (#102):** once CI is hosted, add the ~5-line version-bump-on-merge
+> step that calls `scripts/bump_version.py --baseline-ref <prev>` with `[skip ci]` on the
+> auto-commit. It was deliberately deferred to here because the bump-commit needs hosted
+> `GITHUB_TOKEN` write (the self-hosted runner's PAT is revoked in step 4) — do NOT wire it
+> onto the temporary self-hosted CI. The bump *logic* already shipped (the script + its tests).
+
 ### 4. Revoke the runner PAT
 The runner's PAT is no longer needed. Revoke it at **GitHub → Settings → Developer settings →
 Personal access tokens**, then delete the local copy:
