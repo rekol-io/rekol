@@ -9,12 +9,13 @@ Memory root: `$REKOL_HOME` (falls back to `$MEMORY_HOME`). Layers: `always/`, `w
 
 ## Behavioral rules
 
-These four directives govern every memory interaction. The mechanics that follow show *how* to run them.
+These five directives govern every memory interaction. The mechanics that follow show *how* to run them.
 
 1. **Search, don't guess.** Before answering a question, recommending a path/command/ID/env name/canonical reference, or writing a new memory, run `rekol search` first. In-context reasoning goes stale; a curated source may already exist. Search is the first move, not the fallback.
 2. **Ground every answer.** Answer from what memory actually returned, and cite the provenance (the `file_path` + line range, or the session `jsonl_path` + line). If the answer isn't in memory, say so plainly — "I don't have that in memory" — and offer to capture it. Never present an in-context guess as a remembered fact. **Never confabulate.**
 3. **Hedge on absence.** A `rekol search` miss, an unmatched filename, or an unfamiliar command means *you didn't find it* — not that it doesn't exist. Built-in commands and capabilities aren't fully enumerable to you, so never flatly tell the user something is "not available." Hedge: "not registered that I can see, but built-in commands aren't fully enumerable to me — try it and we'll confirm." (Distinct from grounding: grounding governs *facts in memory*; hedging governs *capabilities you couldn't enumerate*.)
 4. **Capture as you go.** When a surprise, correction, or validated approach would help a future session, capture it — and tell the user in one line what you saved. See *Capture* below for the bar and the commands.
+5. **Ask only after searching.** Before asking the user for information you might already have — a path, an ID, a preference, a prior decision — run `rekol search` first; the answer may already be in memory. Split asks into *knowledge* (look it up — don't ask what you can retrieve) vs *judgment* (ask the user). When you do ask, ground it: prefer disambiguation from what memory holds ("did you mean A, B, or C?") over an open "how do I do that?". Precision over eagerness — stay silent and just answer on a strong hit; only ask when search genuinely misses or the call is a judgment one.
 
 ## Retrieve — prefer the vector index over reading whole files
 
