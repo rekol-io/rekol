@@ -302,6 +302,35 @@ manifest_index_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 6b (#83) — the REKOL_HOME rc export is a default-if-unset guard, so an
+# inherited REKOL_HOME (automation/CI/tests redirecting the store) survives a
+# re-source of the rc instead of being clobbered back to the installed path.
+# ---------------------------------------------------------------------------
+@test "REKOL_HOME rc export guards an inherited env value (#83)" {
+    unset TEST_MODE || true
+    local sbhome="${TESTROOT}/home-83" rekolh="${TESTROOT}/rekolhome-83"
+    mkdir -p "${sbhome}/.claude" "${rekolh}"
+    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+        > "${rekolh}/rekol.config.yaml"
+    run env -u TEST_MODE -u MEMORY_HOME \
+        REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/zsh" \
+        "${COMPONENT_DIR}/install.sh" --no-hook --no-skill \
+        --tools-home "${TESTROOT}/tools-83" --bin-dir "${sbhome}/bin"
+    [ "$status" -eq 0 ]
+    local rc="${sbhome}/.zshrc"
+    [ -f "$rc" ]
+    # The export is the guard form, NOT a hardcoded value baked from install time.
+    grep -qF 'export REKOL_HOME="${REKOL_HOME:-' "$rc"
+    # A fresh shell (REKOL_HOME unset) still resolves to the installed path.
+    run env -u REKOL_HOME sh -c ". '$rc'; printf '%s' \"\$REKOL_HOME\""
+    [ "$output" = "${rekolh}" ]
+    # An inherited REKOL_HOME is preserved (the bug this fixes): sourcing the rc
+    # must NOT override a redirect to a throwaway store.
+    run env REKOL_HOME="${TESTROOT}/throwaway-83" sh -c ". '$rc'; printf '%s' \"\$REKOL_HOME\""
+    [ "$output" = "${TESTROOT}/throwaway-83" ]
+}
+
+# ---------------------------------------------------------------------------
 # Test 7 — --test-mode does not modify ~/.zshrc
 # ---------------------------------------------------------------------------
 @test "test-mode does not modify ~/.zshrc" {
