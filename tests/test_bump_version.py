@@ -170,3 +170,34 @@ def test_cli_drift_errors(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(bv, "INIT_PY", init)
     assert bv.main([]) == 1
     assert "drift" in capsys.readouterr().err
+
+
+# --------------------------- #102 enforce-the-bump ---------------------------
+
+
+def test_cli_assert_ahead_of_passes_when_bumped(redirected, monkeypatch, capsys) -> None:
+    py, init = redirected  # current 0.1.13
+    monkeypatch.setattr(bv, "_version_at_ref", lambda ref, pyproject=py: bv.Version(0, 1, 12))
+    assert bv.main(["--assert-ahead-of", "origin/main"]) == 0
+    assert "version OK" in capsys.readouterr().out
+    assert bv.read_current(py, init) == bv.Version(0, 1, 13)  # writes nothing
+
+
+def test_cli_assert_ahead_of_fails_when_not_bumped(redirected, monkeypatch, capsys) -> None:
+    py, init = redirected  # current 0.1.13, base also 0.1.13 → forgot to bump
+    monkeypatch.setattr(bv, "_version_at_ref", lambda ref, pyproject=py: bv.Version(0, 1, 13))
+    assert bv.main(["--assert-ahead-of", "origin/main"]) == 1
+    assert "not bumped" in capsys.readouterr().err
+
+
+def test_cli_assert_ahead_of_fails_when_behind(redirected, monkeypatch) -> None:
+    py, init = redirected  # current 0.1.13, base ahead → behind
+    monkeypatch.setattr(bv, "_version_at_ref", lambda ref, pyproject=py: bv.Version(0, 2, 0))
+    assert bv.main(["--assert-ahead-of", "origin/main"]) == 1
+
+
+def test_cli_assert_ahead_of_passes_on_minor_bump(redirected, monkeypatch) -> None:
+    py, init = redirected
+    bv.write_version(bv.Version(0, 2, 0), py, init)  # a deliberate minor release
+    monkeypatch.setattr(bv, "_version_at_ref", lambda ref, pyproject=py: bv.Version(0, 1, 13))
+    assert bv.main(["--assert-ahead-of", "origin/main"]) == 0  # minor is "ahead" too
