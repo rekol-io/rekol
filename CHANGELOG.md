@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- README accuracy pass for the public launch: 'runs on macOS' -> 'macOS and Linux';
+  generalized the `~/.zshrc`-only references (`--no-shellrc`, uninstall, post-uninstall) to the
+  shell rc for zsh AND bash; softened 'no export in v1' -> 'no export yet'.
+### Fixed
 - `install.sh` now requires a **venv-capable** Python, not just one with the sqlite
   extension (#launch smoke test). On Debian/Ubuntu the system `python3` can have
   `enable_load_extension` yet lack `ensurepip` (venv is a separate `python3-venv`
