@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- CI now **enforces the per-PR version bump** (#102 part 2): a `version-bump` job fails a
+  PR unless its version is ahead of `main` (`scripts/bump_version.py --assert-ahead-of`). A
+  status check rather than an auto-push, so it works cleanly with branch protection — you still
+  run `bump_version.py` (one command), but forgetting it is now impossible.
 ### Fixed
 - README accuracy pass for the public launch: 'runs on macOS' -> 'macOS and Linux';
   generalized the `~/.zshrc`-only references (`--no-shellrc`, uninstall, post-uninstall) to the

@@ -77,3 +77,21 @@ jobs:
       - name: bats install-script test
         if: steps.filter.outputs.shell == 'true'
         run: bats tests/test_install.bats
+
+  version-bump:
+    # #102: enforce that every PR to main bumps the version (patch, or a deliberate
+    # minor/major). This is a status CHECK, not an auto-push — it works cleanly with
+    # branch protection (no bot pushing to a protected main). Fails the PR if
+    # scripts/bump_version.py wasn't run. The bump itself stays a one-command manual
+    # step; this just makes forgetting it impossible.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the PR base commit present to compare versions
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Enforce per-PR version bump
+        run: python scripts/bump_version.py --assert-ahead-of "${{ github.event.pull_request.base.sha }}"

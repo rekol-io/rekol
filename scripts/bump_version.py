@@ -148,6 +148,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="REF",
         help="skip the patch bump if major/minor already changed vs this git ref",
     )
+    group.add_argument(
+        "--assert-ahead-of",
+        metavar="REF",
+        help="exit non-zero unless the current version is strictly greater than the version "
+        "at REF (enforce the per-PR bump in CI; writes nothing)",
+    )
     parser.add_argument(
         "--check", action="store_true", help="print the intended action; write nothing"
     )
@@ -156,6 +162,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Reference the module globals at call time so tests can redirect them.
         current = read_current(PYPROJECT, INIT_PY)
+        if args.assert_ahead_of is not None:
+            # #102 enforcement: every PR must bump the version. Fail unless the current
+            # version is strictly greater than the base branch's — no files written.
+            base = _version_at_ref(args.assert_ahead_of, PYPROJECT)
+            if (current.major, current.minor, current.patch) <= (base.major, base.minor, base.patch):
+                print(
+                    f"error: version not bumped — {current} is not ahead of {base} "
+                    f"(at {args.assert_ahead_of}). Run: python scripts/bump_version.py",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"version OK: {current} > {base} (bumped vs {args.assert_ahead_of})")
+            return 0
         if args.set_to is not None:
             target: Version | None = Version.parse(args.set_to)
         else:
