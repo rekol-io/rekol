@@ -1,45 +1,48 @@
 name: CI
+# HOSTED CI (prepared, held unmerged on branch `revert/ci-hosted`).
+# Merge this ONLY as part of the coordinated public flip — see docs/launch-runbook.md.
+# Safe sequence: (1) deregister the self-hosted runner, (2) merge THIS (hosted CI),
+# (3) make the repo public. Do NOT flip public while the self-hosted runner is still
+# attached — a self-hosted runner on a PUBLIC repo runs arbitrary code from any fork PR
+# (RCE on the maintainer's machine). Public repos get free standard hosted runners, so
+# after the flip these jobs run at no cost.
 on:
-  # pull_request only — the post-merge push-to-main run was redundant (PR CI already
-  # gated the change) and just clogged the single self-hosted runner. On revert before
-  # going public, restore `push: { branches: [main] }` alongside the hosted runner.
+  push:
+    branches: [main]
   pull_request:
 
 concurrency:
-  # One in-flight run per PR ref; a new push cancels the superseded run, so the single
-  # self-hosted runner isn't wasted finishing stale commits.
+  # One in-flight run per ref; a new push cancels the superseded run.
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# ⚠️ TEMPORARY (pre-launch, 2026-06) — self-hosted runner.
-# GitHub-hosted Actions minutes are exhausted for the month, so the gate runs on a
-# self-hosted Docker/Linux runner (Ubuntu 24.04, Python 3.12) on the maintainer's
-# machine (self-hosted minutes are free).
-#
-# 🚨 REVERT BEFORE THE REPO GOES PUBLIC. A self-hosted runner on a PUBLIC repo lets a
-#    malicious fork PR run arbitrary code on the maintainer's machine. Launch sequence:
-#      1. deregister the runner, AND
-#      2. restore a hosted config (e.g. `runs-on: macos-latest` / `ubuntu-latest` with
-#         actions/setup-python), THEN
-#      3. flip the repo public.
-#    (Public repos get unlimited hosted Actions, so the runner isn't needed after launch.)
-
 jobs:
   test:
-    runs-on: [self-hosted, linux]   # TEMP: was `macos-latest` — see header / revert before public
+    # Native acceptance across all supported arches (launch): ubuntu-latest (x86_64
+    # Linux — finally native, not QEMU) and macos-latest (Apple Silicon/arm64) are the
+    # required gates; macos-13 (Intel) is OPTIONAL (continue-on-error) — best-effort
+    # native Intel coverage that never blocks the merge and can be dropped if the free
+    # macOS tier doesn't cover it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'macos-13' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need the base commit present for the git-diff gate below
-      # Gate the slow bats install tests (~18 min) to only run when the install
-      # scripts — or their hooks, the bats tests, or this workflow — change. A
-      # Python-only PR then skips bats entirely and the gate is just
-      # ruff/format/mypy/pytest (~2 min). install.sh sources no separate libs, so
-      # hooks/** + the two bats files are the full "or its libraries" surface.
-      #
-      # Detected via plain `git diff` (NOT a GitHub-API action): the self-hosted
-      # runner's token can't call the PR-files API ("Resource not accessible by
-      # integration"). Fail-safe: if the diff can't be computed, RUN bats.
+          fetch-depth: 0   # base commit must be present for the git-diff bats gate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -U pip
+      - run: pip install -e ".[dev]"
+      # Gate the slow bats install tests to only run when the install scripts — or
+      # their hooks, the bats tests, or this workflow — change. A Python-only PR then
+      # skips bats and the gate is just ruff/format/mypy/pytest. Detected via plain
+      # `git diff` (portable across hosted Linux + macOS). Fail-safe: if the diff can't
+      # be computed (e.g. a push event with no base), RUN bats.
       - name: Detect shell-script changes
         id: filter
         run: |
@@ -53,33 +56,24 @@ jobs:
           else
             echo 'shell=true' >> "$GITHUB_OUTPUT"; echo 'could not compute diff -> running bats (fail-safe)'
           fi
-      # No actions/setup-python: this self-hosted runner is Ubuntu 24.04 with Python
-      # 3.12 (>=3.11), and setup-python has no arm64 build for older bases. Use the
-      # system python via a venv (24.04 is PEP-668 "externally managed").
-      - name: Create venv
-        run: python3 -m venv .venv
-      - name: Install
-        run: |
-          .venv/bin/pip install -U pip
-          .venv/bin/pip install -e ".[dev]"
       - name: Ruff lint
-        run: .venv/bin/ruff check .
+        run: ruff check .
       - name: Ruff format check
-        run: .venv/bin/ruff format --check .
+        run: ruff format --check .
       - name: mypy
-        run: .venv/bin/mypy src/rekol
+        run: mypy src/rekol
       - name: pytest
-        run: .venv/bin/pytest -q
-      - name: bats install-script test
-        # Only when shell scripts changed (see the paths-filter above) — keeps
-        # Python-only PRs off the ~18-min install-script tests. A skipped step is
-        # neutral, so the `test` job still goes green on the fast checks alone.
+        run: pytest -q
+      - name: Install bats
+        # OS-conditional: brew on macOS, apt on Linux (brew isn't the right installer on
+        # Ubuntu). Only when shell scripts changed (see the gate above).
         if: steps.filter.outputs.shell == 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bats jq
-          bats tests/test_install.bats
-
-  # NOTE: the separate `ubuntu-latest` portability job is dropped during the self-hosted
-  # window — the gate runs on Linux natively (self-hosted). Restore it (and a hosted
-  # `runs-on`) when reverting before the public flip.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install bats-core
+          else
+            sudo apt-get update && sudo apt-get install -y bats
+          fi
+      - name: bats install-script test
+        if: steps.filter.outputs.shell == 'true'
+        run: bats tests/test_install.bats
