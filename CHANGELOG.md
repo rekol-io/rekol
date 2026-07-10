@@ -27,6 +27,12 @@ follow [Semantic Versioning](https://semver.org/).
   production installs are unchanged. Added a per-test timeout safety net.
 
 ### Fixed
+- `install.sh` now **upgrades an existing pre-#119 hardcoded `REKOL_HOME` rc line
+  in place** instead of only adding the guard when absent (QA 20260620-2145). #119
+  guarded new installs, but a machine that installed earlier kept its old
+  `export REKOL_HOME="<path>"` line forever — the clobber survived for exactly the
+  early adopters #119 meant to protect. A re-run now rewrites it to the
+  `${REKOL_HOME:-<path>}` form (idempotent); new bats case covers the upgrade.
 - Installed `REKOL_HOME` rc export is now a default-if-unset guard
   (`export REKOL_HOME="${REKOL_HOME:-<path>}"`) instead of a hardcoded value (#83).
   A fresh shell still resolves to the installed path (no change for the common
