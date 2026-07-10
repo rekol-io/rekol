@@ -166,7 +166,9 @@ def main(argv: list[str] | None = None) -> int:
             # #102 enforcement: every PR must bump the version. Fail unless the current
             # version is strictly greater than the base branch's — no files written.
             base = _version_at_ref(args.assert_ahead_of, PYPROJECT)
-            if (current.major, current.minor, current.patch) <= (base.major, base.minor, base.patch):
+            cur_t = (current.major, current.minor, current.patch)
+            base_t = (base.major, base.minor, base.patch)
+            if cur_t <= base_t:
                 print(
                     f"error: version not bumped — {current} is not ahead of {base} "
                     f"(at {args.assert_ahead_of}). Run: python scripts/bump_version.py",
