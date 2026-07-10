@@ -366,6 +366,37 @@ manifest_index_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 6c (#83 follow-up, QA 20260620-2145) — a machine that installed pre-#119
+# has an OLD hardcoded `export REKOL_HOME="<path>"` line; #119 only added-when-
+# absent, so it was never upgraded. A re-run must rewrite it in place to the guard.
+# ---------------------------------------------------------------------------
+@test "install upgrades an existing pre-#119 hardcoded REKOL_HOME rc line in place" {
+    unset TEST_MODE || true
+    local sbhome="${TESTROOT}/home-upg" rekolh="${TESTROOT}/rekolhome-upg"
+    mkdir -p "${sbhome}/.claude" "${rekolh}"
+    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+        > "${rekolh}/rekol.config.yaml"
+    # Pre-seed the OLD hardcoded (unguarded) form, as a pre-#119 install left it.
+    printf '# rekol\nexport PATH="%s/bin:$PATH"\nexport REKOL_HOME="%s"\n' "${sbhome}" "${rekolh}" \
+        > "${sbhome}/.zshrc"
+    run env -u TEST_MODE -u MEMORY_HOME \
+        REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/zsh" \
+        "${COMPONENT_DIR}/install.sh" --no-hook --no-skill \
+        --tools-home "${SHARED_TOOLS}" --bin-dir "${sbhome}/bin"
+    [ "$status" -eq 0 ]
+    local rc="${sbhome}/.zshrc"
+    # The old line was rewritten IN PLACE to the guard form...
+    grep -qF 'export REKOL_HOME="${REKOL_HOME:-' "$rc"
+    # ...exactly one REKOL_HOME export (upgraded, not a duplicate appended).
+    [ "$(grep -c '^export REKOL_HOME=' "$rc")" -eq 1 ]
+    # Fresh shell resolves to the installed path; an inherited value now survives.
+    run env -u REKOL_HOME sh -c ". '$rc'; printf '%s' \"\$REKOL_HOME\""
+    [ "$output" = "${rekolh}" ]
+    run env REKOL_HOME="${TESTROOT}/throwaway-upg" sh -c ". '$rc'; printf '%s' \"\$REKOL_HOME\""
+    [ "$output" = "${TESTROOT}/throwaway-upg" ]
+}
+
+# ---------------------------------------------------------------------------
 # Test 7 — --test-mode does not modify ~/.zshrc
 # ---------------------------------------------------------------------------
 @test "test-mode does not modify ~/.zshrc" {

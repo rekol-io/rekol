@@ -484,6 +484,28 @@ if [[ "$DO_SHELLRC" == "1" ]]; then
     # itself has REKOL_HOME set, so an unescaped form would expand here at write time.
     run "printf 'export REKOL_HOME=\"\${REKOL_HOME:-%s}\"\n' '${RESOLVED_HOME}' >> '${SHELL_RC}'"
     log_journal "APPENDED-REKOL_HOME ${SHELL_RC}"
+  elif grep -qsF 'export REKOL_HOME="${REKOL_HOME:-' "${SHELL_RC}" 2>/dev/null; then
+    : # already the guarded form — idempotent, nothing to do
+  else
+    # #83 follow-up: #119 only ADDED the guard when absent, so a machine that
+    # installed pre-fix keeps its old hardcoded `export REKOL_HOME="<path>"` line
+    # forever — the clobber #119 set out to fix persists for exactly the early
+    # adopters it was meant to protect. Rewrite the existing line IN PLACE to the
+    # default-if-unset guard so a re-run upgrades it. (QA 20260620-2145.)
+    say "upgrading existing REKOL_HOME export in ${SHELL_RC} to the default-if-unset guard"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      say "DRY-RUN: rewrite the '^export REKOL_HOME=' line to the guarded form in ${SHELL_RC}"
+    else
+      # cp (not mv) so the rc keeps its original permissions. awk -v sees no
+      # backslashes in `repl` (the shell already expanded \$ → $, \" → "), so the
+      # literal ${REKOL_HOME:-<path>} is emitted verbatim.
+      _rekol_rc_tmp="$(mktemp)"
+      awk -v repl="export REKOL_HOME=\"\${REKOL_HOME:-${RESOLVED_HOME}}\"" \
+        '/^export REKOL_HOME=/{print repl; next} {print}' "${SHELL_RC}" > "${_rekol_rc_tmp}" \
+        && cp "${_rekol_rc_tmp}" "${SHELL_RC}"
+      rm -f "${_rekol_rc_tmp}"
+      log_journal "UPGRADED-REKOL_HOME ${SHELL_RC}"
+    fi
   fi
 fi
 
