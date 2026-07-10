@@ -285,13 +285,18 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   # venv inherits the broken sqlite3 module — sqlite-vec silently falls
   # back to a numpy cosine scan, with a warning on every search.
   #
-  # A SUITABLE interpreter is Python >=3.11 AND has sqlite3.enable_load_extension
-  # (so sqlite-vec's vec0 KNN can load instead of silently degrading to a numpy
-  # scan). We probe candidates in preference order and HARD-FAIL with guidance if
-  # none qualify — a clear early error beats a too-old python failing later at
-  # pip, or a no-extension python silently degrading search.
+  # A SUITABLE interpreter is Python >=3.11, has sqlite3.enable_load_extension (so
+  # sqlite-vec's vec0 KNN can load instead of silently degrading to a numpy scan),
+  # AND can create a venv. Debian/Ubuntu split ensurepip into a separate
+  # `python3.NN-venv` package, so a system python can pass the first two checks yet
+  # fail `python -m venv` with "No module named 'ensurepip'" — requiring `ensurepip`
+  # here makes the probe skip such an interpreter so we fall through to a venv-capable
+  # one (uv / Homebrew / pyenv). We probe candidates in preference order and HARD-FAIL
+  # with guidance if none qualify — a clear early error beats a too-old python failing
+  # later at pip, a no-extension python silently degrading search, or a venv-less
+  # python dying halfway through `-m venv`.
   _py_suitable() {
-    [[ -n "$1" && -x "$1" ]] && "$1" -c 'import sys,sqlite3;sys.exit(0 if sys.version_info>=(3,11) and hasattr(sqlite3.connect(":memory:"),"enable_load_extension") else 1)' >/dev/null 2>&1
+    [[ -n "$1" && -x "$1" ]] && "$1" -c 'import sys,sqlite3,ensurepip;sys.exit(0 if sys.version_info>=(3,11) and hasattr(sqlite3.connect(":memory:"),"enable_load_extension") else 1)' >/dev/null 2>&1
   }
   PY3=""
   # 1. uv-managed Python (python-build-standalone — always has extensions).
@@ -320,11 +325,13 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   fi
   if [[ -z "$PY3" ]]; then
     {
-      printf 'error: no suitable Python found. rekol needs Python >=3.11 whose sqlite3 has\n'
-      printf '       enable_load_extension (required for sqlite-vec vector search). macOS\n'
-      printf '       system python and the python.org installer ship this disabled. Install one:\n'
-      printf '         brew install uv && uv python install 3.12   # install.sh picks it up automatically\n'
-      printf '       or: brew install python\n'
+      printf 'error: no suitable Python found. rekol needs Python >=3.11 that (a) has\n'
+      printf '       sqlite3.enable_load_extension (for sqlite-vec vector search) and (b) can\n'
+      printf '       create a venv. macOS system python and the python.org installer ship (a)\n'
+      printf '       disabled; Debian/Ubuntu split venv into a separate package. Fixes:\n'
+      printf '         macOS:         brew install uv && uv python install 3.12   # auto-detected\n'
+      printf '                        or: brew install python\n'
+      printf '         Debian/Ubuntu: sudo apt install python3-venv   # (or python3.12-venv)\n'
     } >&2
     exit 2
   fi

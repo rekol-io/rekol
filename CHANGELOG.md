@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- `install.sh` now requires a **venv-capable** Python, not just one with the sqlite
+  extension (#launch smoke test). On Debian/Ubuntu the system `python3` can have
+  `enable_load_extension` yet lack `ensurepip` (venv is a separate `python3-venv`
+  package), so install died mid-`venv`; the probe now skips such interpreters and
+  falls through to a venv-capable one, or hard-fails early with the exact `apt install
+  python3-venv` fix. Fixes native-Linux install + the hosted CI Linux leg.
 
 ## [0.2.0] - 2026-07-09
 First public release (quiet go-live; announcement Jul 14). Everything below shipped
