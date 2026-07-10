@@ -7,7 +7,7 @@
 ![REKOL — a fresh session recalls your project's conventions from memory](docs/demo.gif)
 
 REKOL works anywhere Claude Code runs — the terminal, your IDE (VS Code or
-JetBrains), or the Claude Desktop app. It runs on macOS.
+JetBrains), or the Claude Desktop app. It runs on macOS and Linux.
 
 ## Why
 
@@ -74,7 +74,8 @@ projects with `exclude_paths` / `.rekolignore`.
 - `--dry-run` — print every action without executing it.
 - `--no-hook` — skip the Claude Code SessionStart/hook wiring (settings.json).
 - `--no-skill` — skip installing the `rekol`/`memory` Claude skill.
-- `--no-shellrc` — skip the `~/.zshrc` edits (PATH + `REKOL_HOME` export).
+- `--no-shellrc` — skip the shell-rc edits (PATH + `REKOL_HOME` export) — written to
+  `~/.zshrc` for zsh, or `~/.bashrc`/`~/.bash_profile` for bash, per your login shell.
 - `--test-mode` — shorthand for `--no-hook --no-skill --no-shellrc`.
 - `--tools-home PATH` — override the venv + tools home (default `~/.local/share/rekol`).
 - `--bin-dir PATH` — override where the `rekol` shim lives (default `~/bin`).
@@ -190,8 +191,9 @@ rekol is yours to remove cleanly. From the repo:
 The uninstaller reverses what the installer set up — the `~/bin/rekol` shim, the
 `rekol`/`memory` skills, the `~/.local/share/rekol` venv, every rekol hook in
 `~/.claude/settings.json` (plus `env.REKOL_HOME`), and the rekol PATH + env
-export lines in `~/.zshrc`. It backs up `settings.json` and `.zshrc` to
-timestamped `.bak` files before editing them, and is idempotent (safe to re-run).
+export lines in your shell rc (`~/.zshrc`, or `~/.bashrc`/`~/.bash_profile` for
+bash). It backs up `settings.json` and the shell rc to timestamped `.bak` files
+before editing them, and is idempotent (safe to re-run).
 
 If you installed to **custom paths** (`--tools-home` / `--bin-dir`), you don't
 need to repeat them: the installer records the resolved paths — including the
@@ -210,8 +212,8 @@ git repo) is preserved. Only the derived index — the local cache outside
 removable, and only with `--purge-index` or by confirming the prompt. The
 durable transcript archive is treated the same way: preserved by default, removed
 only with `--purge-archive` (or by confirming the prompt). Because there is no
-export in v1, archive deletion is irreversible, so `--yes` keeps it. After
-uninstalling, run `source ~/.zshrc` (or open a new terminal). Re-running
+export yet, archive deletion is irreversible, so `--yes` keeps it. After
+uninstalling, open a new terminal (or re-`source` your shell rc). Re-running
 `./install.sh` later works cleanly from that state.
 
 ## Contributing
