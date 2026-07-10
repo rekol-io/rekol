@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- README accuracy pass for the public launch: corrected "runs on macOS" →
+  "macOS and Linux"; generalized the `~/.zshrc`-only references (`--no-shellrc`,
+  the uninstall section, the post-uninstall step) to the shell rc for zsh **and**
+  bash (`~/.bashrc`/`~/.bash_profile`), matching the shipped bash support; and
+  softened "no export in v1" → "no export yet".
 
 ## [0.2.0] - 2026-07-09
 First public release (quiet go-live; announcement Jul 14). Everything below shipped
