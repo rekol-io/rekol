@@ -1,3 +1,3 @@
 """REKOL — layered, cross-indexed memory with local vector search."""
 
-__version__ = "0.1.18"
+__version__ = "0.2.0"

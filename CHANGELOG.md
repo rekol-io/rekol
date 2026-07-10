@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-07-09
+First public release (quiet go-live; announcement Jul 14). Everything below shipped
+during the pre-launch and hold windows.
+
 ### Added
 - README contact line (`leon@rekol.io`) for questions/feedback.
 - rekol skill: a fifth behavioral rule, **"Ask only after searching"** (#35 phase 1) —

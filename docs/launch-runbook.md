@@ -1,11 +1,13 @@
 # Launch Runbook — making `rekol` public
 
-> # 🛑 ON HOLD — DO NOT EXECUTE
-> **The launch is postponed indefinitely** (product `from-business/20260615-2204`, eve of the
-> originally-planned Jun 16). An **external clearance is pending; the new date is TBD.** Do **not**
-> run any step below — repo stays **private**, `rekol.io` stays **dark**, no `v0.2.0` tag/release,
-> no PAT revoke, no CI revert. **Resume only on product's explicit new go**, and re-date the section
-> below when that date is set. This banner stays until product signals a go.
+> # ✅ GO — EXECUTING (Phase 0 quiet go-live, 2026-07-09)
+> Clearance came through; product gave the **GO** (`from-business/20260709-2200`) — **phased**, not
+> big-bang. Phase 0 is a **quiet** public go-live (no announcement) executed 2026-07-09; the Show HN
+> announcement is a separate step Leon runs **Jul 14**. Hard gate: QA re-runs cold-clone acceptance on
+> the new hosted runners → **GREEN target Jul 13**. Repo stays public-but-unannounced until Jul 14.
+>
+> **Safety resequence applied:** deregister the self-hosted runner and swap CI to hosted **before** the
+> public flip (not after) — a self-hosted runner on a public repo is an RCE vector. See the sequence.
 
 This is the ordered procedure for flipping the repo from private to public. It exists
 because the pre-launch CI setup uses a **self-hosted runner on the maintainer's machine**,
@@ -15,18 +17,15 @@ coordinated go.
 
 ## Launch date & gate conditions
 
-**Target date: TBD — POSTPONED.** The original target was Tuesday, June 16 2026 (fallback Wed
-June 17, per product `from-business/20260609-0332`), but the launch is **postponed indefinitely**
-pending an external clearance (`from-business/20260615-2204`). When product sets a new date, replace
-this line with it. Run this runbook that morning **on product's explicit coordinated go** — not on
-the date alone. The flip is gated on ALL of:
+**Phase 0 quiet go-live: 2026-07-09.** Announcement (Show HN + emails): **Jul 14** (Leon). The GO is
+per product `from-business/20260709-2200` (clearance landed; phased rollout, announcement decoupled).
+Gate for the announcement:
 
-1. **macOS clean-install acceptance is green** — the primary platform, verified on a clean
-   environment (see "macOS acceptance" below). *Already met across all surfaces as of 2026-06-13.*
-2. **The external clearance lands** and product sets a new date.
-3. **Product gives the explicit go** on that date.
-
-Until all hold, every breaking step here stays **held**.
+1. **macOS clean-install acceptance is green** — verified across all surfaces as of 2026-06-13 (Intel +
+   arm macOS native, Linux x86_64 + arm64). Being **re-run on the new hosted runners** post-flip.
+2. **QA cold-clone acceptance GREEN on hosted runners** (ubuntu-latest / macos-latest / optional
+   macos-13) — **target Jul 13**. If it slips, the Show HN slips (flag immediately).
+3. **Repo stays quiet** (public but unannounced) until Jul 14.
 
 ## macOS acceptance (gate #1)
 
