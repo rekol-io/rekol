@@ -86,18 +86,21 @@ projects with `exclude_paths` / `.rekolignore`.
 
 ## Bring in your history
 
-A fresh install starts with an essentially empty store. To seed it from work
-you already have:
+Install already **backfilled your existing Claude Code transcripts** into a local
+searchable index, so `rekol search` works over your past work immediately. Beyond
+that:
 
-- **Index past Claude Code sessions** — `rekol session-index --incremental`
-  makes your existing transcripts searchable. `rekol init` wraps this (and the
-  steps below) in confirm prompts. Indexing is opt-in — it runs when you ask.
-  Open Claude Code and say: "set up my rekol memory."
+- **Keep it current** — the SessionEnd hook re-indexes as you work; run
+  `rekol session-index --incremental` any time to force a re-sync (or `--full` to
+  re-walk everything).
 - **Import a notes/docs folder** — `rekol import ~/Documents/ObsidianVault`
   converts a tree of text files into searchable content. This is a mechanical
   conversion that makes your docs findable; the assistant (or you, with `rekol
   capture`) curates them into the `always`/`when`/`topics` layers.
-- **Verify it landed** — `rekol search "something you wrote"`.
+- **Distill durable memory** — tell Claude Code "set up my rekol memory" to
+  propose `always`/`when`/`topics` entries from your history for your review
+  (opt-in; you approve what lands).
+- **Verify** — `rekol search "something you wrote"`.
 
 ## How REKOL gets smart
 
@@ -126,11 +129,16 @@ your corpus is big.
 ## Quickstart (fresh install)
 
 1. `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`
-   — answer the memory-folder prompt (or pre-set `REKOL_HOME`), then it seeds
-   `template/`, builds the first index, and installs the hook + skill.
-2. `rekol init` — indexes any existing Claude Code history and offers to import
-   your notes.
-3. Edit `always/identity.md`, then try `rekol search "..."` / `rekol capture`.
+   — answer the memory-folder prompt (or pre-set `REKOL_HOME`). Install seeds
+   `template/`, **indexes your existing Claude Code history (searchable right
+   away)**, and installs the hook + skill.
+2. **Optional — teach it your project.** Open a new Claude Code session and say
+   **"set up my rekol memory"**: the assistant distills durable
+   `always`/`when`/`topics` memories from your history (you approve what lands)
+   and offers to import your notes. It'll say so if there's nothing to do.
+   *(Terminal equivalent: `rekol init`.)*
+3. `rekol search "something you worked on"` already works from step 1 — then edit
+   `always/identity.md` and `rekol capture` a fact.
 
 ## CLI
 A single `rekol` command with subcommands:
