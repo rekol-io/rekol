@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- README onboarding accuracy: install **auto-indexes your existing Claude Code history**
+  at install (searchable right away) — corrected the Quickstart and "Bring in your history"
+  section, which wrongly implied indexing was opt-in / done by `rekol init`. `rekol init` /
+  "set up my rekol memory" is reframed as the optional curated-distillation + import step
+  (matching the site's A1/A2 framing). Surfaced by a real reinstall.
 ### Added
 - CI now **enforces the per-PR version bump** (#102 part 2): a `version-bump` job fails a
   PR unless its version is ahead of `main` (`scripts/bump_version.py --assert-ahead-of`). A
