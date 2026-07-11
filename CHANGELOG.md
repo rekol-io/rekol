@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- README Quickstart: the "set up my rekol memory" step is now a clear **step 2**
+  (right after install), not an "optional" aside — it read as skippable and confusing.
+  Framed as "open a new Claude Code session and say 'set up my rekol memory'", noting
+  rekol is then used automatically each session. Also normalized bare "Claude" →
+  "Claude Code" (the assistant/product) throughout the README.
+### Fixed
 - README onboarding accuracy: install **auto-indexes your existing Claude Code history**
   at install (searchable right away) — corrected the Quickstart and "Bring in your history"
   section, which wrongly implied indexing was opt-in / done by `rekol init`. `rekol init` /
