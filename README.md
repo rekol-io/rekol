@@ -73,7 +73,7 @@ projects with `exclude_paths` / `.rekolignore`.
 
 - `--dry-run` — print every action without executing it.
 - `--no-hook` — skip the Claude Code SessionStart/hook wiring (settings.json).
-- `--no-skill` — skip installing the `rekol`/`memory` Claude skill.
+- `--no-skill` — skip installing the `rekol`/`memory` Claude Code skill.
 - `--no-shellrc` — skip the shell-rc edits (PATH + `REKOL_HOME` export) — written to
   `~/.zshrc` for zsh, or `~/.bashrc`/`~/.bash_profile` for bash, per your login shell.
 - `--test-mode` — shorthand for `--no-hook --no-skill --no-shellrc`.
@@ -108,7 +108,7 @@ There are two phases, and they're honestly different.
 
 **Day 1 — searchable history (recall).** Install indexes your existing Claude
 Code sessions into a local searchable store, so right after installing you can
-ask about something you worked on and Claude finds it. It's all on your
+ask about something you worked on and Claude Code finds it. It's all on your
 disk — your transcripts are never uploaded. (The assistant-led "set up my rekol
 memory" interview tops this up and is also where the curated layer below comes from.)
 
@@ -120,7 +120,7 @@ rest comes from a memory-bootstrap step you explicitly run — it reads back ove
 your indexed transcripts and proposes durable memories for your review (you
 approve what lands).
 
-**Token honesty:** that bootstrap is *your own Claude* reading *your own*
+**Token honesty:** that bootstrap is *your own Claude Code* reading *your own*
 transcript corpus — there's no bundled model. Running it over a large history is
 real token spend against your account, proportional to how much history you
 feed it. It's opt-in and review-gated for exactly that reason; start scoped if
@@ -128,17 +128,17 @@ your corpus is big.
 
 ## Quickstart (fresh install)
 
-1. `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`
-   — answer the memory-folder prompt (or pre-set `REKOL_HOME`). Install seeds
+1. **Install** — `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`.
+   Answer the memory-folder prompt (or pre-set `REKOL_HOME`). Install seeds
    `template/`, **indexes your existing Claude Code history (searchable right
-   away)**, and installs the hook + skill.
-2. **Optional — teach it your project.** Open a new Claude Code session and say
-   **"set up my rekol memory"**: the assistant distills durable
-   `always`/`when`/`topics` memories from your history (you approve what lands)
-   and offers to import your notes. It'll say so if there's nothing to do.
+   away)**, and wires the Claude Code hook + skill.
+2. **Set it up in Claude Code** — open a **new Claude Code session** and say
+   **"set up my rekol memory."** Claude Code distills durable
+   `always`/`when`/`topics` memories from your history (you approve what lands) and
+   offers to import your notes. From here it uses rekol automatically every session.
    *(Terminal equivalent: `rekol init`.)*
-3. `rekol search "something you worked on"` already works from step 1 — then edit
-   `always/identity.md` and `rekol capture` a fact.
+3. **Try it** — `rekol search "something you worked on"` (already works from step 1),
+   then edit `always/identity.md` and `rekol capture` a fact.
 
 ## CLI
 A single `rekol` command with subcommands:
