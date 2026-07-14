@@ -43,33 +43,39 @@ are table stakes done well, not the headline.
 If no suitable interpreter is found, `install.sh` now stops early with the exact
 fix rather than installing a degraded setup.
 
-## Install (macOS & Linux)
+## Quickstart (macOS & Linux)
+
+**1. Install** — one command:
 ```bash
 git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh
 ```
-The installer asks where to keep your memory (default `~/rekol-memory`,
-press Enter to accept). It then sets up a venv, the `rekol` CLI, the Claude
-Code hooks + skill, seeds a starter memory from `template/`, and builds the
-vector index.
+That's the whole setup: it installs the `rekol` CLI, wires it into Claude Code, and
+**indexes your existing Claude Code history** — so your assistant has ambient memory and your
+past sessions are searchable **right away**. (Answer the memory-folder prompt, or pre-set
+`REKOL_HOME` — see options below.)
 
-**Optional — choose the folder up front** (skips the prompt):
+**2. Teach it your project (recommended)** — in Claude Code, say **"set up my rekol memory."**
+It distills durable `always` / `when` / `topics` memories from your history for you to review —
+you approve what's kept. REKOL already works without this (install indexed your history); run it
+whenever.
+
+<details>
+<summary><strong>Install options &amp; configuration</strong></summary>
+
+**Choose your memory folder up front** (skips the prompt):
 ```bash
 export REKOL_HOME="$HOME/rekol-memory"   # any folder you own
 ```
-Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the index lives in
-a local cache *outside* your memory folder, so syncing your memory never syncs
-the index.
+Sync it via Dropbox/iCloud/git/Syncthing or keep it local — the index lives in a local cache
+*outside* your memory folder, so syncing your memory never syncs the index.
 
-rekol keeps a **local** copy of your sessions so your memory survives even if
-Claude Code rotates its transcripts — it lives on your disk under
-`~/.local/share/rekol/archive`, is never uploaded, and is excluded from sync by
-default. Turn it off with `--no-archive` (or `archive_enabled: false` in
-`rekol.config.yaml`); relocate it with `--archive-dir`; exclude sensitive
-projects with `exclude_paths` / `.rekolignore`.
+**Durable transcript archive** — rekol keeps a **local** copy of your sessions so your memory
+survives even if Claude Code rotates its transcripts. It lives under `~/.local/share/rekol/archive`,
+is never uploaded, and is excluded from sync by default. Turn it off with `--no-archive` (or
+`archive_enabled: false` in `rekol.config.yaml`); relocate it with `--archive-dir`; exclude
+sensitive projects with `exclude_paths` / `.rekolignore`.
 
-## Install options
-
-`./install.sh` accepts these flags (all optional):
+**`./install.sh` flags** (all optional):
 
 - `--dry-run` — print every action without executing it.
 - `--no-hook` — skip the Claude Code SessionStart/hook wiring (settings.json).
@@ -83,6 +89,7 @@ projects with `exclude_paths` / `.rekolignore`.
 - `--no-archive` — disable the durable transcript archive (seeds `archive_enabled: false`).
 - `--archive-dir PATH` — set the durable archive location (default `~/.local/share/rekol/archive`).
 - `--help` — print usage and exit.
+</details>
 
 ## Bring in your history
 
@@ -125,20 +132,6 @@ transcript corpus — there's no bundled model. Running it over a large history 
 real token spend against your account, proportional to how much history you
 feed it. It's opt-in and review-gated for exactly that reason; start scoped if
 your corpus is big.
-
-## Quickstart (fresh install)
-
-1. **Install** — `git clone https://github.com/rekol-io/rekol && cd rekol && ./install.sh`.
-   Answer the memory-folder prompt (or pre-set `REKOL_HOME`). Install seeds
-   `template/`, **indexes your existing Claude Code history (searchable right
-   away)**, and wires the Claude Code hook + skill.
-2. **Set it up in Claude Code** — open a **new Claude Code session** and say
-   **"set up my rekol memory."** Claude Code distills durable
-   `always`/`when`/`topics` memories from your history (you approve what lands) and
-   offers to import your notes. From here it uses rekol automatically every session.
-   *(Terminal equivalent: `rekol init`.)*
-3. **Try it** — `rekol search "something you worked on"` (already works from step 1),
-   then edit `always/identity.md` and `rekol capture` a fact.
 
 ## CLI
 A single `rekol` command with subcommands:

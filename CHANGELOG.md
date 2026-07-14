@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- README "sells in 30 seconds" restructure: lead with a tight **2-step Quickstart**
+  (install → "teach it your project (recommended)") and collapse the 11 install.sh flags +
+  REKOL_HOME/sync/archive config into a `<details>`, so the simple path isn't buried under the
+  options wall. Step 2 uses the calibrated **recommended** (not "optional") framing.
 ### Fixed
 - README Quickstart: the "set up my rekol memory" step is now a clear **step 2**
   (right after install), not an "optional" aside — it read as skippable and confusing.
