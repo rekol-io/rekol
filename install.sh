@@ -838,29 +838,54 @@ if [[ "$DO_HOOK" == "1" ]]; then
     say "jq not found; printing SessionEnd snippet — merge manually into ${SETTINGS_JSON}"
     cat "${SNIPPET_SE}"
   else
-    HAS_SE_HOOK="$(
-      jq --slurpfile snip "${SNIPPET_SE}" '
-        (.hooks.SessionEnd // []) as $cur
-        | ($snip[0].hooks.SessionEnd[0].hooks[1].command) as $cmd
-        | any($cur[]; .hooks // [] | any(.command == $cmd))
-      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    # Classify the current state by matching the STABLE substring
+    # `session-index --incremental` (NOT the exact command), so an older bare
+    # handler is UPGRADED in place to the detached (`nohup ... &`) form rather than
+    # a second session-index handler being appended on reinstall (#135).
+    #   add     — no session-index handler present (fresh install)
+    #   current — already the detached form (no-op)
+    #   upgrade — an older bare handler exists; rewrite its command in place
+    SE_STATE="$(
+      jq --slurpfile snip "${SNIPPET_SE}" -r '
+        ($snip[0].hooks.SessionEnd[0].hooks[1].command) as $new
+        | [ .hooks.SessionEnd[]?.hooks[]?.command // empty
+            | select(test("session-index --incremental")) ] as $found
+        | if ($found | length) == 0 then "add"
+          elif ($found | all(. == $new)) then "current"
+          else "upgrade" end
+      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'add'
     )"
 
-    if [[ "$HAS_SE_HOOK" == "true" ]]; then
-      say "SessionEnd transcript-index hook already present — no-op"
+    if [[ "$SE_STATE" == "current" ]]; then
+      say "SessionEnd transcript-index hook already present (detached) — no-op"
+    elif [[ "$DRY_RUN" == "1" ]]; then
+      say "DRY-RUN: ${SE_STATE} SessionEnd transcript-index hook in ${SETTINGS_JSON}"
     else
       # Independent backup for this step (earlier backups predate the 7.5/7C
       # mutations and would not reflect the current on-disk state).
       local_settings_se_backup="${SETTINGS_JSON}.bak-se-${TS}"
-      run "cp '${SETTINGS_JSON}' '${local_settings_se_backup}'"
+      cp "${SETTINGS_JSON}" "${local_settings_se_backup}"
       log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_se_backup}"
-
       local_tmp="${SETTINGS_JSON}.tmp.$$"
-      run "jq --slurpfile snip '${SNIPPET_SE}' \
-        '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + \$snip[0].hooks.SessionEnd)' \
-        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "MERGED SessionEnd transcript-index hook into ${SETTINGS_JSON}"
-      say "added SessionEnd transcript-index hook to ${SETTINGS_JSON}"
+
+      if [[ "$SE_STATE" == "upgrade" ]]; then
+        # Rewrite any existing session-index handler's command to the detached form
+        # IN PLACE — no duplicate handler.
+        jq --slurpfile snip "${SNIPPET_SE}" '
+          ($snip[0].hooks.SessionEnd[0].hooks[1].command) as $new
+          | .hooks.SessionEnd |= map(.hooks |= map(
+              if (.command // "" | test("session-index --incremental")) then .command = $new else . end))
+        ' "${SETTINGS_JSON}" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
+        log_journal "UPGRADED SessionEnd transcript-index hook to detached form in ${SETTINGS_JSON}"
+        say "upgraded SessionEnd transcript-index hook to the detached form in ${SETTINGS_JSON}"
+      else
+        # Fresh install — append the snippet's SessionEnd handlers.
+        jq --slurpfile snip "${SNIPPET_SE}" '
+          .hooks.SessionEnd = ((.hooks.SessionEnd // []) + $snip[0].hooks.SessionEnd)
+        ' "${SETTINGS_JSON}" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
+        log_journal "MERGED SessionEnd transcript-index hook into ${SETTINGS_JSON}"
+        say "added SessionEnd transcript-index hook to ${SETTINGS_JSON}"
+      fi
     fi
   fi
 fi

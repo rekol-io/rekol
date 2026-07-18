@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- SessionEnd hook no longer blocks session end or fails with "Hook cancelled" (#135):
+  `rekol session-index --incremental` now runs **detached** (`nohup ... &`) so a large
+  backlog can't exceed Claude Code's hook timeout — it finishes in the background, and the
+  next run catches up if interrupted. `install.sh` **upgrades an existing bare handler in
+  place** on reinstall (no duplicate). macOS-safe (no `setsid` dependency).
 ### Changed
 - README "sells in 30 seconds" restructure: lead with a tight **2-step Quickstart**
   (install → "teach it your project (recommended)") and collapse the 11 install.sh flags +
