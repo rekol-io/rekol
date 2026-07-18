@@ -608,7 +608,9 @@ PY
   SBHOME="$TESTROOT/sandhome-nudge"
   mkdir -p "$SBHOME/.claude"
   # A SessionEnd block as a PR#1-era install would have it: capture-reminder +
-  # session-index, but no review nudge. Step 7D no-ops on this; Step 7G adds it.
+  # (bare) session-index, but no review nudge. Step 7D now UPGRADES the bare
+  # session-index to the detached `nohup ... &` form in place (#135); Step 7G adds
+  # the nudge.
   printf '%s' \
     '{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"},{"type":"command","command":"rekol session-index --incremental"}]}]}}' \
     > "$SBHOME/.claude/settings.json"
@@ -627,8 +629,13 @@ PY
   run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(. == "rekol review --nudge")' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
-  # session-index must not be duplicated by the merge.
-  run jq -e '[.hooks.SessionEnd[].hooks[].command] | map(select(. == "rekol session-index --incremental")) | length == 1' \
+  # session-index must not be duplicated by the merge — exactly one handler.
+  run jq -e '[.hooks.SessionEnd[].hooks[].command | select(test("session-index --incremental"))] | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  # #135: the bare handler was upgraded IN PLACE to the detached (nohup ... &) form,
+  # so a large backlog can't block session end / exceed the hook timeout.
+  run jq -e '[.hooks.SessionEnd[].hooks[].command | select(test("session-index --incremental"))][0] | test("^nohup .* &$")' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
 }

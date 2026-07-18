@@ -1,5 +1,5 @@
 {
-  "_comment": "Optional opt-in hook. Merge into ~/.claude/settings.json hooks.SessionEnd. First handler reminds you to capture durable memories (does NOT auto-extract — heuristic-only and explicitly user-driven). Second handler incrementally reindexes Claude Code session transcripts so rekol search can surface them without a separate cron. Third handler nudges (only when overdue>0) to re-confirm durable always-current memory.",
+  "_comment": "Optional opt-in hook. Merge into ~/.claude/settings.json hooks.SessionEnd. First handler reminds you to capture durable memories (does NOT auto-extract — heuristic-only and explicitly user-driven). Second handler incrementally reindexes Claude Code session transcripts so rekol search can surface them without a separate cron — run DETACHED (nohup ... &) so a large backlog can't block session end or exceed the hook timeout ('Hook cancelled'); it finishes in the background and the next run catches up if interrupted. Third handler nudges (only when overdue>0) to re-confirm durable always-current memory.",
   "hooks": {
     "SessionEnd": [
       {
@@ -11,7 +11,7 @@
           },
           {
             "type": "command",
-            "command": "rekol session-index --incremental"
+            "command": "nohup rekol session-index --incremental >/dev/null 2>&1 &"
           },
           {
             "type": "command",
