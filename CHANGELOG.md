@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- Harness-written memory files are no longer silently invisible to search (#123, part 3):
+  `parse_file` now falls back to Claude Code's nested `metadata.type` when flat `type` is
+  absent, and maps its taxonomy onto rekol layers (`user`→`always`, `feedback`→`when`,
+  `project`→`topic`, `reference`→`knowledge`). Genuinely unknown types are still rejected
+  (not silently defaulted) so typos surface via `rekol doctor` rather than hiding.
 - SessionEnd hook no longer blocks session end or fails with "Hook cancelled" (#135):
   `rekol session-index --incremental` now runs **detached** (`nohup ... &`) so a large
   backlog can't exceed Claude Code's hook timeout — it finishes in the background, and the
