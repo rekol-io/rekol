@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- `rekol doctor` disk-coverage check (#123, part 1): walks `$REKOL_HOME`'s indexable
+  layers, diffs against the curated index, and reports every on-disk `.md` file that is
+  **rejected at index time** (invalid frontmatter) with its reason — e.g.
+  `topics/foo.md — missing required field 'type'`. These files stay readable on disk but
+  are invisible to `rekol search`, and no other check caught them. "Index is healthy" is
+  now unclaimable while indexable files are being rejected (exit 1). Transient
+  valid-but-unindexed staleness is deliberately not flagged (the next index run clears it).
 ### Fixed
 - Harness-written memory files are no longer silently invisible to search (#123, part 3):
   `parse_file` now falls back to Claude Code's nested `metadata.type` when flat `type` is

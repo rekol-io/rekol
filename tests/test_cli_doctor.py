@@ -360,3 +360,45 @@ def test_doctor_silent_on_include_scope_when_unconfigured(tmp_path: Path, monkey
     cfg = load_config()
     report = run_doctor(cfg, HashingEmbedder(dim=384))
     assert not [f for f in report.findings if f.label == "include scope"]
+
+
+# --------------------------- curated coverage (#123) ---------------------------
+
+
+def test_doctor_curated_coverage_ok_when_all_indexed(tmp_path: Path, monkeypatch) -> None:
+    """Every on-disk curated file indexed → coverage OK, counts match."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    _build_curated_index(home)
+    cfg = load_config()
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert len(coverage) == 1
+    assert coverage[0].status is Status.OK
+    assert "2/2" in coverage[0].detail  # both seeded files indexed
+
+
+def test_doctor_flags_rejected_file_invisible_to_search(tmp_path: Path, monkeypatch) -> None:
+    """A file the scanner rejects is on disk but not indexed — coverage must name it
+    with its reason, mark the report degraded, and the CLI must exit 1 (#123).
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    # Nested unknown type is not mapped (#123 part 3), so it never enters the index
+    # and would otherwise be silently invisible to search.
+    (home / "topics" / "broken.md").write_text(
+        "---\nname: broken\ndescription: unindexable\nmetadata:\n  type: bogus\n---\n\nbody\n"
+    )
+    _build_curated_index(home)  # rebuild skips the broken file, does not crash
+    cfg = load_config()
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert len(coverage) == 1
+    assert coverage[0].status is Status.PROBLEM
+    assert "topics/broken.md" in coverage[0].detail
+    assert "invisible to search" in coverage[0].detail
+    assert "2/3" in coverage[0].detail  # 2 of 3 on-disk files indexed
+    assert report.is_healthy is False
+
+    result = CliRunner().invoke(doctor_main, [])
+    assert result.exit_code == 1, result.output
+    assert "topics/broken.md" in result.output
+    assert "rekol index update" in result.output

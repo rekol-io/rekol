@@ -25,12 +25,15 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 import click
 
 from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
+from rekol.indexer import _iter_memory_files, _skip_reason
+from rekol.model import ValidationError, parse_file
 from rekol.onboarding.detect import default_cloud_sync_candidates
 from rekol.sessions.store import SessionStore
 from rekol.store import CURATED_SCHEMA_VERSION, IndexModelMismatchError, IndexStore
@@ -239,6 +242,89 @@ def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     finally:
         store.close()
     return findings
+
+
+# Cap the per-file offender list so a store with many rejects doesn't flood the
+# report; the count is always exact, only the enumeration is truncated.
+_MAX_LISTED_REJECTS = 20
+
+
+def _relpath(path: Path, root: Path) -> str:
+    """Path relative to the store root for a compact report, or absolute on failure."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
+    """Disk-vs-index coverage for the curated store (#123).
+
+    The scanner walks the whole store on every index run and REJECTS files whose
+    frontmatter fails validation — they stay perfectly readable on disk but never
+    enter the index, so they are silently invisible to ``rekol search`` and no
+    other check notices (the curated-content check only inspects files already in
+    the index). Walk the indexable layers, diff against the ``files`` table, and
+    name every rejected on-disk file with its reason. "Index is healthy" must be
+    unclaimable while indexable files are being rejected.
+
+    A file that parses cleanly but is not yet indexed is transient staleness (the
+    next incremental run picks it up), so it is deliberately NOT flagged here.
+    """
+    db_path = cfg.index_db_path
+    if not db_path.exists():
+        return []  # an unbuilt index is already reported by _check_curated_index
+    on_disk = list(_iter_memory_files(cfg.memory_home))
+    if not on_disk:
+        return []
+
+    try:
+        store = IndexStore(db_path=db_path, dim=embedder.dim, embedding_model=cfg.embedding_model)
+    except sqlite3.DatabaseError:
+        return []  # corruption is already reported by _check_curated_index
+    try:
+        indexed = {row["path"] for row in store.conn.execute("SELECT path FROM files")}
+    except sqlite3.DatabaseError:
+        return []  # ditto — surfaced by the curated-index check that runs first
+    finally:
+        store.close()
+
+    indexed_count = sum(1 for path in on_disk if str(path) in indexed)
+    rejected: list[tuple[str, str]] = []
+    for path in on_disk:
+        if str(path) in indexed:
+            continue
+        try:
+            parse_file(path)
+        except ValidationError as exc:
+            rejected.append((_relpath(path, cfg.memory_home), _skip_reason(exc)))
+        except OSError as exc:
+            rejected.append((_relpath(path, cfg.memory_home), f"unreadable: {exc}"))
+        # else: valid but not yet indexed → transient staleness, not reported here.
+
+    if not rejected:
+        return [
+            Finding(
+                label="curated coverage",
+                status=Status.OK,
+                detail=f"{indexed_count}/{len(on_disk)} curated files indexed (none rejected)",
+            )
+        ]
+    shown = rejected[:_MAX_LISTED_REJECTS]
+    lines = "\n".join(f"      {rel} — {reason}" for rel, reason in shown)
+    if len(rejected) > _MAX_LISTED_REJECTS:
+        lines += f"\n      … and {len(rejected) - _MAX_LISTED_REJECTS} more"
+    return [
+        Finding(
+            label="curated coverage",
+            status=Status.PROBLEM,
+            detail=(
+                f"{indexed_count}/{len(on_disk)} curated files indexed — "
+                f"{len(rejected)} invisible to search (rejected at index time):\n{lines}"
+            ),
+            remedy="fix the frontmatter of the files above, then `rekol index update`",
+        )
+    ]
 
 
 def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
@@ -644,6 +730,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
         )
     ]
     findings.extend(_check_curated_index(cfg, embedder))
+    findings.extend(_check_curated_coverage(cfg, embedder))
     findings.extend(_check_session_index(cfg, embedder))
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
