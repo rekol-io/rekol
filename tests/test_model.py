@@ -77,6 +77,54 @@ def test_parse_file_rejects_non_list_scalar_for_list_field(tmp_path: Path) -> No
     assert "must be a list" in str(ei.value)
 
 
+def test_parse_file_accepts_nested_metadata_type(tmp_path: Path) -> None:
+    # Claude Code's built-in memory format nests `type` under `metadata:`; a
+    # nested rekol-valid value must index instead of being silently rejected (#123).
+    path = tmp_path / "nested.md"
+    path.write_text(
+        "---\nname: x\ndescription: y\nmetadata:\n  node_type: memory\n  type: topic\n---\n\nbody\n"
+    )
+    assert parse_file(path).type == "topic"
+
+
+@pytest.mark.parametrize(
+    ("harness_type", "expected_layer"),
+    [("user", "always"), ("feedback", "when"), ("project", "topic"), ("reference", "knowledge")],
+)
+def test_parse_file_maps_nested_harness_type_to_rekol_layer(
+    tmp_path: Path, harness_type: str, expected_layer: str
+) -> None:
+    path = tmp_path / "harness.md"
+    path.write_text(
+        f"---\nname: x\ndescription: y\nmetadata:\n  type: {harness_type}\n---\n\nbody\n"
+    )
+    assert parse_file(path).type == expected_layer
+
+
+def test_parse_file_maps_flat_harness_type(tmp_path: Path) -> None:
+    # A harness type written flat (not nested) is mapped too, for consistency.
+    path = tmp_path / "flat-harness.md"
+    path.write_text("---\nname: x\ndescription: y\ntype: feedback\n---\n\nbody\n")
+    assert parse_file(path).type == "when"
+
+
+def test_parse_file_flat_type_takes_precedence_over_nested(tmp_path: Path) -> None:
+    path = tmp_path / "both.md"
+    path.write_text(
+        "---\nname: x\ndescription: y\ntype: knowledge\nmetadata:\n  type: topic\n---\n\nbody\n"
+    )
+    assert parse_file(path).type == "knowledge"
+
+
+def test_parse_file_rejects_unknown_nested_type(tmp_path: Path) -> None:
+    # Unknown values are not mapped — they still fail so typos stay visible.
+    path = tmp_path / "unknown.md"
+    path.write_text("---\nname: x\ndescription: y\nmetadata:\n  type: bogus\n---\n\nbody\n")
+    with pytest.raises(ValidationError) as ei:
+        parse_file(path)
+    assert "type" in str(ei.value)
+
+
 def test_normalize_ts_date_object_date_only():
     assert _normalize_ts(dt.date(2026, 5, 31), date_only=True) == "2026-05-31"
 

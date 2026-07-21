@@ -20,6 +20,18 @@ import frontmatter
 ALLOWED_TYPES = frozenset({"always", "when", "topic", "knowledge"})
 REQUIRED_FIELDS = ("name", "description", "type")
 
+# Claude Code's built-in memory format uses a different taxonomy than rekol's
+# four layers (user/feedback/project/reference). Map each onto the nearest rekol
+# layer so a harness-written file indexes instead of being silently rejected and
+# invisible to search (#123). Unknown values are NOT mapped — they still fail
+# validation so genuine typos surface via `rekol doctor` rather than hiding.
+_HARNESS_TYPE_MAP = {
+    "user": "always",
+    "feedback": "when",
+    "project": "topic",
+    "reference": "knowledge",
+}
+
 # scope is reserved for a future shared-team store but is NOT read or validated
 # in v0.1. We accept any value (default "private") so that a memory file which
 # already uses scope: informally still parses and indexes instead of being
@@ -150,6 +162,20 @@ def parse_file(path: Path) -> MemoryFile:
     meta = post.metadata
     if not meta:
         raise ValidationError(f"{path}: missing frontmatter block")
+
+    # Be liberal in what we accept (#123). Claude Code's built-in memory format
+    # nests `type` under `metadata:` — fall back to it when flat `type` is absent
+    # so a harness-written file isn't silently invisible to search. Then map the
+    # harness taxonomy onto rekol layers. A genuinely unknown value is left as-is
+    # and rejected by the ALLOWED_TYPES check below (surfaced via `rekol doctor`).
+    metadata_block = meta.get("metadata")
+    if meta.get("type") in (None, "") and isinstance(metadata_block, dict):
+        nested_type = metadata_block.get("type")
+        if nested_type not in (None, ""):
+            meta = {**meta, "type": nested_type}
+    flat_type = meta.get("type")
+    if isinstance(flat_type, str) and flat_type in _HARNESS_TYPE_MAP:
+        meta = {**meta, "type": _HARNESS_TYPE_MAP[flat_type]}
 
     # Validate required fields are present and non-empty.
     for field_name in REQUIRED_FIELDS:
