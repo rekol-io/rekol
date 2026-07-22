@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- SessionStart banner surfaces invisible memory files (#123, part 2): the indexer
+  persists the current disk-vs-index gap (count + paths of files rejected at index time)
+  to a `skipped.json` manifest in the local cache after every run, and a new
+  `rekol _hook session-coverage` handler prints one line at session start when it's
+  non-zero — `[rekol] ⚠ N memory files invisible to search — run rekol doctor`. Push,
+  don't wait for pull. The manifest reflects the **full** gap (not just a given
+  incremental run's skips), so the banner can't flicker off on an unrelated edit, and
+  clears to 0 once the files are fixed. Wired as its own SessionStart handler (never
+  touches the memory-loader command); `install.sh` adds it idempotently to existing installs.
 - `rekol doctor` disk-coverage check (#123, part 1): walks `$REKOL_HOME`'s indexable
   layers, diffs against the curated index, and reports every on-disk `.md` file that is
   **rejected at index time** (invalid frontmatter) with its reason — e.g.

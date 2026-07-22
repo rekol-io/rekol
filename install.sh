@@ -652,6 +652,37 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7B — SessionStart invisible-files coverage banner (#123 part 2)
+# =============================================================================
+# `rekol _hook session-coverage` prints a one-line warning at session start when
+# memory files were rejected at index time and are thus invisible to search. It
+# is installed as its OWN SessionStart handler so it never touches the delicate
+# memory-loader command in Step 7 (whose exact-match idempotency must stay
+# intact). Existing installs — whose memory-loader Step 7 already matched and
+# no-op'd — get the banner here. Idempotent: no-op when any SessionStart command
+# already invokes it.
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  COV_CMD='rekol _hook session-coverage 2>/dev/null || true'
+  HAS_COV="$(
+    jq '
+      (.hooks.SessionStart // []) as $cur
+      | any($cur[]; (.hooks // []) | any(.command // "" | contains("_hook session-coverage")))
+    ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+
+  if [[ "$HAS_COV" == "true" ]]; then
+    say "SessionStart coverage banner already present — no-op"
+  else
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq --arg cmd '${COV_CMD}' \
+      '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "ADDED SessionStart coverage banner to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 7A — strip the deprecated SessionStart ingest-nudge handler
 # =============================================================================
 # An earlier rekol version wired a `rekol _hook session-start-nudge` handler into

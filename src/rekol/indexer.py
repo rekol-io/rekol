@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .chunker import chunk_body
+from .config import SKIP_MANIFEST_NAME
 from .embeddings import BaseEmbedder
 from .model import ValidationError, parse_file
 from .store import IndexStore
@@ -259,6 +261,7 @@ class Indexer:
         # now points at the unlinked inode), then derive INDEX.md from disk.
         self.store.reopen()
         self._write_index_md()
+        self._write_skip_manifest()
         return stats
 
     def update(self) -> IndexStats:
@@ -297,7 +300,41 @@ class Indexer:
                 self.store.delete_file(old_path)
                 stats.files_removed += 1
         self._write_index_md()
+        self._write_skip_manifest()
         return stats
+
+    def _write_skip_manifest(self) -> None:
+        """Persist the count of on-disk files currently invisible to search (#123).
+
+        A file rejected at index time stays on disk but out of the index, so it is
+        silently unsearchable. Record the FULL disk-vs-index gap — not just this
+        run's skips, since an incremental ``update()`` only sees changed files and
+        would undercount an already-broken file left untouched. The SessionStart
+        hook reads the count from here so it need not walk the store itself.
+
+        Always rewritten (even to 0) so a store that was fixed clears the banner.
+        Best-effort: a write failure must never fail the index run it rides on.
+        """
+        try:
+            indexed = {f["path"] for f in self.store.all_files()}
+            uncovered = sorted(
+                self._relpath(path)
+                for path in _iter_memory_files(self.memory_root)
+                if str(path) not in indexed
+            )
+            self.index_dir.mkdir(parents=True, exist_ok=True)
+            (self.index_dir / SKIP_MANIFEST_NAME).write_text(
+                json.dumps({"count": len(uncovered), "paths": uncovered})
+            )
+        except OSError:
+            return  # cache write failure is non-fatal — the index itself is fine
+
+    def _relpath(self, path: Path) -> str:
+        """Path relative to the store root for a compact manifest, else absolute."""
+        try:
+            return str(path.relative_to(self.memory_root))
+        except ValueError:
+            return str(path)
 
     def _write_index_md(self) -> None:  # noqa: C901  # complex but stable; refactor tracked separately
         """Regenerate ``INDEX.md`` FROM THE STORE: tag → files, alias → file, listing.

@@ -767,6 +767,66 @@ PY
   [ "$status" -ne 0 ]
 }
 
+@test "fresh install wires the SessionStart coverage banner handler (#123)" {
+  # `rekol _hook session-coverage` warns when memory files are invisible to search.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-cov-fresh"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-cov-fresh"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("_hook session-coverage"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-install adds the coverage banner to an existing block exactly once (#123)" {
+  # An existing install has the memory-loader handler but no coverage handler yet.
+  # (Re-)install must ADD the coverage handler, keep the memory-loader, and stay
+  # idempotent — a second install must not wire a duplicate.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-cov-add"
+  mkdir -p "$SBHOME/.claude"
+  # Pre-existing SessionStart block: memory-loader only (the delicate command).
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\"; rekol _hook session-confidence 2>/dev/null || true"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-cov-add"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  # The memory-loader survives...
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("REKOL.md"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  # ...and exactly ONE coverage handler exists after two installs (idempotent).
+  run jq '[.hooks.SessionStart[]?.hooks[]?.command | select(contains("_hook session-coverage"))] | length' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # Phase 8 — durable transcript archive flags
 # ---------------------------------------------------------------------------
