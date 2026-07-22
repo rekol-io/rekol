@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rekol"
-version = "0.2.10"
+version = "0.2.11"
 description = "Layered, cross-indexed memory system with local vector search for Claude Code"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -39,6 +39,12 @@ rekol = "rekol.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Vendor the starter-pack template into the built wheel so `find_template_dir()`
+# resolves it via importlib.resources off an installed package, not just an
+# editable/source checkout (#56).
+[tool.setuptools.package-data]
+rekol = ["template/**/*"]
 
 [tool.pytest.ini_options]
 # Put tests/ on sys.path so shared test helpers (cache_helpers) import cleanly

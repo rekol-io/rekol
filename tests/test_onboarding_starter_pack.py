@@ -42,6 +42,19 @@ def test_find_template_dir_locates_bundled_template() -> None:
     assert (found / "REKOL.md").is_file()
 
 
+def test_find_template_dir_resolves_inside_package_not_repo_root() -> None:
+    """#56: the template must resolve as package data (inside the installed rekol
+    package) so it survives a wheel install — not via a repo-root path that only
+    exists in an editable checkout. Guards against moving it back out of the package.
+    """
+    import rekol
+
+    found = find_template_dir()
+    assert found is not None
+    package_dir = Path(rekol.__file__).resolve().parent
+    assert found.resolve().is_relative_to(package_dir)
+
+
 def test_bundled_template_covers_all_four_layers() -> None:
     """Every layer (always/when/topics/knowledge) ships a directive scaffold (#60)."""
     template = find_template_dir()
@@ -98,9 +111,11 @@ def test_anatomy_tour_lives_in_docs_not_the_pack() -> None:
     # Not in the seedable pack — it must never land in a user's memory home.
     assert not (template / "knowledge" / "anatomy-of-good-memory.md.example").exists()
     assert not list(template.rglob("anatomy-of-good-memory*"))
-    # It lives in docs/ instead.
-    docs_anatomy = template.parent / "docs" / "anatomy-of-good-memory.md"
-    assert docs_anatomy.is_file()
+    # It lives in the repo docs/ instead (repo-level, not package data — so never
+    # shipped in the wheel or seeded). Resolve the repo root from this test file,
+    # not from the template dir, which now lives inside the package (#56).
+    repo_root = Path(__file__).resolve().parents[1]
+    assert (repo_root / "docs" / "anatomy-of-good-memory.md").is_file()
 
 
 def test_seed_starter_pack_copies_and_strips_example(tmp_path: Path) -> None:
