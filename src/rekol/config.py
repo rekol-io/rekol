@@ -15,6 +15,13 @@ from pathlib import Path
 
 import yaml
 
+# Name of the skip manifest the indexer writes into the local cache (index_dir)
+# after each run: the count + paths of on-disk files invisible to search because
+# they were rejected at index time. Read by the SessionStart coverage hook (#123).
+# Lives here (not in indexer.py) so the hook can read it without importing the
+# indexer's heavy embedding stack just to resolve a filename.
+SKIP_MANIFEST_NAME = "skipped.json"
+
 DEFAULTS: dict = dict(
     embedding_model="BAAI/bge-small-en-v1.5",
     always_on_budget_bytes=8192,

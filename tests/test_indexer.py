@@ -1,11 +1,19 @@
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from rekol.config import SKIP_MANIFEST_NAME
 from rekol.embeddings import HashingEmbedder
 from rekol.indexer import Indexer
 from rekol.store import CURATED_SCHEMA_VERSION, IndexStore
+
+_BROKEN_FM = "---\nname: broken\ndescription: x\ntype: bogus\n---\n\nbody\n"
+
+
+def _manifest(memory_root: Path) -> dict:
+    return json.loads((memory_root / ".index" / SKIP_MANIFEST_NAME).read_text())
 
 
 def _write(
@@ -628,3 +636,54 @@ def test_rebuild_cleans_up_stale_temp_db(memory_root: Path) -> None:
     assert leftovers == [], f"stale temp files left behind: {leftovers}"
     assert not stale.exists()
     store.close()
+
+
+# ------------------------- skip manifest (#123 part 2) -------------------------
+
+
+def test_rebuild_writes_zero_skip_manifest_when_all_valid(memory_root: Path) -> None:
+    _make_indexer(memory_root).rebuild()
+    manifest = _manifest(memory_root)
+    assert manifest["count"] == 0
+    assert manifest["paths"] == []
+
+
+def test_rebuild_manifest_counts_rejected_file(memory_root: Path) -> None:
+    (memory_root / "topics" / "broken.md").write_text(_BROKEN_FM)
+    _make_indexer(memory_root).rebuild()
+    manifest = _manifest(memory_root)
+    assert manifest["count"] == 1
+    assert manifest["paths"] == ["topics/broken.md"]
+
+
+def test_incremental_manifest_reflects_full_gap_not_just_changed(memory_root: Path) -> None:
+    """The accuracy guarantee: update() only processes CHANGED files, but the
+    manifest must still count a file that broke earlier and is untouched now —
+    otherwise the banner would flicker off on the next unrelated edit."""
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+
+    # Break a new file; update() sees it as changed and skips it.
+    (memory_root / "topics" / "broken.md").write_text(_BROKEN_FM)
+    idx.update()
+    assert _manifest(memory_root)["count"] == 1
+
+    # Edit a DIFFERENT valid file. broken.md is unchanged → not in this run's
+    # skipped_files — but the manifest must still count it (full disk-vs-index gap).
+    _write(memory_root / "topics" / "prometheus.md", "Prometheus", "topic", "# P\n\nchanged.\n")
+    idx.update()
+    manifest = _manifest(memory_root)
+    assert manifest["count"] == 1
+    assert manifest["paths"] == ["topics/broken.md"]
+
+
+def test_manifest_clears_when_rejected_file_is_fixed(memory_root: Path) -> None:
+    (memory_root / "topics" / "broken.md").write_text(_BROKEN_FM)
+    idx = _make_indexer(memory_root)
+    idx.rebuild()
+    assert _manifest(memory_root)["count"] == 1
+
+    # Fix the frontmatter → next incremental run indexes it → manifest clears.
+    _write(memory_root / "topics" / "broken.md", "Fixed", "topic", "# Fixed\n\nok.\n")
+    idx.update()
+    assert _manifest(memory_root)["count"] == 0

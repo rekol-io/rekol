@@ -12,8 +12,10 @@ SNIPPET = REPO_ROOT / "hooks" / "sessionstart-snippet.json"
 
 def _hook_command() -> str:
     data = json.loads(SNIPPET.read_text(encoding="utf-8"))
-    # Snippet shape: {"hooks":{"SessionStart":[{"hooks":[{"command": "..."}]}]}}
-    # Walk to the single command string regardless of nesting depth.
+    # Snippet shape: {"hooks":{"SessionStart":[{"hooks":[{"command": "..."}]}, ...]}}
+    # The block now has multiple handlers (memory loader + the #123 coverage
+    # banner); these tests exercise the memory-loader command — the one that cats
+    # the index file. Walk to every command, then select that one.
     found: list[str] = []
 
     def walk(node: object) -> None:
@@ -27,8 +29,9 @@ def _hook_command() -> str:
                 walk(v)
 
     walk(data)
-    assert len(found) == 1, f"expected exactly one command, got {len(found)}"
-    return found[0]
+    loaders = [command for command in found if "REKOL.md" in command]
+    assert len(loaders) == 1, f"expected exactly one memory-loader command, got {len(loaders)}"
+    return loaders[0]
 
 
 def _run(command: str, home: Path) -> str:

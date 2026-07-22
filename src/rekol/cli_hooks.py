@@ -207,3 +207,30 @@ def session_confidence() -> None:
         click.echo(line)
     if extra > 0:
         click.echo(f"  …and {extra} more — run `rekol review`.")
+
+
+@hook_group.command(name="session-coverage")
+def session_coverage() -> None:
+    """Warn at SessionStart when memory files are invisible to search (#123 part 2).
+
+    A file rejected at index time (invalid frontmatter) stays readable on disk but
+    never enters the index, so the user has NO signal it is unsearchable. The
+    indexer persists the current invisible-file count to the cache; this reads it
+    and prints one line when non-zero — push, don't wait for the user to pull.
+
+    Rides on the SessionStart injection (appended with ``|| true``), so it must
+    NEVER break it: any error prints nothing and exits 0. Silent when the count is
+    zero or the manifest is absent (nothing indexed yet).
+    """
+    try:
+        from rekol.config import SKIP_MANIFEST_NAME, load_config
+
+        manifest = load_config().index_dir / SKIP_MANIFEST_NAME
+        count = int(json.loads(manifest.read_text()).get("count", 0))
+    except Exception:  # noqa: BLE001 — a hook must never break the session injection
+        return
+    if count <= 0:
+        return
+    noun = "file" if count == 1 else "files"
+    click.echo("")
+    click.echo(f"[rekol] ⚠ {count} memory {noun} invisible to search — run `rekol doctor`")

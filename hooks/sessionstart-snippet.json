@@ -9,6 +9,15 @@
             "command": "HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; IDX=\"$HOME_DIR/REKOL.md\"; [ -f \"$IDX\" ] || IDX=\"$HOME_DIR/MEMORY.md\"; if [ -n \"$HOME_DIR\" ] && [ -f \"$IDX\" ]; then echo \"[rekol] $HOME_DIR loaded — consult $(basename \"$IDX\"), when/*.md, topics/*.md, or run rekol search\"; cat \"$IDX\"; elif [ -z \"$HOME_DIR\" ]; then echo '[rekol] memory home not configured (set REKOL_HOME)'; else echo \"[rekol] no REKOL.md found in $HOME_DIR — run ./install.sh to seed it, or create REKOL.md\"; fi; rekol _hook session-confidence 2>/dev/null || true"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rekol _hook session-coverage 2>/dev/null || true"
+          }
+        ]
       }
     ]
   }
