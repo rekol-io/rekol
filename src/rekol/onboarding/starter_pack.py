@@ -20,6 +20,7 @@ the model could recall as truth. T1 owns wiring the copy into the init flow.
 
 from __future__ import annotations
 
+import importlib.resources
 import shutil
 from pathlib import Path
 
@@ -27,16 +28,21 @@ from pathlib import Path
 def find_template_dir() -> Path | None:
     """Locate the bundled ``template/`` directory, or ``None`` if not found.
 
-    The template ships at the repository root (``<root>/template``), one level
-    above ``src/`` — i.e. two parents up from this package. We resolve relative
-    to this module rather than the cwd so init works from any working directory.
-    Returns ``None`` (rather than raising) when the directory is absent — e.g. a
-    packaging layout that did not vendor it — so the caller degrades gracefully
-    instead of crashing onboarding.
+    The template ships as **package data** inside the installed ``rekol`` package
+    (``rekol/template``), so it resolves for BOTH an editable install and a built
+    wheel. The previous repo-root lookup (``parents[3]/template``) only existed in
+    an editable/source checkout and vanished off an installed wheel — ``template/``
+    was not declared package data (#56). We resolve through ``importlib.resources``
+    and cast to a concrete ``Path``: rekol always installs unzipped on disk, so the
+    filesystem walk in :func:`seed_starter_pack` keeps working. Returns ``None``
+    (rather than raising) when the directory is absent so the caller degrades
+    gracefully instead of crashing onboarding.
     """
-    # rekol/onboarding/starter_pack.py -> rekol/onboarding -> rekol -> src -> root
-    repo_root = Path(__file__).resolve().parents[3]
-    template = repo_root / "template"
+    try:
+        resource = importlib.resources.files("rekol") / "template"
+    except (ModuleNotFoundError, TypeError):
+        return None
+    template = Path(str(resource))
     return template if template.is_dir() else None
 
 

@@ -517,8 +517,10 @@ if [[ "$DO_SHELLRC" == "1" ]]; then
 fi
 
 # =============================================================================
-# Step 5 — Seed $REKOL_HOME from template/ if empty
+# Step 5 — Seed $REKOL_HOME from the bundled template if empty
 # =============================================================================
+# The template lives inside the package (src/rekol/template/) so it is vendored
+# into a wheel too (#56); install.sh seeds from that in-tree location.
 # Uses -A to include hidden files; the is_empty check covers newly created dirs.
 
 is_empty_memory_home() {
@@ -537,8 +539,8 @@ is_empty_memory_home() {
 }
 
 if is_empty_memory_home "${RESOLVED_HOME}"; then
-  say "${RESOLVED_HOME} is empty — seeding from template/"
-  run "cp -R '${COMPONENT_DIR}/template/'* '${RESOLVED_HOME}/'"
+  say "${RESOLVED_HOME} is empty — seeding from the bundled template"
+  run "cp -R '${COMPONENT_DIR}/src/rekol/template/'* '${RESOLVED_HOME}/'"
   # Rename every *.example file to its real name (strips the .example suffix)
   run "find '${RESOLVED_HOME}' -name '*.example' -print0 \
     | xargs -0 -I {} sh -c 'mv \"\$1\" \"\${1%.example}\"' _ {}"

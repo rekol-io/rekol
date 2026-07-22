@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- Starter-pack template now survives a wheel install (#56): `template/` moved into the
+  package (`src/rekol/template/`) and declared as `package-data`, and `find_template_dir()`
+  resolves it via `importlib.resources` instead of a repo-root `parents[3]` path that only
+  existed in an editable checkout. Verified by building a wheel and confirming all template
+  files are vendored under `rekol/template/`. `install.sh` seeds from the new in-tree path.
+  Unblocks wheel/Homebrew distribution (#116).
+
 ### Added
 - SessionStart banner surfaces invisible memory files (#123, part 2): the indexer
   persists the current disk-vs-index gap (count + paths of files rejected at index time)
