@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-07-23
 ### Fixed
 - Starter-pack template now survives a wheel install (#56): `template/` moved into the
   package (`src/rekol/template/`) and declared as `package-data`, and `find_template_dir()`
