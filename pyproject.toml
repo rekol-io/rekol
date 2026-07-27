@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rekol"
-version = "0.2.11"
+version = "0.3.0"
 description = "Layered, cross-indexed memory system with local vector search for Claude Code"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -26,7 +26,11 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
 dev = [
-    "ruff>=0.6,<1",
+    # Pin the ruff MINOR: its formatter output is version-sensitive, so an
+    # unpinned range let CI pull a newer ruff (0.16) that reformatted existing
+    # code and failed `ruff format --check` on every PR. Bump deliberately in its
+    # own PR when adopting a new formatting.
+    "ruff>=0.15.15,<0.16",
     "mypy>=1.11",
     "pre-commit>=3.8",
     "types-PyYAML",
