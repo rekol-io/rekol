@@ -827,6 +827,64 @@ PY
   [ "$output" -eq 1 ]
 }
 
+@test "fresh install wires the SessionStart task-injection handler (#113)" {
+  # `rekol _hook session-tasks` surfaces open cross-session tasks at start.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-tasks-fresh"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-tasks-fresh"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" \
+      --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. | contains("_hook session-tasks"))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "re-install adds the task-injection handler exactly once (#113)" {
+  # Existing block (memory-loader + coverage), no task handler yet: (re-)install
+  # must add it, keep everything else, and not duplicate on a second run.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-tasks-add"
+  mkdir -p "$SBHOME/.claude"
+  printf '%s' \
+    '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\"; rekol _hook session-confidence 2>/dev/null || true"}]},{"matcher":"","hooks":[{"type":"command","command":"rekol _hook session-coverage 2>/dev/null || true"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-tasks-add"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  # Memory-loader + coverage survive...
+  run jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | (any(. | contains("REKOL.md")) and any(. | contains("session-coverage")))' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  # ...and exactly ONE task handler exists after two installs.
+  run jq '[.hooks.SessionStart[]?.hooks[]?.command | select(contains("_hook session-tasks"))] | length' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # Phase 8 — durable transcript archive flags
 # ---------------------------------------------------------------------------

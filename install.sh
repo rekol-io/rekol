@@ -685,6 +685,34 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
 fi
 
 # =============================================================================
+# Step 7C — SessionStart cross-session task injection (#113)
+# =============================================================================
+# `rekol _hook session-tasks` surfaces open/in_progress tasks from
+# $REKOL_HOME/tasks/ at session start, so a fresh session inherits unfinished
+# work. Same shape as Step 7B: its OWN handler (never touches the memory-loader
+# command), added idempotently — no-op when already wired.
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  TASKS_CMD='rekol _hook session-tasks 2>/dev/null || true'
+  HAS_TASKS="$(
+    jq '
+      (.hooks.SessionStart // []) as $cur
+      | any($cur[]; (.hooks // []) | any(.command // "" | contains("_hook session-tasks")))
+    ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+
+  if [[ "$HAS_TASKS" == "true" ]]; then
+    say "SessionStart task injection already present — no-op"
+  else
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq --arg cmd '${TASKS_CMD}' \
+      '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "ADDED SessionStart task injection to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 7A — strip the deprecated SessionStart ingest-nudge handler
 # =============================================================================
 # An earlier rekol version wired a `rekol _hook session-start-nudge` handler into

@@ -5,6 +5,17 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- Cross-session task layer (#113, Session Continuity batch 1/3): durable tasks stored
+  one-per-file in `$REKOL_HOME/tasks/` (fully shared across sessions; per-task files so
+  concurrent sessions never collide on one file), managed via `rekol task
+  add|start|done|block|list`. Every write goes through an optimistic-concurrency (CAS)
+  loop — hash on read, re-hash before an atomic temp-file+`os.replace` write, bounded
+  retry on a lost race — so same-machine concurrent updates merge instead of clobbering.
+  A new `rekol _hook session-tasks` SessionStart handler surfaces open/in_progress tasks
+  into every fresh session (capped, silent when none, soft-fail); `install.sh` wires it
+  idempotently. `rekol task start --session <id>` records the claiming session — the
+  intent semaphore #143's opt-in auto-resume will consume. Design: `docs/task-layer.md`.
 
 ## [0.3.0] - 2026-07-23
 ### Fixed

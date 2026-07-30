@@ -18,6 +18,15 @@
             "command": "rekol _hook session-coverage 2>/dev/null || true"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rekol _hook session-tasks 2>/dev/null || true"
+          }
+        ]
       }
     ]
   }

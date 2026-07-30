@@ -26,6 +26,7 @@ from rekol.cli_propose import main as propose_cmd
 from rekol.cli_review import main as review_cmd
 from rekol.cli_search import main as search_cmd
 from rekol.cli_session_index import main as session_index_cmd
+from rekol.cli_task import main as task_grp
 
 
 @click.group()
@@ -54,6 +55,7 @@ main.add_command(init_cmd, name="init")
 main.add_command(doctor_cmd, name="doctor")
 main.add_command(coverage_cmd, name="coverage")
 main.add_command(include_grp, name="include")
+main.add_command(task_grp, name="task")
 main.add_command(hook_group, name="_hook")
 
 
