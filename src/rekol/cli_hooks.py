@@ -276,6 +276,84 @@ def session_tasks() -> None:
         click.echo(f"  …and {extra} more — run `rekol task list`.")
 
 
+# Nudge a capture pass when context crosses this fill level (#122). Early on
+# purpose: selection quality degrades as context fills — a flush at the brink is
+# judged by a model at its worst moment, with tokens at their scarcest.
+_CAPTURE_NUDGE_THRESHOLD_PCT = 60
+
+
+def _session_env_path(name: str, session_id: str) -> Path:
+    """Per-session state file under ~/.claude/session-env (shared soft-fail dir)."""
+    directory = Path.home() / ".claude" / "session-env"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return directory / f"{name}-{session_id}"
+
+
+@hook_group.command(name="context-watch")
+def context_watch() -> None:
+    """Record context usage from the statusline JSON (#122, opt-in wiring).
+
+    The statusline input is the ONLY documented surface exposing context usage
+    (``context_window.used_percentage``) — hook payloads carry no token data.
+    Users pipe their statusline JSON through this (see ``docs/compaction.md``);
+    it records the percentage for ``capture-nudge`` to act on and prints
+    NOTHING (statusline stdout is the rendered line — ours must stay empty).
+    Soft-fail: any error exits 0 silently.
+    """
+    try:
+        payload = _read_payload()
+        session_id = _safe_session_id(payload)
+        if session_id is None:
+            return
+        pct = (payload.get("context_window") or {}).get("used_percentage")
+        if not isinstance(pct, (int, float)):
+            return
+        _session_env_path("context-pct", session_id).write_text(str(int(pct)))
+    except Exception:  # noqa: BLE001 — a hook must never break the statusline
+        return
+
+
+@hook_group.command(name="capture-nudge")
+def capture_nudge() -> None:
+    """One-time capture nudge when context crosses the threshold (#122).
+
+    Runs on UserPromptSubmit (stdout reaches the model's context — documented).
+    Reads the percentage ``context-watch`` recorded; at >=60% it injects, ONCE
+    per session, an instruction to flush durable state to the store while
+    selection quality is still good. Compaction preferentially destroys
+    decisions/rationale/conventions — anything captured before it fires
+    survives perfectly. Silent when unwired, below threshold, or already
+    nudged; soft-fail always.
+    """
+    try:
+        payload = _read_payload()
+        session_id = _safe_session_id(payload)
+        if session_id is None:
+            return
+        pct_file = _session_env_path("context-pct", session_id)
+        if not pct_file.is_file():
+            return  # statusline recorder not wired — stay silent
+        pct = int(pct_file.read_text().strip() or "0")
+        if pct < _CAPTURE_NUDGE_THRESHOLD_PCT:
+            return
+        marker = _session_env_path("capture-nudged", session_id)
+        if marker.exists():
+            return  # one nudge per session
+        marker.touch()
+    except Exception:  # noqa: BLE001 — a hook must never block a prompt
+        return
+    click.echo(
+        f"[rekol] context is {pct}% full — compaction will preferentially drop "
+        "decisions, rationale, and conventions. Run a capture pass NOW while "
+        "judgment is still sharp: persist durable decisions + why (`rekol "
+        "capture`), update your claimed task's next-action note (`rekol task`), "
+        "then continue."
+    )
+
+
 @hook_group.command(name="stop-failure-record")
 def stop_failure_record() -> None:
     """Record a StopFailure event to the freeze journal (#143 Phase A).

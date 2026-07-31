@@ -996,6 +996,36 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 7E2 — UserPromptSubmit capture-nudge handler (#122)
+# =============================================================================
+# `rekol _hook capture-nudge` injects a ONE-TIME "capture now" instruction when
+# context usage crosses the threshold — silent unless the opt-in statusline
+# recorder is wired (docs/compaction.md). Added independently of Step 7E because
+# 7E no-ops for existing installs whose time hook is already present (including
+# the legacy mac_setup variant), which would otherwise strand this handler.
+# Idempotent: no-op when any UserPromptSubmit command already invokes it.
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  NUDGE_CMD='rekol _hook capture-nudge 2>/dev/null || true'
+  HAS_NUDGE="$(
+    jq '
+      (.hooks.UserPromptSubmit // []) as $cur
+      | any($cur[]; (.hooks // []) | any(.command // "" | contains("_hook capture-nudge")))
+    ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+
+  if [[ "$HAS_NUDGE" == "true" ]]; then
+    say "UserPromptSubmit capture-nudge already present — no-op"
+  else
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq --arg cmd '${NUDGE_CMD}' \
+      '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "ADDED UserPromptSubmit capture-nudge to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
 # Step 7F — Stop record-stop hook merge into settings.json
 # =============================================================================
 # Wires stop-snippet.json so the assistant-completion timestamp is recorded for
