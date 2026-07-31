@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- Opt-in auto-resume across usage-limit freezes (#143 Phase A, Session Continuity
+  batch 2/3): `rekol resume enable` registers a Claude Code `StopFailure` hook that
+  records every API-error turn-end to a local freeze journal (verbatim payload —
+  instrumentation: the docs don't confirm which error type an *account* usage limit
+  produces, so Phase A captures everything and the first real freeze supplies ground
+  truth for Phase B), plus a launchd watchdog running `rekol resume tick` every 5
+  minutes. A tick resumes a frozen session (`claude -p --resume`, detached, appends
+  to the same transcript) ONLY when all of: the freeze is limit-shaped, its reset
+  time has passed (parsed from "resets 3:45pm" / weekly form, else a 60-minute
+  fallback), the #113 task layer shows an `in_progress` task claimed by that session
+  (the intent semaphore — idle sessions are never resumed), and the (session,
+  freeze) pair isn't already in the idempotency ledger. Cap: one resume per tick.
+  **OFF by default** — `enable`/`disable`/`status`/`tick --dry-run`; journal/ledger
+  live in the local cache, never the synced tree. #143 stays open for Phase B.
 - Cross-session task layer (#113, Session Continuity batch 1/3): durable tasks stored
   one-per-file in `$REKOL_HOME/tasks/` (fully shared across sessions; per-task files so
   concurrent sessions never collide on one file), managed via `rekol task

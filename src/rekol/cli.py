@@ -23,6 +23,7 @@ from rekol.cli_init import main as init_cmd
 from rekol.cli_invalidate import main as invalidate_cmd
 from rekol.cli_migrate import main as migrate_grp
 from rekol.cli_propose import main as propose_cmd
+from rekol.cli_resume import main as resume_grp
 from rekol.cli_review import main as review_cmd
 from rekol.cli_search import main as search_cmd
 from rekol.cli_session_index import main as session_index_cmd
@@ -56,6 +57,7 @@ main.add_command(doctor_cmd, name="doctor")
 main.add_command(coverage_cmd, name="coverage")
 main.add_command(include_grp, name="include")
 main.add_command(task_grp, name="task")
+main.add_command(resume_grp, name="resume")
 main.add_command(hook_group, name="_hook")
 
 
