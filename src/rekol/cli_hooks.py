@@ -234,3 +234,43 @@ def session_coverage() -> None:
     noun = "file" if count == 1 else "files"
     click.echo("")
     click.echo(f"[rekol] ⚠ {count} memory {noun} invisible to search — run `rekol doctor`")
+
+
+# Cap the injected task list so a large backlog can't crowd the context window;
+# list_tasks() is oldest-first, so what shows is the longest-waiting work.
+_TASKS_FOOTER_MAX = 10
+
+
+@hook_group.command(name="session-tasks")
+def session_tasks() -> None:
+    """Surface open/in_progress cross-session tasks at SessionStart (#113).
+
+    The durable task layer only helps if a fresh session actually SEES it —
+    this prints the open + in_progress tasks from ``$REKOL_HOME/tasks/`` so a
+    new session starts already aware of unfinished work (and #143's resume flow
+    lands in a session that knows what it was doing).
+
+    Same contract as ``session-confidence``/``session-coverage``: rides the
+    SessionStart injection, so it must NEVER break it — any error prints
+    nothing and exits 0; silent when there are no tasks.
+    """
+    try:
+        from rekol.config import load_config
+        from rekol.tasks import list_tasks
+
+        tasks = [
+            t for t in list_tasks(load_config().memory_home) if t.status in ("open", "in_progress")
+        ]
+    except Exception:  # noqa: BLE001 — a hook must never break the session injection
+        return
+    if not tasks:
+        return
+    shown, extra = tasks[:_TASKS_FOOTER_MAX], len(tasks) - _TASKS_FOOTER_MAX
+    click.echo("")
+    click.echo("[rekol] open tasks (durable, cross-session — manage with `rekol task`):")
+    for task in shown:
+        marker = "◐" if task.status == "in_progress" else "○"
+        claim = f" [{task.owner_role}]" if task.owner_role else ""
+        click.echo(f"  {marker} {task.id}: {task.title}{claim}")
+    if extra > 0:
+        click.echo(f"  …and {extra} more — run `rekol task list`.")
