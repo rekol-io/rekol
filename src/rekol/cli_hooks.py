@@ -274,3 +274,22 @@ def session_tasks() -> None:
         click.echo(f"  {marker} {task.id}: {task.title}{claim}")
     if extra > 0:
         click.echo(f"  …and {extra} more — run `rekol task list`.")
+
+
+@hook_group.command(name="stop-failure-record")
+def stop_failure_record() -> None:
+    """Record a StopFailure event to the freeze journal (#143 Phase A).
+
+    Registered by ``rekol resume enable`` (opt-in). Captures the payload
+    VERBATIM — the docs don't confirm which error type an account usage limit
+    produces, so Phase A instruments everything and the first real freeze
+    supplies ground truth. Hook contract: NEVER fail — any error exits 0
+    silently (a recording problem must not worsen an already-failing turn).
+    """
+    try:
+        from rekol.config import load_config
+        from rekol.resume import record_stop_failure
+
+        record_stop_failure(load_config().index_dir, _read_payload())
+    except Exception:  # noqa: BLE001 — a hook must never break the harness
+        return
