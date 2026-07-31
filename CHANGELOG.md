@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- React to context compaction (#122, Session Continuity batch 3/3): compaction
+  preferentially destroys decisions/rationale/conventions, and the loss is silent.
+  Three-part posture — **steer**: `docs/compaction.md` ships a paste-ready
+  `# Compact Instructions` block for CLAUDE.md; **flush**: a one-time capture nudge
+  at 60% context usage (`rekol _hook capture-nudge` on UserPromptSubmit, wired
+  idempotently by `install.sh`; fed by the opt-in `rekol _hook context-watch`
+  statusline recorder — the statusline JSON is the only documented surface exposing
+  `context_window.used_percentage`; silent when unwired); **re-present**: verified
+  that SessionStart handlers (REKOL.md + #113 open tasks) re-fire on the documented
+  `compact` source, so a compacted session gets its working set back automatically.
+  Deliberately NO PreCompact backstop: documented hook output does not reach the
+  model from PreCompact, and a reminder the agent never sees is theater.
 - Opt-in auto-resume across usage-limit freezes (#143 Phase A, Session Continuity
   batch 2/3): `rekol resume enable` registers a Claude Code `StopFailure` hook that
   records every API-error turn-end to a local freeze journal (verbatim payload —

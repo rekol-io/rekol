@@ -885,6 +885,40 @@ PY
   [ "$output" -eq 1 ]
 }
 
+@test "re-install adds the capture-nudge handler even when a time hook exists (#122)" {
+  # Step 7E no-ops when a time hook is present (incl. legacy mac_setup), which
+  # would strand capture-nudge — Step 7E2 must add it independently, exactly once.
+  command -v jq >/dev/null 2>&1 || skip "jq required for hook merge"
+
+  SBHOME="$TESTROOT/sandhome-nudge-add"
+  mkdir -p "$SBHOME/.claude"
+  printf '%s' \
+    '{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"rekol _hook time-context"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  REKOLH="$TESTROOT/rekolhome-nudge-add"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  for _ in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" \
+        --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ]
+  done
+
+  # time-context survives, capture-nudge added exactly once.
+  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  run jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command | select(contains("_hook capture-nudge"))] | length' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # Phase 8 — durable transcript archive flags
 # ---------------------------------------------------------------------------

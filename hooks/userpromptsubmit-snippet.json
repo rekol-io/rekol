@@ -1,5 +1,5 @@
 {
-  "_comment": "Merge into ~/.claude/settings.json hooks.UserPromptSubmit. Injects an <env-time> block (local/UTC time plus elapsed-since-last-user/assistant). Soft-fail: always exits 0 so it never blocks a prompt.",
+  "_comment": "Merge into ~/.claude/settings.json hooks.UserPromptSubmit. First handler injects an <env-time> block (local/UTC time plus elapsed-since-last-user/assistant). Second injects a ONE-TIME capture nudge when context usage crosses the threshold (#122) — silent unless the opt-in statusline recorder (docs/compaction.md) is wired. Soft-fail: always exit 0 so they never block a prompt.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -8,6 +8,15 @@
           {
             "type": "command",
             "command": "rekol _hook time-context"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rekol _hook capture-nudge 2>/dev/null || true"
           }
         ]
       }
