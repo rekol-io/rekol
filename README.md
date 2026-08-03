@@ -168,6 +168,11 @@ only for sessions that had a task in progress.
 ```bash
 rekol resume enable      # also: status / disable / tick --dry-run
 ```
+On **macOS** this also installs a 5-minute watchdog (launchd). On **Linux** it
+registers the freeze recorder only — schedule the watchdog yourself, e.g.
+`*/5 * * * * rekol resume tick` in cron — otherwise nothing is checking for the
+reset.
+
 *Currently instrumentation-first: it records real freezes to confirm the trigger
 before we promise unattended resumes. See [#143](https://github.com/rekol-io/rekol/issues/143).*
 
