@@ -5,6 +5,18 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- README: document the Session Continuity features and tighten the top-fold for
+  conversion (product asks). New **"Session continuity"** section covers `rekol task`,
+  compaction survival, and opt-in `rekol resume` (the three shipped features were
+  previously undocumented — undiscoverable is unshipped); the new commands are listed
+  under CLI and `tasks/` under Layout. Top-fold now leads with the **happy path**: the
+  one-command Quickstart sits directly under "Why", with the Python/sqlite prerequisites
+  collapsed into a `<details>` ("Install failed, or search seems degraded?") instead of
+  standing between a first-timer and the one-liner. Adds a license/CI/release badge row
+  (release badge is dynamic, so it can't go stale), a soft star nudge, and names Claude
+  Code in the tagline rather than "the AI assistant you already use".
+
 ### Added
 - React to context compaction (#122, Session Continuity batch 3/3): compaction
   preferentially destroys decisions/rationale/conventions, and the loss is silent.
