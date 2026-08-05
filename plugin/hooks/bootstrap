@@ -34,6 +34,9 @@ FAILED="$STATE_DIR/.bootstrap.failed"
 # deliberate decision for the project owner, not a side effect of unblocking a
 # plugin bootstrap. The release tarball needs no credentials, claims no
 # namespace, and is reversible.
+# A bootstrap that legitimately takes longer than this is already pathological;
+# past it we assume the holder is wedged rather than slow.
+LOCK_MAX_AGE="${REKOL_LOCK_MAX_AGE:-600}"
 REKOL_VERSION="${REKOL_PLUGIN_VERSION:-0.4.0}"
 REKOL_SDIST="${REKOL_SDIST:-https://github.com/rekol-io/rekol/archive/refs/tags/v${REKOL_VERSION}.tar.gz}"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -60,13 +63,40 @@ bootstrap() {
     # building a competing venv over the same path.
     exec 9>"$LOCK"
     if ! flock -w 300 9 2>/dev/null; then
-        # No flock (macOS default bash lacks it) — fall back to a mkdir lock.
-        if ! mkdir "$STATE_DIR/.lockdir" 2>/dev/null; then
-            echo "[rekol] another session is setting up rekol — waiting…"
-            for _ in $(seq 1 150); do sleep 2; is_ready && return 0; done
-            fail "timed out waiting for another session's setup" "run: rm -rf '$STATE_DIR' and restart Claude Code"
-        fi
-        trap 'rmdir "$STATE_DIR/.lockdir" 2>/dev/null || true' EXIT
+        # No flock (macOS default bash lacks it), so the mkdir lock IS the
+        # primary path on Mac. mkdir locks do NOT self-release: a process killed
+        # mid-bootstrap (kill -9, force quit, laptop sleep) leaves the directory
+        # behind, and without reaping every later session on that machine would
+        # hang or refuse to bootstrap FOREVER from one bad exit. So the lock
+        # records its owner and we reap it when the owner is gone or it is
+        # simply too old — a broken state must fail SAFE, same principle as
+        # #143's enabled-marker.
+        local lockdir="$STATE_DIR/.lockdir"
+        local waited=0
+        while ! mkdir "$lockdir" 2>/dev/null; do
+            local owner age now
+            owner="$(cat "$lockdir/pid" 2>/dev/null || echo 0)"
+            now="$(date +%s)"
+            age=$(( now - $(cat "$lockdir/started" 2>/dev/null || echo "$now") ))
+            if ! kill -0 "$owner" 2>/dev/null; then
+                echo "[rekol] clearing a stale setup lock (owner pid $owner is gone)"
+                rm -rf "$lockdir"; continue
+            fi
+            if [ "$age" -gt "$LOCK_MAX_AGE" ]; then
+                echo "[rekol] clearing a stuck setup lock (held ${age}s by pid $owner)"
+                rm -rf "$lockdir"; continue
+            fi
+            [ "$waited" -eq 0 ] && echo "[rekol] another session is setting up rekol — waiting…"
+            waited=$((waited + 2)); sleep 2
+            is_ready && return 0
+            if [ "$waited" -gt "$LOCK_MAX_AGE" ]; then
+                fail "setup lock never released (waited ${waited}s)" \
+                     "run: rm -rf '$lockdir' and restart Claude Code"
+            fi
+        done
+        printf '%s' "$$"          > "$lockdir/pid"
+        printf '%s' "$(date +%s)" > "$lockdir/started"
+        trap 'rm -rf "$STATE_DIR/.lockdir" 2>/dev/null || true' EXIT
     fi
     is_ready && return 0   # winner may have finished while we waited
 
@@ -89,10 +119,28 @@ bootstrap() {
 
     {
         echo "=== bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) using $py ==="
-        "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip && \
-        "$VENV/bin/pip" install --quiet "$REKOL_SDIST"
+        "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip
     } >> "$STATE_DIR/bootstrap.log" 2>&1 || \
         fail "python environment build failed" "see the log, then restart Claude Code to retry"
+
+    # Supply chain: download, VERIFY, then install from the local file. Never
+    # pipe an unverified network artifact straight into pip.
+    local want tarball got
+    want="$(awk -v v="$REKOL_VERSION" '$1==v {print $2}' "${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}/artifacts.sha256" 2>/dev/null)"
+    [ -n "$want" ] || fail "no pinned checksum for rekol $REKOL_VERSION" \
+        "this plugin build is incomplete — report it; do NOT bypass the check"
+    tarball="$STATE_DIR/rekol-$REKOL_VERSION.tar.gz"
+    curl -fsSL "$REKOL_SDIST" -o "$tarball" 2>>"$STATE_DIR/bootstrap.log" || \
+        fail "could not download rekol $REKOL_VERSION" "check network/proxy, then restart Claude Code"
+    got="$(shasum -a 256 "$tarball" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$got" != "$want" ]; then
+        rm -f "$tarball"
+        fail "checksum MISMATCH for rekol $REKOL_VERSION (got ${got:0:12}…, want ${want:0:12}…)" \
+             "refusing to install an unverified artifact — report this"
+    fi
+    "$VENV/bin/pip" install --quiet "$tarball" >>"$STATE_DIR/bootstrap.log" 2>&1 || \
+        fail "install of the verified artifact failed" "see $STATE_DIR/bootstrap.log"
+    rm -f "$tarball"
 
     is_ready || rm -f "$PARTIAL"
     rm -f "$PARTIAL"

@@ -34,7 +34,7 @@ Verified empirically:
 - A healthy bootstrap prints progress, because a silent 1–2 minute first launch
   reads as a hang.
 
-### 2. Idempotent + concurrency-safe — ✅ PASS
+### 2. Idempotent + concurrency-safe — ✅ PASS (incl. abandonment)
 12 simultaneous cold starts against one state dir:
 
 ```
@@ -50,6 +50,46 @@ Note for reviewers: **macOS ships no `flock`**, so the mkdir-lock fallback *is*
 the primary path on Mac — it is the one that had to be correct, and it is the one
 tested above. Interrupted builds leave a `.partial` marker so a half-built venv
 is never mistaken for a finished one.
+
+**Stale locks (QA's catch — the 12-way test measured contention, not
+abandonment).** mkdir locks do not self-release: a process killed mid-bootstrap
+(`kill -9`, force quit, laptop sleep) would otherwise leave the directory behind
+and **wedge every later session on that machine forever, from one bad exit**. The
+lock therefore records its owner PID and start time, and is reaped when the owner
+is gone or the lock exceeds `REKOL_LOCK_MAX_AGE` (default 600s). Verified: a lock
+owned by a dead PID is cleared and setup completes; an ancient lock held by a live
+PID is cleared and setup completes; a normal cold start is unaffected. Both
+recoveries say what they did rather than silently fixing themselves. Same
+fail-safe principle as #143's enabled-marker.
+
+### Supply chain — artifact is hash-pinned and verified
+rekol's pitch is *no API key, nothing leaves your machine, audit the repo instead
+of piping a script into your shell.* Downloading and `pip install`ing an
+unverified tarball on first run would contradict exactly that, and it is a fair
+hit from the audience we are courting.
+
+The bootstrap now **downloads, verifies, then installs from the local file** —
+never straight from the network into pip. Hashes live in
+`plugin/artifacts.sha256`, keyed by version; an unknown version or a mismatch
+**refuses to install** and says so. Verified in both directions: a tampered
+artifact is rejected (nothing installed, bad file deleted), and the genuine
+release artifact installs.
+
+Two things the release process (#28) must own:
+- **Update `artifacts.sha256` on every release** — an unpinned version cannot install.
+- **Upload a built sdist as a release asset.** The current pin is GitHub's
+  *auto-generated* tarball, which was byte-stable across repeated fetches when
+  tested, but is generated rather than published — a self-uploaded artifact is the
+  more durable thing to pin. The v0.4.0 release currently has **0 uploaded assets**.
+
+### Network dependency at first run
+The bootstrap needs GitHub reachable at first SessionStart. Measured:
+**unauthenticated GitHub API allows 60 requests/hour per IP**. Release-tarball
+downloads go via codeload rather than the API so they are not strictly in that
+bucket, but the practical warning stands: a team behind one NAT or corporate proxy
+doing many first-runs in an hour can be throttled, and air-gapped machines cannot
+bootstrap at all. Criterion #1 covers the important half — it fails *loudly* with
+the reason — but this is a real first-run limitation, not a hypothetical.
 
 ### 3. Scriptable / non-interactive install — ✅ PASS
 `claude plugin` exposes a full CLI: `install`, `uninstall`, `enable`, `disable`,
