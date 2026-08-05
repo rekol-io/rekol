@@ -37,8 +37,10 @@ follow [Semantic Versioning](https://semver.org/).
   `compact` source, so a compacted session gets its working set back automatically.
   Deliberately NO PreCompact backstop: documented hook output does not reach the
   model from PreCompact, and a reminder the agent never sees is theater.
-- Opt-in auto-resume across usage-limit freezes (#143 Phase A, Session Continuity
-  batch 2/3): `rekol resume enable` registers a Claude Code `StopFailure` hook that
+- Groundwork for auto-resume across usage-limit freezes (#143 **Phase A —
+  instrumentation only, not yet announced as a user feature**; the trigger is
+  unverified until a real freeze confirms it, and the docs are deliberately held
+  until then): `rekol resume enable` registers a Claude Code `StopFailure` hook that
   records every API-error turn-end to a local freeze journal (verbatim payload —
   instrumentation: the docs don't confirm which error type an *account* usage limit
   produces, so Phase A captures everything and the first real freeze supplies ground
