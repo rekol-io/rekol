@@ -162,20 +162,6 @@ automatically, and can nudge you to capture durable decisions *before* the
 squeeze. See [docs/compaction.md](docs/compaction.md) for the paste-in
 `# Compact Instructions` block and the optional usage-threshold nudge.
 
-**Pick up after a usage-limit freeze (opt-in, off by default).** When a limit
-interrupts you mid-task, REKOL can continue that session once the limit resets —
-only for sessions that had a task in progress.
-```bash
-rekol resume enable      # also: status / disable / tick --dry-run
-```
-On **macOS** this also installs a 5-minute watchdog (launchd). On **Linux** it
-registers the freeze recorder only — schedule the watchdog yourself, e.g.
-`*/5 * * * * rekol resume tick` in cron — otherwise nothing is checking for the
-reset.
-
-*Currently instrumentation-first: it records real freezes to confirm the trigger
-before we promise unattended resumes. See [#143](https://github.com/rekol-io/rekol/issues/143).*
-
 ## CLI
 A single `rekol` command with subcommands:
 - `rekol search "query" [--top N] [--json]` — semantic + keyword search.
@@ -183,8 +169,6 @@ A single `rekol` command with subcommands:
 - `rekol capture` — add a new memory.
 - `rekol import <dir>` — import an existing notes/docs tree into search.
 - `rekol task add | start | done | block | list` — cross-session tasks.
-- `rekol resume enable | disable | status | tick` — auto-resume after a usage-limit
-  freeze (opt-in, off by default).
 - `rekol doctor` — diagnose index health; reports anything invisible to search.
 
 ## Layout
