@@ -224,3 +224,32 @@ def test_hook_never_raises_without_memory_home(monkeypatch) -> None:
     result = CliRunner().invoke(session_tasks, [])
     assert result.exit_code == 0
     assert result.output == ""
+
+
+def test_hook_surfaces_blocked_tasks_first_with_reason(cli_home: Path) -> None:
+    """A blocked task means work STOPPED and someone (usually Leon) must decide —
+    so it leads the injection, shows its reason, and is never capped away."""
+    runner = CliRunner()
+    for i in range(12):  # enough open tasks to exceed the cap
+        runner.invoke(task_cli, ["add", f"Open task {i:02d}"])
+    runner.invoke(task_cli, ["add", "Merge the release"])
+    runner.invoke(task_cli, ["block", "merge-the-release", "--reason", "needs Leon's go"])
+
+    result = runner.invoke(session_tasks, [])
+    assert result.exit_code == 0
+    assert "BLOCKED" in result.output
+    assert "merge-the-release" in result.output
+    assert "needs Leon's go" in result.output
+    # Blocked leads, ahead of the open list.
+    assert result.output.index("BLOCKED") < result.output.index("open tasks")
+    # Open tasks still capped, blocked never counted into the overflow.
+    assert "…and 2 more" in result.output
+
+
+def test_hook_blocked_only_still_renders(cli_home: Path) -> None:
+    runner = CliRunner()
+    runner.invoke(task_cli, ["add", "Only task"])
+    runner.invoke(task_cli, ["block", "only-task", "--reason", "waiting"])
+    result = runner.invoke(session_tasks, [])
+    assert "BLOCKED" in result.output and "only-task" in result.output
+    assert "open tasks" not in result.output

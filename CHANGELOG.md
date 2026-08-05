@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- Blocked tasks are surfaced at SessionStart (#113 follow-up): `rekol _hook session-tasks`
+  previously filtered `blocked` out entirely, so a task blocked by an agent was invisible
+  to the next session — the opposite of what a durable "work stopped, needs a decision"
+  signal is for. Blocked tasks now lead the injection, show their `--reason` inline, and
+  are never capped away by the open-task limit.
+
 ### Changed
 - README: document the Session Continuity features and tighten the top-fold for
   conversion (product asks). New **"Session continuity"** section covers `rekol task`,

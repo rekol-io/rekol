@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rekol"
-version = "0.3.6"
+version = "0.3.7"
 description = "Layered, cross-indexed memory system with local vector search for Claude Code"
 license = "Apache-2.0"
 requires-python = ">=3.11"
