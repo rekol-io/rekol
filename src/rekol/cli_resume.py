@@ -23,7 +23,7 @@ from pathlib import Path
 import click
 
 from rekol.config import load_config
-from rekol.resume import freeze_journal_path, ledger_path
+from rekol.resume import enabled_marker_path, freeze_journal_path, is_enabled, ledger_path
 from rekol.resume import tick as run_tick
 
 _HOOK_COMMAND = "rekol _hook stop-failure-record 2>/dev/null || true"
@@ -32,9 +32,17 @@ _TICK_INTERVAL_SECONDS = 300
 
 
 def _settings_path() -> Path:
-    return Path(os.environ.get("CLAUDE_SETTINGS_PATH", "")) or (
-        Path.home() / ".claude" / "settings.json"
-    )
+    """Resolve Claude Code's settings.json, honouring the test/override env var.
+
+    Must branch on the RAW STRING, not on the Path: ``Path("")`` is
+    ``PosixPath(".")``, and Path defines no ``__bool__``, so a truthiness-based
+    ``or`` fallback silently never fires. That bug made ``enable`` crash for
+    every user with the env var unset (``PosixPath('.') has an empty name``) and
+    — far worse — made ``status``/``disable`` read an empty settings dict, so
+    they reported the feature OFF while the hook was still wired.
+    """
+    raw = os.environ.get("CLAUDE_SETTINGS_PATH", "")
+    return Path(raw) if raw else (Path.home() / ".claude" / "settings.json")
 
 
 def _plist_path() -> Path:
@@ -86,6 +94,14 @@ def main() -> None:
 )
 def enable(no_launchd: bool) -> None:
     """Opt in: register the freeze-recorder hook + install the tick watchdog."""
+    # The explicit opt-in marker `tick` gates on. Written first so a crash later
+    # in enable can only leave the feature LESS armed than the user asked for,
+    # never more (the hook alone records; it never resumes).
+    cfg = load_config()
+    cfg.index_dir.mkdir(parents=True, exist_ok=True)
+    enabled_marker_path(cfg.index_dir).write_text(
+        _dt.datetime.now().isoformat(timespec="seconds") + "\n"
+    )
     settings_file = _settings_path()
     settings_file.parent.mkdir(parents=True, exist_ok=True)
     settings = _load_settings(settings_file)
@@ -130,6 +146,18 @@ def enable(no_launchd: bool) -> None:
 @main.command(name="disable")
 def disable() -> None:
     """Opt out: remove the freeze-recorder hook and the watchdog."""
+    # Drop the kill-switch marker FIRST: from this instant `tick` refuses, so a
+    # user-scheduled cron tick stops resuming even if the steps below fail. Also
+    # clear the journal — a stale freeze recorded before disabling must not be
+    # able to fire if the feature is ever re-enabled.
+    cfg = load_config()
+    enabled_marker_path(cfg.index_dir).unlink(missing_ok=True)
+    journal = freeze_journal_path(cfg.index_dir)
+    if journal.exists():
+        journal.unlink()
+        click.echo("freeze journal: cleared")
+    click.echo("auto-resume: disabled (tick will not resume)")
+
     settings_file = _settings_path()
     settings = _load_settings(settings_file)
     blocks = settings.get("hooks", {}).get("StopFailure", []) or []
@@ -160,8 +188,11 @@ def disable() -> None:
 def status() -> None:
     """Show opt-in state, recent freezes, and past resumes."""
     cfg = load_config()
-    settings = _load_settings(_settings_path())
-    click.echo(f"hook registered:  {'yes' if _hook_registered(settings) else 'no'}")
+    settings_file = _settings_path()
+    settings = _load_settings(settings_file)
+    click.echo(f"auto-resume:      {'ENABLED' if is_enabled(cfg.index_dir) else 'disabled'}")
+    registered = "yes" if _hook_registered(settings) else "no"
+    click.echo(f"hook registered:  {registered}  ({settings_file})")
     click.echo(f"watchdog plist:   {'yes' if _plist_path().is_file() else 'no'}")
     journal = freeze_journal_path(cfg.index_dir)
     entries = journal.read_text(encoding="utf-8").splitlines() if journal.is_file() else []

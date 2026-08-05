@@ -11,7 +11,9 @@ from click.testing import CliRunner
 
 from rekol.cli_resume import main as resume_cli
 from rekol.resume import (
+    enabled_marker_path,
     freeze_journal_path,
+    is_enabled,
     ledger_path,
     parse_reset_time,
     record_stop_failure,
@@ -20,6 +22,12 @@ from rekol.resume import (
 from rekol.tasks import Task, create_task, update_task
 
 NOW = dt.datetime(2026, 7, 30, 18, 0, 0)
+
+
+def _enable(index_dir: Path) -> None:
+    """Mark the feature opted-in, as `rekol resume enable` does."""
+    index_dir.mkdir(parents=True, exist_ok=True)
+    enabled_marker_path(index_dir).write_text("2026-07-30T00:00:00\n")
 
 
 def _freeze(
@@ -84,6 +92,7 @@ def test_parse_reset_absent_returns_none() -> None:
 
 def test_tick_resumes_claimed_session_after_reset(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "big-refactor", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")  # resets 3:45pm < NOW 18:00
     launched: list[str] = []
@@ -97,12 +106,14 @@ def test_tick_resumes_claimed_session_after_reset(tmp_path: Path) -> None:
 
 def test_tick_skips_unclaimed_session(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _freeze(index, "sess-idle", ts="2026-07-30T12:10:00")
     assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
 
 
 def test_tick_waits_for_reset_time(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
     early = dt.datetime(2026, 7, 30, 14, 0)  # before the 3:45pm reset
@@ -111,6 +122,7 @@ def test_tick_waits_for_reset_time(tmp_path: Path) -> None:
 
 def test_tick_fallback_delay_when_no_reset_in_message(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T17:30:00", message="opaque failure")
     # 30 min after freeze: fallback (60m) not yet elapsed.
@@ -122,6 +134,7 @@ def test_tick_fallback_delay_when_no_reset_in_message(tmp_path: Path) -> None:
 
 def test_tick_ignores_non_limit_error_types(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00", error_type="server_error")
     assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
@@ -129,6 +142,7 @@ def test_tick_ignores_non_limit_error_types(tmp_path: Path) -> None:
 
 def test_tick_ignores_stale_freezes(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-20T12:10:00")  # 10 days old
     assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
@@ -136,6 +150,7 @@ def test_tick_ignores_stale_freezes(tmp_path: Path) -> None:
 
 def test_tick_caps_at_one_resume(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t1", "sess-1")
     _claim(home, "t2", "sess-2")
     _freeze(index, "sess-1", ts="2026-07-30T12:00:00")
@@ -151,6 +166,7 @@ def test_tick_caps_at_one_resume(tmp_path: Path) -> None:
 
 def test_tick_dry_run_writes_nothing(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
     actions = tick(index, home, now=NOW, dry_run=True, launcher=lambda sid, log: True)
@@ -163,7 +179,16 @@ def test_tick_dry_run_writes_nothing(tmp_path: Path) -> None:
 # --------------------------- enable / disable --------------------------------
 
 
+def _rekol_home(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    return home
+
+
 def test_enable_then_disable_settings_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    _rekol_home(tmp_path, monkeypatch)
     settings = tmp_path / "settings.json"
     settings.write_text('{"hooks": {"SessionStart": [{"matcher": "", "hooks": []}]}}')
     monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings))
@@ -186,3 +211,99 @@ def test_enable_then_disable_settings_roundtrip(tmp_path: Path, monkeypatch) -> 
     assert data["hooks"]["SessionStart"]
     # Backups were written.
     assert list(tmp_path.glob("settings.json.bak-resume-*"))
+
+
+# ------------------- B1/B2 regression: the DEFAULT settings path ---------------
+# The original suite set CLAUDE_SETTINGS_PATH in every enable/disable test, so it
+# only ever exercised the override branch — and the default branch shipped broken
+# (`Path("")` is `PosixPath(".")`, which is truthy, so the `or` fallback never
+# fired). These tests deliberately run with the env var UNSET.
+
+
+def test_settings_path_defaults_to_home_when_env_unset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    from rekol.cli_resume import _settings_path
+
+    assert _settings_path() == tmp_path / ".claude" / "settings.json"
+
+
+def test_settings_path_honours_env_override(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(tmp_path / "custom.json"))
+    from rekol.cli_resume import _settings_path
+
+    assert _settings_path() == tmp_path / "custom.json"
+
+
+def test_enable_status_disable_agree_with_no_env_override(tmp_path: Path, monkeypatch) -> None:
+    """B2: with CLAUDE_SETTINGS_PATH unset, `status`/`disable` must SEE the hook
+    that `enable` wrote. Previously both read an empty settings dict and reported
+    the feature off while it was still wired — the worst failure mode for
+    something that launches work autonomously."""
+    _rekol_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".claude").mkdir(parents=True)
+    (fake_home / ".claude" / "settings.json").write_text(
+        '{"hooks": {"SessionStart": [{"matcher": "", "hooks": []}]}}'
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    runner = CliRunner()
+
+    result = runner.invoke(resume_cli, ["enable", "--no-launchd"])
+    assert result.exit_code == 0, result.output  # B1: used to die on a traceback
+    assert "registered" in result.output
+
+    # status must report it ON (it previously said "no").
+    result = runner.invoke(resume_cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "hook registered:  yes" in result.output
+    assert "auto-resume:      ENABLED" in result.output
+
+    # disable must actually find and remove it (it previously said "not registered").
+    result = runner.invoke(resume_cli, ["disable"])
+    assert result.exit_code == 0, result.output
+    assert "not registered" not in result.output
+    data = json.loads((fake_home / ".claude" / "settings.json").read_text())
+    assert "StopFailure" not in data.get("hooks", {})
+    assert data["hooks"]["SessionStart"]  # untouched
+
+    result = runner.invoke(resume_cli, ["status"])
+    assert "hook registered:  no" in result.output
+
+
+# --------------------------- M1: the kill-switch ------------------------------
+
+
+def test_tick_refuses_when_not_enabled(tmp_path: Path) -> None:
+    """A leftover journal must not keep resuming after `disable` — the exact
+    Linux workflow we recommend (`enable --no-launchd` + a cron tick)."""
+    index, home = tmp_path / "idx", tmp_path / "home"
+    _claim(home, "t", "sess-1")
+    _freeze(index, "sess-1", ts="2026-07-30T12:10:00")  # eligible in every other way
+    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    # Same inputs, opted in → resumes. Proves the marker is the only difference.
+    _enable(index)
+    assert len(tick(index, home, now=NOW, launcher=lambda sid, log: True)) == 1
+
+
+def test_disable_clears_marker_and_journal(tmp_path: Path, monkeypatch) -> None:
+    home = _rekol_home(tmp_path, monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}")
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings))
+    runner = CliRunner()
+    assert runner.invoke(resume_cli, ["enable", "--no-launchd"]).exit_code == 0
+
+    from rekol.config import load_config
+
+    index_dir = load_config().index_dir
+    assert is_enabled(index_dir)
+    _freeze(index_dir, "sess-1", ts="2026-07-30T12:10:00")
+
+    assert runner.invoke(resume_cli, ["disable"]).exit_code == 0
+    assert not is_enabled(index_dir)
+    # Stale freezes are gone, so re-enabling later can't fire an old one.
+    assert not freeze_journal_path(index_dir).exists()
+    _claim(home, "t", "sess-1")
+    assert tick(index_dir, home, now=NOW, launcher=lambda sid, log: True) == []
