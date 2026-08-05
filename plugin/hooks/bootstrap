@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# rekol plugin hook entrypoint + first-run bootstrap (spike for #153).
+#
+# Plugins have NO install-time hook, so the Python env has to be created on first
+# SessionStart. That moves a whole class of failure from install-time (loud,
+# non-zero exit, user is watching) to session-time (quiet, user is not) — the
+# direction that HIDES failures. QA's acceptance criterion #1 exists for exactly
+# that, and this script's job is to make the hidden case impossible:
+#
+#   * every failure writes a marker AND prints a user-visible line saying what
+#     broke and how to fix it — never a silent no-op;
+#   * a healthy bootstrap prints progress, because a silent 1-2 minute first
+#     launch reads as a hang, not as installing;
+#   * once broken, we say so ONCE per session rather than nagging every prompt.
+#
+# Concurrency: two projects opened cold race the same venv. We take an exclusive
+# lock and the loser waits rather than building a second, half-written env
+# (criterion #2). Interrupted builds leave a .partial marker, never a venv that
+# looks finished.
+
+set -uo pipefail
+
+MODE="${1:-inject}"
+STATE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/rekol/plugin}"
+VENV="$STATE_DIR/venv"
+LOCK="$STATE_DIR/.bootstrap.lock"
+PARTIAL="$STATE_DIR/.bootstrap.partial"
+FAILED="$STATE_DIR/.bootstrap.failed"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+# Report a failure LOUDLY and durably. stdout on SessionStart reaches the model,
+# so a broken bootstrap is visible in-session instead of silently degrading to
+# "rekol just doesn't seem to do anything".
+fail() {
+    printf '%s\n' "$1" > "$FAILED"
+    echo ""
+    echo "[rekol] ⚠ setup did not complete — memory is NOT active this session."
+    echo "  reason: $1"
+    echo "  fix:    $2"
+    echo "  detail: $STATE_DIR/bootstrap.log"
+    exit 0   # never fail the hook itself; the user has been told
+}
+
+rekol_bin() { echo "$VENV/bin/rekol"; }
+
+is_ready() { [ -x "$(rekol_bin)" ] && [ ! -f "$PARTIAL" ]; }
+
+bootstrap() {
+    # Single-writer: the loser of the race waits for the winner instead of
+    # building a competing venv over the same path.
+    exec 9>"$LOCK"
+    if ! flock -w 300 9 2>/dev/null; then
+        # No flock (macOS default bash lacks it) — fall back to a mkdir lock.
+        if ! mkdir "$STATE_DIR/.lockdir" 2>/dev/null; then
+            echo "[rekol] another session is setting up rekol — waiting…"
+            for _ in $(seq 1 150); do sleep 2; is_ready && return 0; done
+            fail "timed out waiting for another session's setup" "run: rm -rf '$STATE_DIR' and restart Claude Code"
+        fi
+        trap 'rmdir "$STATE_DIR/.lockdir" 2>/dev/null || true' EXIT
+    fi
+    is_ready && return 0   # winner may have finished while we waited
+
+    echo ""
+    echo "[rekol] first run: setting up local memory (one time, ~1-2 min)."
+    echo "[rekol] downloading the embedding model — this is why it's slow; later sessions start instantly."
+
+    : > "$PARTIAL"
+    rm -f "$FAILED"
+    local py
+    py="$(command -v python3.12 || command -v python3.11 || command -v python3)"
+    [ -n "$py" ] || fail "no python3 found on PATH" "install Python 3.11+ (brew install python)"
+
+    # The sqlite extension probe install.sh already does — same check, kept here
+    # so the plugin path can't silently ship a degraded keyword-only search.
+    if ! "$py" -c "import sqlite3,ensurepip; sqlite3.connect(':memory:').enable_load_extension(True)" 2>/dev/null; then
+        fail "this python's sqlite3 cannot load extensions (vector search would be degraded)" \
+             "install a suitable python: brew install uv && uv python install 3.12"
+    fi
+
+    {
+        echo "=== bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) using $py ==="
+        "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip && \
+        "$VENV/bin/pip" install --quiet "rekol==${REKOL_PLUGIN_VERSION:-0.4.0}"
+    } >> "$STATE_DIR/bootstrap.log" 2>&1 || \
+        fail "python environment build failed" "see the log, then restart Claude Code to retry"
+
+    is_ready || rm -f "$PARTIAL"
+    rm -f "$PARTIAL"
+    echo "[rekol] setup complete — memory is active."
+}
+
+# --- modes -------------------------------------------------------------------
+
+# Criterion #4: a user who ran install.sh and THEN installs the plugin would be
+# double-wired — two SessionStart injections, duplicate memory blocks, duplicate
+# capture-nudge. The plugin cannot edit settings.json (that is the whole point of
+# it), so it must DEFER rather than compete: detect the installer's hooks and go
+# silent, telling the user once how to pick one.
+settings_has_rekol_hooks() {
+    local settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
+    [ -f "$settings" ] || return 1
+    grep -q '"rekol _hook\|rekol _hook ' "$settings" 2>/dev/null
+}
+
+if settings_has_rekol_hooks && [ "$MODE" != "doctor" ]; then
+    if [ ! -f "$STATE_DIR/.coexist-warned" ]; then
+        : > "$STATE_DIR/.coexist-warned"
+        echo ""
+        echo "[rekol] plugin is standing down — an install.sh installation is already wired"
+        echo "  in ~/.claude/settings.json, and running both would double every injection."
+        echo "  Keep one: either uninstall the plugin, or run rekol's uninstall to drop the"
+        echo "  settings.json hooks and let the plugin take over."
+    fi
+    exit 0
+fi
+
+case "$MODE" in
+    inject)
+        if [ -f "$FAILED" ]; then
+            # Already-known breakage: say it once per session, not every prompt.
+            echo ""
+            echo "[rekol] ⚠ memory inactive — setup failed previously: $(head -1 "$FAILED")"
+            echo "  retry: rm -f '$FAILED' and restart Claude Code"
+            exit 0
+        fi
+        is_ready || bootstrap
+        is_ready || exit 0
+        "$(rekol_bin)" _hook session-tasks 2>/dev/null || true
+        "$(rekol_bin)" _hook session-coverage 2>/dev/null || true
+        "$(rekol_bin)" _hook session-confidence 2>/dev/null || true
+        ;;
+    prompt)
+        is_ready || exit 0
+        "$(rekol_bin)" _hook time-context 2>/dev/null || true
+        "$(rekol_bin)" _hook capture-nudge 2>/dev/null || true
+        ;;
+    session-end)
+        is_ready || exit 0
+        nohup "$(rekol_bin)" session-index --incremental >/dev/null 2>&1 &
+        ;;
+    doctor)   # spike helper: report state without touching anything
+        echo "state dir : $STATE_DIR"
+        echo "ready     : $(is_ready && echo yes || echo no)"
+        echo "partial   : $([ -f "$PARTIAL" ] && echo yes || echo no)"
+        echo "failed    : $([ -f "$FAILED" ] && cat "$FAILED" || echo no)"
+        ;;
+    *) echo "usage: bootstrap {inject|prompt|session-end|doctor}" >&2; exit 2 ;;
+esac
