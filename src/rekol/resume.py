@@ -41,6 +41,7 @@ from pathlib import Path
 FREEZE_JOURNAL_NAME = "freeze-journal.jsonl"
 RESUME_LEDGER_NAME = "resume-ledger.jsonl"
 RESUME_LOG_NAME = "resume-launches.log"
+RESUME_ENABLED_NAME = "resume-enabled"
 
 # Error types we treat as limit-shaped. Docs are explicit that StopFailure
 # matchers include rate_limit and billing_error but silent on which one an
@@ -89,6 +90,23 @@ def freeze_journal_path(index_dir: Path) -> Path:
 def ledger_path(index_dir: Path) -> Path:
     """Where the resumed-(session,freeze) idempotency ledger lives."""
     return index_dir / RESUME_LEDGER_NAME
+
+
+def enabled_marker_path(index_dir: Path) -> Path:
+    """Where the explicit opt-in marker lives (written by ``enable``)."""
+    return index_dir / RESUME_ENABLED_NAME
+
+
+def is_enabled(index_dir: Path) -> bool:
+    """True when the user has opted in and not since opted out.
+
+    The kill-switch ``tick`` consults. It is an explicit marker rather than "is
+    the hook registered in settings.json?" for two reasons: the settings path is
+    the exact surface that already shipped one silent-lie bug, and on Linux
+    there is no plist to check either — so the marker is the only signal that
+    means the same thing on both platforms.
+    """
+    return enabled_marker_path(index_dir).exists()
 
 
 def record_stop_failure(index_dir: Path, payload: dict) -> None:
@@ -198,6 +216,12 @@ def tick(
 
     now = now or _dt.datetime.now()
     launcher = launcher or _launch_detached
+    if not is_enabled(index_dir):
+        # Kill-switch. `disable` removes the marker, so a tick the user scheduled
+        # themselves (the recommended Linux workflow: `enable --no-launchd` +
+        # cron) stops resuming immediately instead of running on forever off a
+        # leftover journal. Checked FIRST so a disabled install does no work.
+        return []
     entries = _read_jsonl(freeze_journal_path(index_dir))
     ledger_entries = _read_jsonl(ledger_path(index_dir))
     already = {(e.get("session_id"), e.get("entry_ts")) for e in ledger_entries}
