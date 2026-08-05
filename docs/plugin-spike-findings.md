@@ -77,16 +77,34 @@ from `settings.json` — so it should be behaviour-identical. Confirming that
 end-to-end needs the plugin actually installed, which was deliberately not done
 on a live machine during the spike (it would add hooks to every session).
 
-## Blocker: package source
+## Package source — resolved, and deliberately NOT PyPI
 
-The bootstrap does `pip install rekol==<version>` — but **rekol is not published
-to PyPI**, so there is nothing to install. This is not a plugin problem; it is a
-distribution prerequisite shared with #116. Options: publish to PyPI, or pip
-install from a tagged GitHub release artifact.
+The bootstrap needs somewhere to install rekol from, and **rekol is not on PyPI**
+(`pypi.org/pypi/rekol` → 404). Two options existed; the spike uses the second:
 
-**This makes #28 (release pipeline) a dependency of the plugin path, not just of
-Homebrew.** Worth stating plainly: plugin-first is *not* dependency-free, it just
-has a smaller and more useful dependency than brew.
+**Rejected — publish to PyPI.** Three problems, the third decisive:
+1. Publishing/broadcasting — a stranger can `pip install rekol` the moment it lands.
+2. Security surface — needs a PyPI token in CI.
+3. **It is a one-way namespace claim.** You cannot un-take a name that others may
+   come to depend on, and which account owns it has a long tail. That is a
+   deliberate decision for the project owner, not a side effect of unblocking a
+   spike.
+
+**Chosen — install from the tagged GitHub release artifact:**
+
+```
+https://github.com/rekol-io/rekol/archive/refs/tags/v<version>.tar.gz
+```
+
+Verified fetchable with **no credentials** (HTTP 200, ~1.8 MB). Claims no
+namespace, reversible, and unblocks the container test immediately. Overridable
+via `REKOL_SDIST` for testing against a branch.
+
+**#28 (release pipeline) is still a dependency of the plugin path**, since the
+bootstrap points at a *tagged release* — worth stating plainly, because
+"plugin-first is dependency-free" would be wrong. It is simply the smaller
+dependency: a package artifact, versus a whole formula-versioning pipeline for
+brew.
 
 ## Prototype layout
 

@@ -26,6 +26,16 @@ VENV="$STATE_DIR/venv"
 LOCK="$STATE_DIR/.bootstrap.lock"
 PARTIAL="$STATE_DIR/.bootstrap.partial"
 FAILED="$STATE_DIR/.bootstrap.failed"
+
+# Install from the TAGGED GITHUB RELEASE, not PyPI. Deliberate: publishing to
+# PyPI needs a token in CI, is instantly public, and — the decisive one — taking
+# the `rekol` name is effectively ONE-WAY. You cannot un-claim a name others may
+# come to depend on, and which account owns it has a long tail. That is a
+# deliberate decision for the project owner, not a side effect of unblocking a
+# plugin bootstrap. The release tarball needs no credentials, claims no
+# namespace, and is reversible.
+REKOL_VERSION="${REKOL_PLUGIN_VERSION:-0.4.0}"
+REKOL_SDIST="${REKOL_SDIST:-https://github.com/rekol-io/rekol/archive/refs/tags/v${REKOL_VERSION}.tar.gz}"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 # Report a failure LOUDLY and durably. stdout on SessionStart reaches the model,
@@ -80,7 +90,7 @@ bootstrap() {
     {
         echo "=== bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) using $py ==="
         "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip && \
-        "$VENV/bin/pip" install --quiet "rekol==${REKOL_PLUGIN_VERSION:-0.4.0}"
+        "$VENV/bin/pip" install --quiet "$REKOL_SDIST"
     } >> "$STATE_DIR/bootstrap.log" 2>&1 || \
         fail "python environment build failed" "see the log, then restart Claude Code to retry"
 
