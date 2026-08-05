@@ -1,8 +1,12 @@
 # REKOL
 
-> **Local-first memory for the AI assistant you already use.** A drop-in memory
-> layer — no API key, runs on your machine, and your assistant uses it
-> automatically. Your memory is markdown in a folder you own.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/rekol-io/rekol/actions/workflows/ci.yml/badge.svg)](https://github.com/rekol-io/rekol/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/rekol-io/rekol)](https://github.com/rekol-io/rekol/releases)
+
+> **Local-first memory for Claude Code** — the assistant you already use. A
+> drop-in memory layer: no API key, runs on your machine, and Claude Code uses
+> it automatically. Your memory is markdown in a folder you own.
 
 ![REKOL — a fresh session recalls your project's conventions from memory](docs/demo.gif)
 
@@ -27,21 +31,6 @@ your context and uses it. REKOL's specific corner:
 Your memory is plain **markdown you own** (Obsidian, grep, git), and REKOL
 searches your past **session transcripts** alongside your curated notes — these
 are table stakes done well, not the headline.
-
-## Prerequisites
-- macOS or Linux; **Claude Code** installed (REKOL is a memory layer for it).
-- **Python ≥3.11 whose `sqlite3` has `enable_load_extension`** — required for
-  `sqlite-vec` vector search. macOS's *system* python and the python.org
-  installer ship this **disabled**, which degrades search to a keyword/numpy
-  fallback. Reliable options (`install.sh` auto-detects and prefers these):
-  - `brew install uv && uv python install 3.12` — uv's Python always has the
-    extension; the installer picks it up automatically.
-  - or `brew install python` — Homebrew's default `python@3` is built with extensions.
-- **jq** (optional) — only for automatic `~/.claude/settings.json` hook wiring;
-  without it the installer prints the snippet to merge by hand.
-
-If no suitable interpreter is found, `install.sh` now stops early with the exact
-fix rather than installing a degraded setup.
 
 ## Quickstart (macOS & Linux)
 
@@ -91,6 +80,26 @@ sensitive projects with `exclude_paths` / `.rekolignore`.
 - `--help` — print usage and exit.
 </details>
 
+<details>
+<summary><strong>Install failed, or search seems degraded? Check prerequisites</strong></summary>
+
+- macOS or Linux; **Claude Code** installed (REKOL is a memory layer for it).
+- **Python ≥3.11 whose `sqlite3` has `enable_load_extension`** — required for
+  `sqlite-vec` vector search. macOS's *system* python and the python.org
+  installer ship this **disabled**, which degrades search to a keyword/numpy
+  fallback. Reliable options (`install.sh` auto-detects and prefers these):
+  - `brew install uv && uv python install 3.12` — uv's Python always has the
+    extension; the installer picks it up automatically.
+  - or `brew install python` — Homebrew's default `python@3` is built with extensions.
+- **jq** (optional) — only for automatic `~/.claude/settings.json` hook wiring;
+  without it the installer prints the snippet to merge by hand.
+
+If no suitable interpreter is found, `install.sh` stops early with the exact fix
+rather than installing a degraded setup.
+</details>
+
+*If REKOL is useful to you, a ⭐ helps others find it.*
+
 ## Bring in your history
 
 Install already **backfilled your existing Claude Code transcripts** into a local
@@ -133,12 +142,50 @@ real token spend against your account, proportional to how much history you
 feed it. It's opt-in and review-gated for exactly that reason; start scoped if
 your corpus is big.
 
+## Session continuity
+
+Memory keeps your *facts*. These keep your **work in progress** — the things a
+session normally loses when it ends, compacts, or hits a usage limit.
+
+**Tasks that outlive the session.** Claude Code's task list is session-scoped;
+REKOL's is markdown in your memory folder, and open tasks are re-injected at the
+start of every new session — so a fresh session already knows what you were doing.
+```bash
+rekol task add "Finish the migration" --note "next: backfill the old rows"
+rekol task list          # also: start / done / block
+```
+
+**Survive context compaction.** When Claude Code compacts a long session, its
+summarizer preferentially drops decisions, rationale, and conventions — silently.
+REKOL re-injects your memory index and open tasks after every compaction
+automatically, and can nudge you to capture durable decisions *before* the
+squeeze. See [docs/compaction.md](docs/compaction.md) for the paste-in
+`# Compact Instructions` block and the optional usage-threshold nudge.
+
+**Pick up after a usage-limit freeze (opt-in, off by default).** When a limit
+interrupts you mid-task, REKOL can continue that session once the limit resets —
+only for sessions that had a task in progress.
+```bash
+rekol resume enable      # also: status / disable / tick --dry-run
+```
+On **macOS** this also installs a 5-minute watchdog (launchd). On **Linux** it
+registers the freeze recorder only — schedule the watchdog yourself, e.g.
+`*/5 * * * * rekol resume tick` in cron — otherwise nothing is checking for the
+reset.
+
+*Currently instrumentation-first: it records real freezes to confirm the trigger
+before we promise unattended resumes. See [#143](https://github.com/rekol-io/rekol/issues/143).*
+
 ## CLI
 A single `rekol` command with subcommands:
 - `rekol search "query" [--top N] [--json]` — semantic + keyword search.
 - `rekol index rebuild | update` — (re)build the vector index.
 - `rekol capture` — add a new memory.
 - `rekol import <dir>` — import an existing notes/docs tree into search.
+- `rekol task add | start | done | block | list` — cross-session tasks.
+- `rekol resume enable | disable | status | tick` — auto-resume after a usage-limit
+  freeze (opt-in, off by default).
+- `rekol doctor` — diagnose index health; reports anything invisible to search.
 
 ## Layout
 Memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback):
@@ -146,6 +193,7 @@ Memory lives under `$REKOL_HOME` (`$MEMORY_HOME` is accepted as a fallback):
 - `when/` — task-triggered rules.
 - `topics/` — canonical-source registry.
 - `knowledge/` — long-form durable lessons.
+- `tasks/` — cross-session work in progress (one file per task).
 
 The markdown is the source of truth. The SQLite vector index is disposable and
 rebuildable, and lives in a machine-local cache *outside* `$REKOL_HOME`
