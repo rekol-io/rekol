@@ -241,6 +241,14 @@ def session_coverage() -> None:
 _TASKS_FOOTER_MAX = 10
 
 
+def _blocked_reason(body: str) -> str:
+    """Pull the reason out of a blocked task's body (`rekol task block --reason`)."""
+    for line in reversed(body.splitlines()):
+        if line.strip().startswith("Blocked:"):
+            return line.strip()[len("Blocked:") :].strip()[:120]
+    return ""
+
+
 @hook_group.command(name="session-tasks")
 def session_tasks() -> None:
     """Surface open/in_progress cross-session tasks at SessionStart (#113).
@@ -258,22 +266,40 @@ def session_tasks() -> None:
         from rekol.config import load_config
         from rekol.tasks import list_tasks
 
-        tasks = [
-            t for t in list_tasks(load_config().memory_home) if t.status in ("open", "in_progress")
+        live = [
+            t
+            for t in list_tasks(load_config().memory_home)
+            if t.status in ("open", "in_progress", "blocked")
         ]
     except Exception:  # noqa: BLE001 — a hook must never break the session injection
         return
-    if not tasks:
+    if not live:
         return
-    shown, extra = tasks[:_TASKS_FOOTER_MAX], len(tasks) - _TASKS_FOOTER_MAX
+    # Blocked first, always shown: a blocked task is the one thing the user must
+    # see — it means work stopped and something (often a decision from them) is
+    # needed. Burying it under a long open list, or capping it away, would defeat
+    # the point of a durable "I'm stuck" signal.
+    blocked = [t for t in live if t.status == "blocked"]
+    others = [t for t in live if t.status != "blocked"]
+    shown, extra = others[:_TASKS_FOOTER_MAX], len(others) - _TASKS_FOOTER_MAX
+
     click.echo("")
-    click.echo("[rekol] open tasks (durable, cross-session — manage with `rekol task`):")
-    for task in shown:
-        marker = "◐" if task.status == "in_progress" else "○"
-        claim = f" [{task.owner_role}]" if task.owner_role else ""
-        click.echo(f"  {marker} {task.id}: {task.title}{claim}")
-    if extra > 0:
-        click.echo(f"  …and {extra} more — run `rekol task list`.")
+    if blocked:
+        click.echo("[rekol] ⚠ BLOCKED — work stopped, needs a decision:")
+        for task in blocked:
+            claim = f" [{task.owner_role}]" if task.owner_role else ""
+            click.echo(f"  ⊘ {task.id}: {task.title}{claim}")
+            reason = _blocked_reason(task.body)
+            if reason:
+                click.echo(f"      → {reason}")
+    if shown:
+        click.echo("[rekol] open tasks (durable, cross-session — manage with `rekol task`):")
+        for task in shown:
+            marker = "◐" if task.status == "in_progress" else "○"
+            claim = f" [{task.owner_role}]" if task.owner_role else ""
+            click.echo(f"  {marker} {task.id}: {task.title}{claim}")
+        if extra > 0:
+            click.echo(f"  …and {extra} more — run `rekol task list`.")
 
 
 # Nudge a capture pass when context crosses this fill level (#122). Early on
