@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-08-04
 ### Added
 - Blocked tasks are surfaced at SessionStart (#113 follow-up): `rekol _hook session-tasks`
   previously filtered `blocked` out entirely, so a task blocked by an agent was invisible
