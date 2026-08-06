@@ -1,0 +1,9 @@
+# SHA-256 of the release artifact each plugin version installs.
+# Updated by the release process; the bootstrap REFUSES to install anything
+# whose hash is not listed here or does not match.
+#
+# Why this file exists: rekol's pitch is "no API key, nothing leaves your
+# machine, audit the repo instead of piping a script into your shell". An
+# install path that downloads and executes an unverified tarball on first run
+# contradicts exactly that — and would be a fair hit from the audience we want.
+0.4.0  750a8aa52725493a6008bc859984401d9c06cd1c7c26140e940b93c6438f46f4

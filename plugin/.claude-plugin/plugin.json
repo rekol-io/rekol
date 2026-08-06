@@ -1,0 +1,9 @@
+{
+  "name": "rekol",
+  "description": "Local-first layered memory for Claude Code: your project's conventions, decisions and open work, recalled automatically",
+  "version": "0.4.0",
+  "homepage": "https://rekol.io",
+  "repository": "https://github.com/rekol-io/rekol",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "context", "local-first", "search", "recall"]
+}

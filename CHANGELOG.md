@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- Claude Code plugin spike (#153): prototype plugin under `plugin/` that declares rekol's
+  hooks natively (`hooks/hooks.json`) instead of merging them into the user's
+  `settings.json`. Findings in `docs/plugin-spike-findings.md` — 4 of 5 acceptance criteria
+  pass with evidence (failure visibility, concurrency under 12 simultaneous cold starts,
+  scriptable install, coexistence stand-down); the fifth needs a live install. Surfaced a
+  real blocker: the bootstrap needs a package source and rekol is not on PyPI, which makes
+  #28 a dependency of the plugin path.
+
 
 ## [0.4.0] - 2026-08-04
 ### Added

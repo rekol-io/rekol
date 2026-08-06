@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# rekol plugin hook entrypoint + first-run bootstrap (spike for #153).
+#
+# Plugins have NO install-time hook, so the Python env has to be created on first
+# SessionStart. That moves a whole class of failure from install-time (loud,
+# non-zero exit, user is watching) to session-time (quiet, user is not) — the
+# direction that HIDES failures. QA's acceptance criterion #1 exists for exactly
+# that, and this script's job is to make the hidden case impossible:
+#
+#   * every failure writes a marker AND prints a user-visible line saying what
+#     broke and how to fix it — never a silent no-op;
+#   * a healthy bootstrap prints progress, because a silent 1-2 minute first
+#     launch reads as a hang, not as installing;
+#   * once broken, we say so ONCE per session rather than nagging every prompt.
+#
+# Concurrency: two projects opened cold race the same venv. We take an exclusive
+# lock and the loser waits rather than building a second, half-written env
+# (criterion #2). Interrupted builds leave a .partial marker, never a venv that
+# looks finished.
+
+set -uo pipefail
+
+MODE="${1:-inject}"
+STATE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/rekol/plugin}"
+VENV="$STATE_DIR/venv"
+LOCK="$STATE_DIR/.bootstrap.lock"
+PARTIAL="$STATE_DIR/.bootstrap.partial"
+FAILED="$STATE_DIR/.bootstrap.failed"
+
+# Install from the TAGGED GITHUB RELEASE, not PyPI. Deliberate: publishing to
+# PyPI needs a token in CI, is instantly public, and — the decisive one — taking
+# the `rekol` name is effectively ONE-WAY. You cannot un-claim a name others may
+# come to depend on, and which account owns it has a long tail. That is a
+# deliberate decision for the project owner, not a side effect of unblocking a
+# plugin bootstrap. The release tarball needs no credentials, claims no
+# namespace, and is reversible.
+# A bootstrap that legitimately takes longer than this is already pathological;
+# past it we assume the holder is wedged rather than slow.
+LOCK_MAX_AGE="${REKOL_LOCK_MAX_AGE:-600}"
+REKOL_VERSION="${REKOL_PLUGIN_VERSION:-0.4.0}"
+REKOL_SDIST="${REKOL_SDIST:-https://github.com/rekol-io/rekol/archive/refs/tags/v${REKOL_VERSION}.tar.gz}"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+# Report a failure LOUDLY and durably. stdout on SessionStart reaches the model,
+# so a broken bootstrap is visible in-session instead of silently degrading to
+# "rekol just doesn't seem to do anything".
+fail() {
+    printf '%s\n' "$1" > "$FAILED"
+    echo ""
+    echo "[rekol] ⚠ setup did not complete — memory is NOT active this session."
+    echo "  reason: $1"
+    echo "  fix:    $2"
+    echo "  detail: $STATE_DIR/bootstrap.log"
+    exit 0   # never fail the hook itself; the user has been told
+}
+
+rekol_bin() { echo "$VENV/bin/rekol"; }
+
+is_ready() { [ -x "$(rekol_bin)" ] && [ ! -f "$PARTIAL" ]; }
+
+bootstrap() {
+    # Single-writer: the loser of the race waits for the winner instead of
+    # building a competing venv over the same path.
+    exec 9>"$LOCK"
+    if ! flock -w 300 9 2>/dev/null; then
+        # No flock (macOS default bash lacks it), so the mkdir lock IS the
+        # primary path on Mac. mkdir locks do NOT self-release: a process killed
+        # mid-bootstrap (kill -9, force quit, laptop sleep) leaves the directory
+        # behind, and without reaping every later session on that machine would
+        # hang or refuse to bootstrap FOREVER from one bad exit. So the lock
+        # records its owner and we reap it when the owner is gone or it is
+        # simply too old — a broken state must fail SAFE, same principle as
+        # #143's enabled-marker.
+        local lockdir="$STATE_DIR/.lockdir"
+        local waited=0
+        while ! mkdir "$lockdir" 2>/dev/null; do
+            local owner age now
+            owner="$(cat "$lockdir/pid" 2>/dev/null || echo 0)"
+            now="$(date +%s)"
+            age=$(( now - $(cat "$lockdir/started" 2>/dev/null || echo "$now") ))
+            if ! kill -0 "$owner" 2>/dev/null; then
+                echo "[rekol] clearing a stale setup lock (owner pid $owner is gone)"
+                rm -rf "$lockdir"; continue
+            fi
+            if [ "$age" -gt "$LOCK_MAX_AGE" ]; then
+                echo "[rekol] clearing a stuck setup lock (held ${age}s by pid $owner)"
+                rm -rf "$lockdir"; continue
+            fi
+            [ "$waited" -eq 0 ] && echo "[rekol] another session is setting up rekol — waiting…"
+            waited=$((waited + 2)); sleep 2
+            is_ready && return 0
+            if [ "$waited" -gt "$LOCK_MAX_AGE" ]; then
+                fail "setup lock never released (waited ${waited}s)" \
+                     "run: rm -rf '$lockdir' and restart Claude Code"
+            fi
+        done
+        printf '%s' "$$"          > "$lockdir/pid"
+        printf '%s' "$(date +%s)" > "$lockdir/started"
+        trap 'rm -rf "$STATE_DIR/.lockdir" 2>/dev/null || true' EXIT
+    fi
+    is_ready && return 0   # winner may have finished while we waited
+
+    echo ""
+    echo "[rekol] first run: setting up local memory (one time, ~1-2 min)."
+    echo "[rekol] downloading the embedding model — this is why it's slow; later sessions start instantly."
+
+    : > "$PARTIAL"
+    rm -f "$FAILED"
+    local py
+    py="$(command -v python3.12 || command -v python3.11 || command -v python3)"
+    [ -n "$py" ] || fail "no python3 found on PATH" "install Python 3.11+ (brew install python)"
+
+    # The sqlite extension probe install.sh already does — same check, kept here
+    # so the plugin path can't silently ship a degraded keyword-only search.
+    if ! "$py" -c "import sqlite3,ensurepip; sqlite3.connect(':memory:').enable_load_extension(True)" 2>/dev/null; then
+        fail "this python's sqlite3 cannot load extensions (vector search would be degraded)" \
+             "install a suitable python: brew install uv && uv python install 3.12"
+    fi
+
+    {
+        echo "=== bootstrap $(date -u +%Y-%m-%dT%H:%M:%SZ) using $py ==="
+        "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip
+    } >> "$STATE_DIR/bootstrap.log" 2>&1 || \
+        fail "python environment build failed" "see the log, then restart Claude Code to retry"
+
+    # Supply chain: download, VERIFY, then install from the local file. Never
+    # pipe an unverified network artifact straight into pip.
+    local want tarball got
+    want="$(awk -v v="$REKOL_VERSION" '$1==v {print $2}' "${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}/artifacts.sha256" 2>/dev/null)"
+    [ -n "$want" ] || fail "no pinned checksum for rekol $REKOL_VERSION" \
+        "this plugin build is incomplete — report it; do NOT bypass the check"
+    tarball="$STATE_DIR/rekol-$REKOL_VERSION.tar.gz"
+    curl -fsSL "$REKOL_SDIST" -o "$tarball" 2>>"$STATE_DIR/bootstrap.log" || \
+        fail "could not download rekol $REKOL_VERSION" "check network/proxy, then restart Claude Code"
+    got="$(shasum -a 256 "$tarball" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$got" != "$want" ]; then
+        rm -f "$tarball"
+        fail "checksum MISMATCH for rekol $REKOL_VERSION (got ${got:0:12}…, want ${want:0:12}…)" \
+             "refusing to install an unverified artifact — report this"
+    fi
+    "$VENV/bin/pip" install --quiet "$tarball" >>"$STATE_DIR/bootstrap.log" 2>&1 || \
+        fail "install of the verified artifact failed" "see $STATE_DIR/bootstrap.log"
+    rm -f "$tarball"
+
+    is_ready || rm -f "$PARTIAL"
+    rm -f "$PARTIAL"
+    echo "[rekol] setup complete — memory is active."
+}
+
+# --- modes -------------------------------------------------------------------
+
+# Criterion #4: a user who ran install.sh and THEN installs the plugin would be
+# double-wired — two SessionStart injections, duplicate memory blocks, duplicate
+# capture-nudge. The plugin cannot edit settings.json (that is the whole point of
+# it), so it must DEFER rather than compete: detect the installer's hooks and go
+# silent, telling the user once how to pick one.
+settings_has_rekol_hooks() {
+    local settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
+    [ -f "$settings" ] || return 1
+    grep -q '"rekol _hook\|rekol _hook ' "$settings" 2>/dev/null
+}
+
+if settings_has_rekol_hooks && [ "$MODE" != "doctor" ]; then
+    if [ ! -f "$STATE_DIR/.coexist-warned" ]; then
+        : > "$STATE_DIR/.coexist-warned"
+        echo ""
+        echo "[rekol] plugin is standing down — an install.sh installation is already wired"
+        echo "  in ~/.claude/settings.json, and running both would double every injection."
+        echo "  Keep one: either uninstall the plugin, or run rekol's uninstall to drop the"
+        echo "  settings.json hooks and let the plugin take over."
+    fi
+    exit 0
+fi
+
+case "$MODE" in
+    inject)
+        if [ -f "$FAILED" ]; then
+            # Already-known breakage: say it once per session, not every prompt.
+            echo ""
+            echo "[rekol] ⚠ memory inactive — setup failed previously: $(head -1 "$FAILED")"
+            echo "  retry: rm -f '$FAILED' and restart Claude Code"
+            exit 0
+        fi
+        is_ready || bootstrap
+        is_ready || exit 0
+        "$(rekol_bin)" _hook session-tasks 2>/dev/null || true
+        "$(rekol_bin)" _hook session-coverage 2>/dev/null || true
+        "$(rekol_bin)" _hook session-confidence 2>/dev/null || true
+        ;;
+    prompt)
+        is_ready || exit 0
+        "$(rekol_bin)" _hook time-context 2>/dev/null || true
+        "$(rekol_bin)" _hook capture-nudge 2>/dev/null || true
+        ;;
+    session-end)
+        is_ready || exit 0
+        nohup "$(rekol_bin)" session-index --incremental >/dev/null 2>&1 &
+        ;;
+    doctor)   # spike helper: report state without touching anything
+        echo "state dir : $STATE_DIR"
+        echo "ready     : $(is_ready && echo yes || echo no)"
+        echo "partial   : $([ -f "$PARTIAL" ] && echo yes || echo no)"
+        echo "failed    : $([ -f "$FAILED" ] && cat "$FAILED" || echo no)"
+        ;;
+    *) echo "usage: bootstrap {inject|prompt|session-end|doctor}" >&2; exit 2 ;;
+esac
