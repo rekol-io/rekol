@@ -174,6 +174,11 @@ def test_invalidate_still_soft_invalidates_a_memory_file(tmp_path: Path, monkeyp
 
     home = tmp_path / "memhome"
     (home / "topics").mkdir(parents=True)
+    # Without a config, load_config() falls back to DEFAULTS — i.e. the REAL
+    # BAAI model — and this unit test silently acquires a network dependency on
+    # huggingface.co, failing whenever CI can't reach it (#155). Every other test
+    # pins the hashing embedder for exactly this reason.
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
     target = home / "topics" / "prometheus.md"
     target.write_text(
         "---\ntype: topic\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\nA fact.\n"
