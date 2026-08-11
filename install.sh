@@ -610,6 +610,49 @@ if [[ "$DO_SKILL" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 6.9 — render hook snippets (#159)
+# =============================================================================
+# Hook snippets ship with `@REKOL@` where they invoke the CLI. We render that
+# into a PATH-independent invocation before merging.
+#
+# Why: hooks run in NON-INTERACTIVE shells, which read .zshenv/.zprofile but not
+# .zshrc — and .zshrc is where BIN_DIR lands. So a bare `rekol` in a hook exits
+# 127 the moment a session is launched from the desktop app, a multiplexer, or
+# an agent. Three of the eight invocations surfaced that as a visible error; the
+# rest were failing silently behind `|| true` and output redirection, which is
+# worse, not better.
+#
+# The fallback is BIN_DIR (not a hardcoded ~/bin) so `--bin-dir` installs stay
+# correct. `command -v` is still tried first, so the hooks keep working if the
+# install is later moved and PATH is what's accurate.
+#
+# This is the pattern hooks/auto-reindex.sh already used to be the only hook
+# immune to the bug; Step 6.9 just applies it everywhere.
+
+RENDERED_HOOK_DIR=""
+if [[ "$DO_HOOK" == "1" ]]; then
+  RENDERED_HOOK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rekol-hooks-XXXXXX")"
+  # shellcheck disable=SC2064  # expand RENDERED_HOOK_DIR now, not at trap time
+  trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
+
+  REKOL_INVOCATION="\$(command -v rekol || echo ${BIN_DIR}/rekol)"
+
+  for local_snippet_src in "${COMPONENT_DIR}"/hooks/*-snippet.json; do
+    local_snippet_dst="${RENDERED_HOOK_DIR}/$(basename "${local_snippet_src}")"
+    sed "s|@REKOL@|${REKOL_INVOCATION}|g" \
+      "${local_snippet_src}" > "${local_snippet_dst}"
+  done
+
+  # Fail loudly rather than silently merging an unrendered @REKOL@ into a user's
+  # settings.json — that would install a hook that can never run.
+  if grep -q '@REKOL@' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null; then
+    die "hook snippet rendering failed — @REKOL@ placeholder still present"
+  fi
+
+  say "rendered hook snippets with rekol at ${BIN_DIR}/rekol"
+fi
+
+# =============================================================================
 # Step 7 — SessionStart hook merge into ~/.claude/settings.json
 # =============================================================================
 
@@ -626,7 +669,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
   run "cp '${SETTINGS_JSON}' '${local_settings_backup}'"
   log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_backup}"
 
-  SNIPPET="${COMPONENT_DIR}/hooks/sessionstart-snippet.json"
+  SNIPPET="${RENDERED_HOOK_DIR}/sessionstart-snippet.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; printing hook snippet — merge manually into ${SETTINGS_JSON}"
@@ -822,7 +865,7 @@ log_journal "SYMLINK ${local_autoreindex_dst} -> ${local_autoreindex_src}"
 # existing PostToolUse hook entry (same pattern as Step 7).
 
 if [[ "$DO_HOOK" == "1" ]]; then
-  SNIPPET_PTU="${COMPONENT_DIR}/hooks/posttooluse-snippet.json"
+  SNIPPET_PTU="${RENDERED_HOOK_DIR}/posttooluse-snippet.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; printing PostToolUse snippet — merge manually into ${SETTINGS_JSON}"
@@ -893,7 +936,7 @@ fi
 # session-index handler) after any reminder tweak.
 
 if [[ "$DO_HOOK" == "1" ]]; then
-  SNIPPET_SE="${COMPONENT_DIR}/hooks/sessionend-snippet.json"
+  SNIPPET_SE="${RENDERED_HOOK_DIR}/sessionend-snippet.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; printing SessionEnd snippet — merge manually into ${SETTINGS_JSON}"
@@ -961,7 +1004,7 @@ fi
 # second injector and we warn — run the mac_setup uninstall, then re-run install.
 
 if [[ "$DO_HOOK" == "1" ]]; then
-  SNIPPET_UPS="${COMPONENT_DIR}/hooks/userpromptsubmit-snippet.json"
+  SNIPPET_UPS="${RENDERED_HOOK_DIR}/userpromptsubmit-snippet.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; printing UserPromptSubmit snippet — merge manually into ${SETTINGS_JSON}"
@@ -1032,7 +1075,7 @@ fi
 # the next turn's elapsed deltas. Idempotency keyed on `rekol _hook record-stop`.
 
 if [[ "$DO_HOOK" == "1" ]]; then
-  SNIPPET_STOP="${COMPONENT_DIR}/hooks/stop-snippet.json"
+  SNIPPET_STOP="${RENDERED_HOOK_DIR}/stop-snippet.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; printing Stop snippet — merge manually into ${SETTINGS_JSON}"
