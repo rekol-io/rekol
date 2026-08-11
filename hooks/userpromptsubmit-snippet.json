@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "@REKOL@ _hook time-context"
+            "command": "\"@REKOL@\" _hook time-context"
           }
         ]
       },
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "@REKOL@ _hook capture-nudge 2>/dev/null || true"
+            "command": "\"@REKOL@\" _hook capture-nudge 2>/dev/null || true"
           }
         ]
       }

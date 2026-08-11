@@ -636,11 +636,19 @@ if [[ "$DO_HOOK" == "1" ]]; then
   trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
 
   REKOL_INVOCATION="\$(command -v rekol || echo ${BIN_DIR}/rekol)"
+  # Same value, pre-quoted, for the steps that build a command string directly
+  # rather than rendering a snippet.
+  REKOL_INVOCATION_QUOTED="\"${REKOL_INVOCATION}\""
 
+  # Bash parameter expansion, NOT sed: the replacement text contains `||`, which
+  # collides with sed's `|` delimiter ("bad flag in substitute command") and made
+  # rendering fail outright. Any sed delimiter is a hostage to the replacement
+  # text; `${var//from/to}` has no delimiter to collide with.
   for local_snippet_src in "${COMPONENT_DIR}"/hooks/*-snippet.json; do
     local_snippet_dst="${RENDERED_HOOK_DIR}/$(basename "${local_snippet_src}")"
-    sed "s|@REKOL@|${REKOL_INVOCATION}|g" \
-      "${local_snippet_src}" > "${local_snippet_dst}"
+    local_snippet_body="$(cat "${local_snippet_src}")"
+    printf '%s\n' "${local_snippet_body//@REKOL@/${REKOL_INVOCATION}}" \
+      > "${local_snippet_dst}"
   done
 
   # Fail loudly rather than silently merging an unrendered @REKOL@ into a user's
@@ -650,6 +658,67 @@ if [[ "$DO_HOOK" == "1" ]]; then
   fi
 
   say "rendered hook snippets with rekol at ${BIN_DIR}/rekol"
+fi
+
+# =============================================================================
+# Step 6.95 — MIGRATE existing bare `rekol` hook commands in settings.json (#159)
+# =============================================================================
+# This step is what makes #159 safe to ship. Without it, changing the command
+# text actively breaks existing installs, because the five merge steps disagree
+# about how they detect "already present":
+#
+#   * Steps keyed on an EXACT command match (Step 7 SessionStart, Step 7C
+#     PostToolUse) stop matching the old text, read the hook as ABSENT, and
+#     APPEND — so the broken command and the fixed one both run, every session.
+#   * Steps keyed on `contains("_hook <name>")` still match the old text, so they
+#     SKIP — and the broken command stays forever. Re-running never repairs it.
+#
+# Either way the user ends up worse off than with the bug. So we rewrite the old
+# invocations IN PLACE first; the existing checks then see already-correct
+# commands and correctly no-op. Same in-place-upgrade shape as Step 7D (#135).
+#
+# Rewriting in place (rather than uninstall + reinstall) preserves any hooks the
+# user added or customised themselves — a blind uninstall would drop those.
+#
+# Only these exact invocations are rewritten. Prose mentions inside echo strings
+# (e.g. run `rekol capture`) are deliberately left alone, and the replacement is
+# literal, so it is naturally idempotent: once rewritten, `rekol <subcmd>` no
+# longer appears as a contiguous substring.
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS_JSON}" ]]; then
+  MIGRATED="$(
+    jq --arg rekol "${REKOL_INVOCATION}" '
+      ["_hook time-context","_hook record-stop","_hook session-confidence",
+       "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
+       "_hook stop-failure-record","review --nudge","session-index --incremental"]
+      as $subs
+      | (.hooks // {}) |= with_entries(
+          .value |= map(
+            (.hooks // []) |= map(
+              if (.command? // "") != "" then
+                .command |= ( . as $c | reduce $subs[] as $s
+                    ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
+              else . end
+            )
+          )
+        )
+    ' "${SETTINGS_JSON}" 2>/dev/null
+  )"
+  if [[ -n "$MIGRATED" ]] && ! diff -q <(printf '%s' "$MIGRATED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
+    local_settings_mig_backup="${SETTINGS_JSON}.bak-159-${TS}"
+    run "cp '${SETTINGS_JSON}' '${local_settings_mig_backup}'"
+    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_mig_backup}"
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    printf '%s\n' "$MIGRATED" > "${local_tmp}"
+    if jq -e . "${local_tmp}" >/dev/null 2>&1; then
+      run "mv '${local_tmp}' '${SETTINGS_JSON}'"
+      log_journal "MIGRATED bare rekol hook commands in ${SETTINGS_JSON} (#159)"
+      say "repaired existing hooks that invoked a bare 'rekol' (PATH-independent now)"
+    else
+      rm -f "${local_tmp}"
+      say "hook migration produced invalid JSON — left settings.json untouched" >&2
+    fi
+  fi
 fi
 
 # =============================================================================
@@ -675,24 +744,49 @@ if [[ "$DO_HOOK" == "1" ]]; then
     say "jq not found; printing hook snippet — merge manually into ${SETTINGS_JSON}"
     cat "${SNIPPET}"
   else
-    # Detect whether the exact hook command is already present to maintain idempotency
-    HAS_HOOK="$(
-      jq --slurpfile snip "${SNIPPET}" '
-        (.hooks.SessionStart // []) as $cur
-        | ($snip[0].hooks.SessionStart[0].hooks[0].command) as $cmd
-        | any($cur[]; .hooks // [] | any(.command == $cmd))
-      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+    # Classify add / current / upgrade by a STABLE SUBSTRING, then rewrite in
+    # place — the Step 7D pattern (#135). Exact-match idempotency was a latent
+    # bug: the memory-loader command has gained content over time (the
+    # session-confidence tail), so an older install no longer matches it
+    # exactly, reads as ABSENT, and gets a SECOND memory-loader appended —
+    # cat'ing REKOL.md into every session twice. Verified against a real install
+    # predating that change. Matching on the stable `REKOL.md` marker instead
+    # means an older variant is recognised and UPGRADED, not duplicated.
+    SS_STATE="$(
+      jq -r --slurpfile snip "${SNIPPET}" '
+        ($snip[0].hooks.SessionStart[0].hooks[0].command) as $cmd
+        | [ (.hooks.SessionStart // [])[] | (.hooks // [])[]
+            | select((.command // "") | contains("REKOL.md")) ] as $loaders
+        | if ($loaders | length) == 0 then "absent"
+          elif ($loaders | any(.command == $cmd)) then "current"
+          else "upgrade" end
+      ' "${SETTINGS_JSON}" 2>/dev/null || printf 'absent'
     )"
 
-    if [[ "$HAS_HOOK" == "true" ]]; then
-      say "SessionStart hook already present — no-op"
-    else
-      local_tmp="${SETTINGS_JSON}.tmp.$$"
-      run "jq --slurpfile snip '${SNIPPET}' \
-        '.hooks.SessionStart = ((.hooks.SessionStart // []) + \$snip[0].hooks.SessionStart)' \
-        '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "MERGED SessionStart hook into ${SETTINGS_JSON}"
-    fi
+    case "$SS_STATE" in
+      current)
+        say "SessionStart hook already present — no-op" ;;
+      upgrade)
+        local_tmp="${SETTINGS_JSON}.tmp.$$"
+        if [[ "$DRY_RUN" == "1" ]]; then
+          say "DRY-RUN: upgrade existing SessionStart memory-loader in place"
+        else
+          jq --slurpfile snip "${SNIPPET}" '
+            ($snip[0].hooks.SessionStart[0].hooks[0].command) as $cmd
+            | (.hooks.SessionStart) |= map(
+                (.hooks // []) |= map(
+                  if ((.command // "") | contains("REKOL.md")) then .command = $cmd else . end))
+          ' "${SETTINGS_JSON}" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
+        fi
+        log_journal "UPGRADED SessionStart memory-loader in place in ${SETTINGS_JSON}"
+        say "upgraded the existing SessionStart hook in place (no duplicate)" ;;
+      *)
+        local_tmp="${SETTINGS_JSON}.tmp.$$"
+        run "jq --slurpfile snip '${SNIPPET}' \
+          '.hooks.SessionStart = ((.hooks.SessionStart // []) + \$snip[0].hooks.SessionStart)' \
+          '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+        log_journal "MERGED SessionStart hook into ${SETTINGS_JSON}" ;;
+    esac
   fi
 fi
 
@@ -1014,8 +1108,13 @@ if [[ "$DO_HOOK" == "1" ]]; then
       jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. | test("inject-time-context.sh"))' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
+    # Match the STABLE SUBCOMMAND, not the literal bare command. This detection
+    # used to compare against the hardcoded string "rekol _hook time-context";
+    # once Step 6.95 rewrites that to the PATH-independent form, an exact compare
+    # stops matching, reads the hook as absent, and APPENDS a second
+    # time-context — which then fires twice per prompt. Caught in test.
     HAS_REKOL_TIME="$(
-      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+      jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. | test("_hook time-context"))' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
@@ -1082,7 +1181,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
     cat "${SNIPPET_STOP}"
   else
     HAS_STOP_HOOK="$(
-      jq '[.hooks.Stop[]?.hooks[]?.command] | any(. == "rekol _hook record-stop")' \
+      jq '[.hooks.Stop[]?.hooks[]?.command] | any(. | test("_hook record-stop"))' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
@@ -1115,7 +1214,7 @@ fi
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
   HAS_NUDGE="$(
-    jq '[.hooks.SessionEnd[]?.hooks[]?.command] | any(. == "rekol review --nudge")' \
+    jq '[.hooks.SessionEnd[]?.hooks[]?.command] | any(. | test("review --nudge"))' \
       "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
   )"
   if [[ "$HAS_NUDGE" == "true" ]]; then
@@ -1125,7 +1224,11 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     run "cp '${SETTINGS_JSON}' '${local_settings_nudge_backup}'"
     log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_nudge_backup}"
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \"rekol review --nudge\"}]}])' \
+    # Use the PATH-independent invocation (#159). This step used to write a
+    # hardcoded bare `rekol review --nudge`, i.e. the installer itself
+    # reintroduced the exit-127 bug on any machine where Step 7D no-ops.
+    run "jq --arg cmd '${REKOL_INVOCATION_QUOTED} review --nudge' \
+      '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "MERGED SessionEnd review-nudge handler into ${SETTINGS_JSON}"
     say "added SessionEnd review-nudge handler to ${SETTINGS_JSON}"

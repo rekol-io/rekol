@@ -42,11 +42,48 @@ def test_soft_fail_on_path_traversal_session_id(tmp_path, monkeypatch):
 
 
 def test_hook_snippets_call_rekol_hook():
+    """Snippets invoke the CLI through the @REKOL@ placeholder, not a bare `rekol`.
+
+    A bare `rekol` exits 127 in any hook whose shell didn't inherit an interactive
+    PATH (#159), so install.sh renders @REKOL@ into a PATH-independent
+    invocation. Asserting the placeholder — not the bare name — is what stops a
+    regression back to the broken form.
+    """
     repo = Path(__file__).resolve().parents[1]
     ups = json.loads((repo / "hooks" / "userpromptsubmit-snippet.json").read_text())
-    assert "rekol _hook time-context" in ups["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert "@REKOL@" in ups["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert "_hook time-context" in ups["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     stop = json.loads((repo / "hooks" / "stop-snippet.json").read_text())
-    assert "rekol _hook record-stop" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert "@REKOL@" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert "_hook record-stop" in stop["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+
+def test_no_snippet_invokes_a_bare_rekol(tmp_path):
+    """#159 regression guard: no shipped snippet may execute a bare `rekol`.
+
+    Prose mentions inside echo strings (backtick-quoted, e.g. run `rekol capture`)
+    are fine — those are text for the user, not commands. What must never come
+    back is an EXECUTED bare invocation, which is what exited 127.
+    """
+    import re
+
+    repo = Path(__file__).resolve().parents[1]
+    offenders = []
+    # command position: start of string, or after a shell separator
+    bare = re.compile(r"(?:^|[;&|(]\s*)rekol\s+(?:_hook|review|session-index|capture|search)\b")
+    for snippet in sorted((repo / "hooks").glob("*-snippet.json")):
+        data = json.loads(snippet.read_text())
+        for blocks in data.get("hooks", {}).values():
+            for block in blocks:
+                for hook in block.get("hooks", []):
+                    cmd = hook.get("command", "")
+                    # strip backticked prose so `rekol capture` in an echo doesn't trip it
+                    stripped = re.sub(r"`[^`]*`", "", cmd)
+                    if bare.search(stripped):
+                        offenders.append(f"{snippet.name}: {cmd[:80]}")
+    assert not offenders, "bare rekol invocation(s) would exit 127 in a hook:\n" + "\n".join(
+        offenders
+    )
 
 
 def test_soft_fail_on_non_dict_state_file(tmp_path, monkeypatch):
@@ -65,4 +102,4 @@ def test_sessionend_snippet_includes_review_nudge():
     repo = Path(__file__).resolve().parents[1]
     snip = json.loads((repo / "hooks" / "sessionend-snippet.json").read_text())
     cmds = [h["command"] for h in snip["hooks"]["SessionEnd"][0]["hooks"]]
-    assert any("rekol review --nudge" in c for c in cmds)
+    assert any("@REKOL@" in c and "review --nudge" in c for c in cmds)

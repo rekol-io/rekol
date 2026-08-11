@@ -914,10 +914,15 @@ PY
     [ "$status" -eq 0 ]
   done
 
-  # time-context survives, capture-nudge added exactly once.
-  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+  # time-context survives -- but MIGRATED to the PATH-independent form (#159), so
+  # match the stable subcommand rather than the old bare text, and assert the bare
+  # form is gone (a bare `rekol` in a hook exits 127).
+  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(contains("_hook time-context"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
+  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
   run jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command | select(contains("_hook capture-nudge"))] | length' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]

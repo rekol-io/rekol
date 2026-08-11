@@ -11,11 +11,11 @@
           },
           {
             "type": "command",
-            "command": "nohup @REKOL@ session-index --incremental >/dev/null 2>&1 &"
+            "command": "nohup \"@REKOL@\" session-index --incremental >/dev/null 2>&1 &"
           },
           {
             "type": "command",
-            "command": "@REKOL@ review --nudge"
+            "command": "\"@REKOL@\" review --nudge"
           }
         ]
       }
