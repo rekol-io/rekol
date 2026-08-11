@@ -5,6 +5,22 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### ⚠️ Action required for existing installs
+- **If you installed rekol before this version, re-run `install.sh` to get the hook fix
+  (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in
+  any session whose shell lacks an interactive PATH (desktop app, multiplexer, agent). Three
+  of the eight failed visibly; **five failed silently**, so features like the review nudge
+  simply never ran and nothing said so. The fix cannot reach an existing install on its own —
+  there is no self-update yet (#27).
+
+  ```bash
+  cd /path/to/rekol && git pull && ./install.sh
+  ```
+
+  Re-running is safe and idempotent: it repairs the old hook commands **in place** (writing a
+  timestamped `settings.json` backup first), preserves any hooks you added yourself, and does
+  not duplicate anything. It also adds handlers shipped since your install.
+
 ### Fixed
 - CI now runs the uninstall suite it already gated on: the change filter has named
   `tests/test_uninstall.bats` since it was written, but only `test_install.bats` was ever

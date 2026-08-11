@@ -214,6 +214,23 @@ out of the synced tree means a pasted secret can never leak through sync.
 - **Verify any install** with `rekol doctor --deep` — it checks the model loads,
   embeds meaningfully, and that recall works end-to-end.
 
+## Updating
+
+There's no self-update yet ([#27](https://github.com/rekol-io/rekol/issues/27)) — pull and
+re-run the installer:
+
+```bash
+cd /path/to/rekol && git pull && ./install.sh
+```
+
+Re-running is **safe and idempotent**: your memory folder is never overwritten, existing
+Claude Code hooks are upgraded in place (with a timestamped `settings.json` backup), hooks you
+added yourself are preserved, and nothing is duplicated. It also wires up any handlers added
+since you installed.
+
+Worth doing after any release: because rekol's integration lives in your `settings.json`, a
+new feature that adds a hook only reaches you when you re-run the installer.
+
 ## Uninstalling
 rekol is yours to remove cleanly. From the repo:
 ```bash

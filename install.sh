@@ -686,23 +686,34 @@ fi
 # longer appears as a contiguous substring.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS_JSON}" ]]; then
+  # `|| true` matters: under `set -e` a failing command substitution ABORTS the
+  # install. A migration that cannot run must be skipped, never fatal — repairing
+  # old hooks is a best-effort courtesy, not a precondition for installing.
+  # (Caught by the uninstall suite: install died right here after an uninstall.)
   MIGRATED="$(
     jq --arg rekol "${REKOL_INVOCATION}" '
       ["_hook time-context","_hook record-stop","_hook session-confidence",
        "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
        "_hook stop-failure-record","review --nudge","session-index --incremental"]
       as $subs
-      | (.hooks // {}) |= with_entries(
-          .value |= map(
-            (.hooks // []) |= map(
-              if (.command? // "") != "" then
-                .command |= ( . as $c | reduce $subs[] as $s
-                    ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
-              else . end
-            )
+      # Type-guard every level. `(.hooks // {}) |= ...` LOOKS safe but throws
+      # "Invalid path expression" when .hooks is absent entirely — which is
+      # exactly the post-uninstall shape ({} or {"env":...}), and combined with
+      # set -e that aborted the whole install. Null/!array values are skipped
+      # rather than iterated.
+      | if (.hooks | type) == "object" then
+          .hooks |= with_entries(
+            .value |= (if type == "array" then map(
+              if (.hooks? | type) == "array" then
+                .hooks |= map(
+                  if (.command? // "") != "" then
+                    .command |= ( . as $c | reduce $subs[] as $s
+                        ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
+                  else . end)
+              else . end) else . end)
           )
-        )
-    ' "${SETTINGS_JSON}" 2>/dev/null
+        else . end
+    ' "${SETTINGS_JSON}" 2>/dev/null || true
   )"
   if [[ -n "$MIGRATED" ]] && ! diff -q <(printf '%s' "$MIGRATED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
     local_settings_mig_backup="${SETTINGS_JSON}.bak-159-${TS}"
