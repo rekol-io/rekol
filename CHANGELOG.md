@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- CI no longer randomly fails on a network call (#155): a unit test in
+  `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
+  `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the
+  embedding model from huggingface.co at test time — red twice, on a release PR and a feature
+  PR, for reasons unrelated to either change. Pins the hashing embedder like the other 27 test
+  files, and CI now runs pytest with `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` so this class of
+  bug fails loudly on the offending test instead of intermittently on an innocent PR. The full
+  suite passes offline (and ~3x faster).
+
 ### Added
 - Claude Code plugin spike (#153): prototype plugin under `plugin/` that declares rekol's
   hooks natively (`hooks/hooks.json`) instead of merging them into the user's

@@ -63,6 +63,17 @@ jobs:
       - name: mypy
         run: mypy src/rekol
       - name: pytest
+        # Hard-offline for the model hub (#155). A unit test silently acquired a
+        # network dependency by omitting `embedding_model: test-hashing`, and CI
+        # went red twice — on a release PR and on a feature PR — for reasons
+        # unrelated to the change under test. Offline turns that class of bug
+        # from "intermittently red, re-run and shrug" into "always red, on the
+        # offending test", which is the only version anyone acts on. Verified:
+        # the whole suite passes offline (and ~3x faster, since nothing waits on
+        # the network).
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
         run: pytest -q
       - name: Install bats
         # OS-conditional: brew on macOS, apt on Linux (brew isn't the right installer on
