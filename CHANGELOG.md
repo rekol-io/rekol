@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- CI now runs the uninstall suite it already gated on: the change filter has named
+  `tests/test_uninstall.bats` since it was written, but only `test_install.bats` was ever
+  executed — so nothing verified uninstall, or (the part that matters) reinstall-after-uninstall.
+  #159 broke exactly that path and CI would have gone green. Two test-portability bugs had to be
+  fixed for the suite to pass on Linux: `md5 -q` is macOS-only (the suite could never have run on
+  ubuntu), and one assertion in `test_install.bats` compared two empty strings and therefore
+  asserted nothing.
 - CI no longer randomly fails on a network call (#155): a unit test in
   `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
   `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the

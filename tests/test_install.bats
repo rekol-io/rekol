@@ -400,10 +400,15 @@ manifest_index_dir() {
 # Test 7 — --test-mode does not modify ~/.zshrc
 # ---------------------------------------------------------------------------
 @test "test-mode does not modify ~/.zshrc" {
-    ZSHRC_BEFORE="$(md5 -q "$HOME/.zshrc" 2>/dev/null || echo '')"
+    # Used a macOS-only hash with `|| echo ''`, so on Linux BOTH sides became ""
+    # and this compared empty to empty -- it PASSED while asserting nothing, on
+    # every ubuntu run. shasum works on both; assert non-empty before trusting it.
+    [ -f "$HOME/.zshrc" ] || skip "no ~/.zshrc on this machine"
+    ZSHRC_BEFORE="$(shasum "$HOME/.zshrc" | awk '{print $1}')"
+    [ -n "$ZSHRC_BEFORE" ]
     run "${COMPONENT_DIR}/install.sh" --test-mode --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
     [ "$status" -eq 0 ]
-    ZSHRC_AFTER="$(md5 -q "$HOME/.zshrc" 2>/dev/null || echo '')"
+    ZSHRC_AFTER="$(shasum "$HOME/.zshrc" | awk '{print $1}')"
     [ "$ZSHRC_BEFORE" = "$ZSHRC_AFTER" ]
 }
 

@@ -88,6 +88,14 @@ jobs:
       - name: bats install-script test
         if: steps.filter.outputs.shell == 'true'
         run: bats tests/test_install.bats
+      # test_uninstall.bats was already in the change-filter above but was never
+      # actually RUN, so nothing verified uninstall or — more importantly —
+      # reinstall-after-uninstall. #159 broke exactly that path (install aborted
+      # because settings.json has no `hooks` key post-uninstall) and CI would
+      # have gone green. The gate has to run the suite it triggers on.
+      - name: bats uninstall-script test
+        if: steps.filter.outputs.shell == 'true'
+        run: bats tests/test_uninstall.bats
 
   version-bump:
     # #102: enforce that every PR to main bumps the version (patch, or a deliberate
