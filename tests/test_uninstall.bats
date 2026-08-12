@@ -389,14 +389,14 @@ manifest_index_dir() {
 # ---------------------------------------------------------------------------
 @test "--dry-run mutates nothing" {
     do_full_install
-    settings_before="$(md5 -q "${SBHOME}/.claude/settings.json")"
-    zshrc_before="$(md5 -q "${SBHOME}/.zshrc")"
+    settings_before="$(shasum "${SBHOME}/.claude/settings.json" | awk '{print $1}')"
+    zshrc_before="$(shasum "${SBHOME}/.zshrc" | awk '{print $1}')"
 
     run_uninstall --dry-run
     [ "$status" -eq 0 ]
 
-    [ "$settings_before" = "$(md5 -q "${SBHOME}/.claude/settings.json")" ]
-    [ "$zshrc_before" = "$(md5 -q "${SBHOME}/.zshrc")" ]
+    [ "$settings_before" = "$(shasum "${SBHOME}/.claude/settings.json" | awk '{print $1}')" ]
+    [ "$zshrc_before" = "$(shasum "${SBHOME}/.zshrc" | awk '{print $1}')" ]
     # Everything still present.
     [ -e "${BIN_DIR}/rekol" ]
     [ -d "${SBHOME}/.claude/skills/rekol" ]
