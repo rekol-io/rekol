@@ -144,8 +144,10 @@ def expected_handlers() -> set[str]:
 
 
 def snippet_handlers(snippet_dir: Path) -> set[str]:
-    """Handlers the shipped hook snippets declare — the installer's side of the
-    contract, used to cross-check :func:`expected_handlers` in tests.
+    """Handlers the shipped hook snippets declare.
+
+    The installer's side of the contract, used to cross-check
+    :func:`expected_handlers` in tests.
     """
     found: set[str] = set()
     if not snippet_dir.is_dir():
