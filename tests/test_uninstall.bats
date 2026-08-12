@@ -590,3 +590,52 @@ manifest_index_dir() {
     [ -f "${REKOLH}/topics/sailing.md" ]
     [ -f "${REKOLH}/always/identity.md" ]
 }
+
+# ------------- the remover's scope must match the detector's (#171 A6) --------
+# `strip_event` covered SessionStart/PostToolUse/SessionEnd/UserPromptSubmit/Stop
+# but NOT StopFailure — which is exactly where `rekol resume enable` registers. So
+# uninstall reported "stripped rekol hooks" while leaving a hook wired to a venv
+# it had just deleted. Worse, the HAS_REKOL gate walks EVERY event, so it saw the
+# survivor and each subsequent uninstall re-backed-up, re-claimed removal, and
+# stripped nothing: a detector wider than its remover can never confirm its claim.
+@test "uninstall strips StopFailure and every rekol env key, preserving others" {
+  SBHOME="$TESTROOT/sandhome-scope"
+  mkdir -p "$SBHOME/.claude"
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook session-tasks"}]}],
+    "StopFailure": [{"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook stop-failure-record"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "other-tool run"}]}]
+  },
+  "env": {"REKOL_HOME": "/x", "REKOL_TOOLS_HOME": "/y", "KEEP_ME": "1"}
+}
+JSON
+  REKOLH="$TESTROOT/rekolhome-scope"
+  mkdir -p "$REKOLH"
+
+  run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
+  [ "$status" -eq 0 ]
+
+  # No rekol hook survives, in ANY event.
+  left="$(jq -r '[.hooks // {} | .. | objects | .command? // empty] | map(select(test("rekol"))) | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$left" -eq 0 ] || { echo "$left rekol hook(s) survived"; jq '.hooks' "$SBHOME/.claude/settings.json"; false; }
+
+  # Both rekol env keys gone; the user's own key kept.
+  run jq -e '(.env | has("REKOL_HOME") or has("REKOL_TOOLS_HOME")) | not' "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  run jq -e '.env.KEEP_ME == "1"' "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+
+  # The other tool's hook is untouched.
+  run jq -e '.hooks.Stop[0].hooks[0].command == "other-tool run"' "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+
+  # And the claim is now confirmable: a SECOND uninstall must find nothing to strip.
+  run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to strip"* ]] || { echo "second run did not report a clean no-op"; echo "$output" | grep -i strip; false; }
+}

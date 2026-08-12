@@ -18,6 +18,16 @@ follow [Semantic Versioning](https://semver.org/).
     with `rekol venv not found` even though its command was a correct absolute path to the shim:
     the command was right and the shim could not find its own venv. `install.sh` now writes
     `REKOL_TOOLS_HOME` into `settings.json`'s `env` block beside `REKOL_HOME`.
+- **`uninstall.sh` left a hook and an env key behind while reporting them removed.** Its
+  `strip_event` list covered SessionStart / PostToolUse / SessionEnd / UserPromptSubmit / Stop but
+  **not `StopFailure`** — the one event `rekol resume enable` writes to. So uninstall printed
+  "stripped rekol hooks" while leaving a hook wired to the venv it had just deleted. Worse, the
+  `HAS_REKOL` detector walks *every* event, so it saw the survivor and each subsequent uninstall
+  re-backed-up, re-claimed removal, and stripped nothing: **a detector whose scope is wider than
+  its remover's can never confirm its own claim.** Both scopes now match, and the new test asserts
+  a second `uninstall.sh` reports "nothing to strip" — making the claim confirmable rather than
+  merely printed. (Adding `REKOL_TOOLS_HOME` above would otherwise have created a second leftover
+  of exactly this shape.)
 
 ### Added
 - **A test that executes every hook command the installer wrote (#170).** Nothing in this repo
