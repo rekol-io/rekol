@@ -63,6 +63,22 @@ def resolve_memory_home() -> str | None:
     return os.environ.get("REKOL_HOME") or os.environ.get("MEMORY_HOME")
 
 
+def resolve_claude_config_dir() -> Path:
+    """Resolve Claude Code's config tree, honouring ``CLAUDE_CONFIG_DIR``.
+
+    Claude Code lets users relocate ``~/.claude`` via this variable. rekol
+    hardcoded the default in several places, which meant a relocated tree got
+    hooks written into a ``settings.json`` Claude Code never reads — while
+    ``status`` reported them registered. Resolve it in exactly one place so the
+    next consumer cannot reintroduce the hardcode.
+
+    Branches on the RAW STRING: ``Path("")`` is ``PosixPath(".")`` and is
+    truthy, so a ``Path(x) or fallback`` would silently never fall back.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    return Path(os.path.expanduser(raw)) if raw.strip() else Path.home() / ".claude"
+
+
 def resolve_index_dir(memory_home: Path) -> Path:
     """Resolve the local-only cache dir that holds all derived index state.
 

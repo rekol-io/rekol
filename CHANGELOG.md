@@ -43,6 +43,44 @@ follow [Semantic Versioning](https://semver.org/).
   here: the `SessionStart` merge keyed idempotency on an exact command match, so an install
   predating the `session-confidence` tail would get a **second memory-loader** and inject
   REKOL.md twice — it now classifies and upgrades in place (the #135 Step-7D pattern).
+- Opt-in auto-resume (#143) was **inert while reporting itself ENABLED** — five independent
+  defects. Recording worked in practice (four real freezes were journalled on a live machine
+  between 2026-08-05 and 08-07), but **no resume could ever have happened**: defect 4 below made
+  the eligibility gate reject every entry unconditionally, and defect 5 would have launched into
+  the wrong project even if it had passed. Anyone who ran `rekol resume enable` before this
+  version should re-run it; `enable` now repairs an existing install in place instead of printing
+  "already registered" over a hook that cannot execute.
+  1. The `StopFailure` hook was registered as a bare `rekol …`, the same defect as #159 but in a
+     file #159 never touched, because this hook is written by `resume enable` rather than
+     `install.sh`. Hooks run in a non-interactive shell (no `.zshrc`), so it exited 127 — and the
+     hook's own `2>/dev/null || true` swallowed it.
+  2. The launchd plist copied an **allowlist of variable names** that omitted `REKOL_INDEX_DIR`
+     and `XDG_CACHE_HOME`, so a user with `XDG_CACHE_HOME` set had `enable` write the opt-in
+     marker to one directory while the tick looked in another, found no marker, and did nothing
+     forever. The plist now pins the **already-resolved** absolute paths, so there is nothing left
+     for the tick to resolve differently and the next env override cannot reintroduce the bug.
+  3. `CLAUDE_CONFIG_DIR` was read nowhere in the package, so a relocated Claude Code config tree
+     got the hook written into a `settings.json` Claude Code never reads. Now resolved in one
+     place (`config.resolve_claude_config_dir`).
+  4. Real `StopFailure` payloads carry `error`, not `error_type` — so the limit-shape gate
+     compared `""` and skipped **every** entry unconditionally, meaning even a correctly-wired,
+     correctly-firing hook would have resumed nothing. Verified against four captured freezes: the
+     payload keys are `agent_id, cwd, effort, error, error_details, hook_event_name,
+     last_assistant_message, prompt_id, session_id, transcript_path`, and `error` holds a short
+     code (observed: `rate_limit` ×2, `invalid_request` ×2) — not prose, and with **no reset time
+     anywhere**, so `parse_reset_time` never fires on this path and the 60-minute fallback is the
+     real one. Replayed against those four entries, the old gate classifies 0 as limit-shaped; the
+     fix classifies the two `rate_limit` entries as limit-shaped and correctly ignores the two
+     `invalid_request` ones.
+  5. A resume launched in the **wrong directory**. Claude Code stores transcripts per project
+     (`<config>/projects/<escaped-cwd>/<session-id>.jsonl`), so `claude --resume <id>` run from the
+     launchd job's directory cannot find the session — it would have failed even once everything
+     above was fixed. Every captured payload carries `cwd`; the launcher now uses it, and tolerates
+     a project directory that has since been deleted rather than raising inside the tick.
+  Also: the launchd job now has `StandardOutPath`/`StandardErrorPath` (launchd was discarding the
+  one "LAUNCH FAILED" line that says the feature is broken); the ledger records the launch
+  **outcome** as well as the claim, so `status` can no longer count a failed launch as a resume;
+  and `status` distinguishes "registered" from "registered but cannot execute".
 - CI no longer randomly fails on a network call (#155): a unit test in
   `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
   `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the

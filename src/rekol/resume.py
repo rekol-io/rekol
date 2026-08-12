@@ -42,6 +42,7 @@ FREEZE_JOURNAL_NAME = "freeze-journal.jsonl"
 RESUME_LEDGER_NAME = "resume-ledger.jsonl"
 RESUME_LOG_NAME = "resume-launches.log"
 RESUME_ENABLED_NAME = "resume-enabled"
+WATCHDOG_LOG_NAME = "resume-watchdog.log"
 
 # Error types we treat as limit-shaped. Docs are explicit that StopFailure
 # matchers include rate_limit and billing_error but silent on which one an
@@ -174,19 +175,84 @@ def _entry_fields(entry: dict) -> tuple[str, str, str]:
     """
     payload = entry.get("payload") or {}
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
-    error_type = str(payload.get("error_type") or payload.get("errorType") or "").lower()
+    # NB: the payload also carries `cwd` — see entry_cwd(). Claude Code scopes
+    # sessions per project directory, so resuming from the wrong cwd cannot find
+    # the session at all.
+    # `error` is the key real StopFailure payloads actually carry — confirmed
+    # against four captured freezes. Reading only error_type/errorType meant
+    # error_type was ALWAYS "" and the `not in LIMIT_ERROR_TYPES` gate below
+    # skipped every entry, so tick could never fire no matter what was journaled.
+    error_type = str(
+        payload.get("error_type") or payload.get("errorType") or payload.get("error") or ""
+    ).lower()
     message = str(payload.get("message") or payload.get("error") or "")
     return session_id, error_type, message
 
 
-def _launch_detached(session_id: str, log_path: Path) -> bool:
-    """Fire `claude -p --resume` fully detached; the tick never waits on the turn."""
+def is_limit_shaped(error_type: str, message: str) -> bool:
+    """True when a StopFailure looks like a usage limit rather than a real error.
+
+    GROUND TRUTH from four captured freezes (2026-08-05 … 08-07). The payload
+    keys are::
+
+        agent_id, cwd, effort, error, error_details, hook_event_name,
+        last_assistant_message, prompt_id, session_id, transcript_path
+
+    ``error`` holds a short CODE, not prose — the observed values were
+    ``rate_limit`` (×2) and ``invalid_request`` (×2). There is no ``error_type``
+    key, no ``message`` key, and **no reset time anywhere in the payload** (which
+    is why :func:`parse_reset_time` never fires on this path and the
+    ``FALLBACK_DELAY_MINUTES`` branch is the real one).
+
+    So code matching is the evidence-backed path, and reading ``error`` is what
+    makes it work at all: the old gate read only ``error_type``/``errorType``,
+    which are absent, so it compared ``""`` and skipped every entry forever.
+    ``invalid_request`` is correctly ignored by the same test.
+
+    The message branch below is **speculative** — no captured payload carries
+    prose. It is kept only so an account-level limit that words itself
+    differently is not missed, and it is deliberately narrow. A false positive
+    costs one wasted headless request; the real safety is elsewhere and
+    unchanged (an ``in_progress`` task claim, and one resume per tick).
+    """
+    if any(known in error_type for known in LIMIT_ERROR_TYPES):
+        return True
+    lowered = message.lower()
+    return "limit" in lowered and any(
+        phrase in lowered for phrase in ("reached your", "usage limit", "rate limit", "resets")
+    )
+
+
+def entry_cwd(entry: dict) -> str | None:
+    """The project directory a freeze happened in, if the payload recorded it.
+
+    Verified present in every captured freeze. Required for a resume to work at
+    all: Claude Code stores transcripts per project
+    (``<config>/projects/<escaped-cwd>/<session-id>.jsonl``), so
+    ``claude --resume <id>`` run from elsewhere cannot find the session.
+    """
+    payload = entry.get("payload") or {}
+    raw = payload.get("cwd")
+    return str(raw) if raw else None
+
+
+def _launch_detached(session_id: str, log_path: Path, cwd: str | None = None) -> bool:
+    """Fire `claude -p --resume` fully detached; the tick never waits on the turn.
+
+    ``cwd`` is the project directory the freeze occurred in. Without it the child
+    inherits the launchd job's directory — which is not the project — and the
+    resume silently resolves nothing while the ledger records an attempt.
+    """
     claude = shutil.which("claude")
     if claude is None:
         return False
+    # A recorded cwd that no longer exists must not raise inside the launcher:
+    # Popen would fail with FileNotFoundError and take the whole tick down.
+    launch_dir = cwd if cwd and Path(cwd).is_dir() else None
     with log_path.open("a", encoding="utf-8") as log:
         subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             [claude, "-p", "--resume", session_id, _RESUME_NUDGE],
+            cwd=launch_dir,
             stdout=log,
             stderr=log,
             stdin=subprocess.DEVNULL,
@@ -205,7 +271,7 @@ def tick(
 ) -> list[ResumeAction]:
     """One watchdog pass: decide (and unless dry-run, launch) at most ONE resume.
 
-    Resume iff ALL of: a journal entry is limit-shaped (`LIMIT_ERROR_TYPES`),
+    Resume iff ALL of: a journal entry is limit-shaped (`is_limit_shaped`),
     its reset time (parsed, else freeze+`FALLBACK_DELAY_MINUTES`) has passed,
     the #113 task layer holds an ``in_progress`` task claimed by that session
     (the intent semaphore), and the (session, freeze) pair is not already in
@@ -236,7 +302,7 @@ def tick(
     for entry in reversed(entries):  # newest freeze first
         session_id, error_type, message = _entry_fields(entry)
         entry_ts = str(entry.get("ts") or "")
-        if not session_id or error_type not in LIMIT_ERROR_TYPES:
+        if not session_id or not is_limit_shaped(error_type, message):
             continue
         if (session_id, entry_ts) in already:
             continue
@@ -271,7 +337,25 @@ def tick(
                     )
                     + "\n"
                 )
-            launched = launcher(session_id, index_dir / RESUME_LOG_NAME)
+            launched = launcher(session_id, index_dir / RESUME_LOG_NAME, entry_cwd(entry))
+            # Record the OUTCOME as a second append. The claim above must stay
+            # first (it is what makes a double-fire impossible), but without this
+            # a failed launch was indistinguishable from a successful one
+            # afterwards, and `status` counted it as a resume that happened.
+            # Appended rather than rewritten so the ledger stays append-only and
+            # a torn write can never destroy an existing claim.
+            with ledger_path(index_dir).open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "entry_ts": entry_ts,
+                            "outcome": "launched" if launched else "launch_failed",
+                            "recorded_at": now.isoformat(timespec="seconds"),
+                        }
+                    )
+                    + "\n"
+                )
         actions.append(
             ResumeAction(
                 session_id=session_id,

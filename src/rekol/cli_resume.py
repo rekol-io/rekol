@@ -22,27 +22,76 @@ from pathlib import Path
 
 import click
 
-from rekol.config import load_config
-from rekol.resume import enabled_marker_path, freeze_journal_path, is_enabled, ledger_path
+from rekol.config import load_config, resolve_claude_config_dir
+from rekol.resume import (
+    WATCHDOG_LOG_NAME,
+    enabled_marker_path,
+    freeze_journal_path,
+    is_enabled,
+    ledger_path,
+)
 from rekol.resume import tick as run_tick
+
+# Substring that identifies OUR hook regardless of how the invocation is
+# spelled. Detection must key on this, never on the full command text: the
+# command has already changed once (bare `rekol` → PATH-independent) and
+# exact-match detection would have re-registered a duplicate on every enable.
+_HOOK_MARKER = "_hook stop-failure-record"
+_PLIST_LABEL = "io.rekol.resume-watchdog"
+_TICK_INTERVAL_SECONDS = 300
+
+
+def _rekol_executable() -> str:
+    """Absolute path to this rekol's console script.
+
+    Derived from the running interpreter rather than ``PATH``: ``sys.executable``
+    is the venv python that is executing right now, so its sibling ``rekol`` is
+    guaranteed to be the one the user just invoked. ``shutil.which`` is only a
+    fallback for an unusual layout (e.g. an entry point outside the venv bin).
+    """
+    candidate = Path(sys.executable).parent / "rekol"
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("rekol") or str(candidate)
+
+
+def _watchdog_path() -> str:
+    """PATH for the launchd job, guaranteeing ``claude`` stays resolvable.
+
+    ``_launch_detached`` needs ``claude`` on PATH; if it is not, the resume is
+    consumed from the ledger and silently never happens. Pin the directory we
+    can see right now (the enabling shell HAS the user's real PATH) ahead of a
+    conservative default, so a leaner launchd environment cannot lose it.
+    """
+    parts: list[str] = []
+    for tool in ("claude", "rekol"):
+        found = shutil.which(tool)
+        if found:
+            parent = str(Path(found).parent)
+            if parent not in parts:
+                parts.append(parent)
+    for fallback in (os.environ.get("PATH", ""), "/usr/local/bin:/usr/bin:/bin"):
+        if fallback and fallback not in parts:
+            parts.append(fallback)
+    return ":".join(parts)
 
 
 def _hook_command() -> str:
     """The StopFailure hook command, PATH-independent (#159).
 
-    A bare `rekol` fails with exit 127 in any hook whose shell did not inherit an
-    interactive PATH — hooks read .zshenv/.zprofile but not .zshrc, and that is
-    where BIN_DIR is added. This hook is registered by `resume enable` rather than
-    by install.sh, so it needs the same guard the snippets get: try PATH first,
-    fall back to the absolute path of the rekol we are currently running as.
+    Claude Code runs hooks in a NON-INTERACTIVE shell, which reads ``.zshenv``
+    but not ``.zshrc`` — so a bare ``rekol`` exits 127. The hook then swallowed
+    that with its own ``2>/dev/null || true`` and the freeze journal stayed
+    empty forever while ``status`` reported the feature ENABLED.
+
+    Same rendered shape ``install.sh`` uses: prefer whatever is on PATH when a
+    login shell *is* present, else fall back to the absolute path recorded at
+    enable time (so a moved venv degrades to PATH rather than breaking).
     """
-    resolved = shutil.which("rekol") or str(Path(sys.executable).with_name("rekol"))
-    return f'"$(command -v rekol || echo {resolved})" _hook stop-failure-record 2>/dev/null || true'
-
-
-_HOOK_MARKER = "_hook stop-failure-record"
-_PLIST_LABEL = "io.rekol.resume-watchdog"
-_TICK_INTERVAL_SECONDS = 300
+    return (
+        f"\"$(command -v rekol || echo '{_rekol_executable()}')\" "
+        f"{_HOOK_MARKER} 2>/dev/null || true"
+    )
 
 
 def _settings_path() -> Path:
@@ -56,7 +105,7 @@ def _settings_path() -> Path:
     they reported the feature OFF while the hook was still wired.
     """
     raw = os.environ.get("CLAUDE_SETTINGS_PATH", "")
-    return Path(raw) if raw else (Path.home() / ".claude" / "settings.json")
+    return Path(raw) if raw else resolve_claude_config_dir() / "settings.json"
 
 
 def _plist_path() -> Path:
@@ -74,12 +123,34 @@ def _load_settings(path: Path) -> dict:
         ) from exc
 
 
-def _hook_registered(settings: dict) -> bool:
+def _our_hooks(settings: dict) -> list[dict]:
+    """Every hook entry in StopFailure that is ours, matched by marker."""
+    found = []
     for block in settings.get("hooks", {}).get("StopFailure", []) or []:
         for hook in block.get("hooks", []) or []:
             if _HOOK_MARKER in str(hook.get("command", "")):
-                return True
-    return False
+                found.append(hook)
+    return found
+
+
+def _hook_registered(settings: dict) -> bool:
+    return bool(_our_hooks(settings))
+
+
+def _repair_hooks(settings: dict, desired: str) -> int:
+    """Rewrite any of our hook entries whose command is stale. Returns the count.
+
+    Registration alone is not health: every install that ran ``resume enable``
+    before #159 carries a bare ``rekol`` command that cannot execute. Without
+    this, ``enable`` saw the marker, printed "already registered", and left the
+    broken command in place forever — the upgrade path nobody tested.
+    """
+    repaired = 0
+    for hook in _our_hooks(settings):
+        if str(hook.get("command", "")) != desired:
+            hook["command"] = desired
+            repaired += 1
+    return repaired
 
 
 def _write_settings(path: Path, settings: dict) -> None:
@@ -119,12 +190,22 @@ def enable(no_launchd: bool) -> None:
     settings_file = _settings_path()
     settings_file.parent.mkdir(parents=True, exist_ok=True)
     settings = _load_settings(settings_file)
+    desired = _hook_command()
     if _hook_registered(settings):
-        click.echo("freeze-recorder hook: already registered")
+        repaired = _repair_hooks(settings, desired)
+        if repaired:
+            _write_settings(settings_file, settings)
+            click.echo(
+                f"freeze-recorder hook: REPAIRED {repaired} stale invocation(s) in "
+                f"{settings_file} — the previous command could not run in a "
+                "non-interactive shell, so no freeze was ever recorded (backup written)"
+            )
+        else:
+            click.echo("freeze-recorder hook: already registered")
     else:
         hooks = settings.setdefault("hooks", {})
         hooks.setdefault("StopFailure", []).append(
-            {"matcher": "", "hooks": [{"type": "command", "command": _hook_command()}]}
+            {"matcher": "", "hooks": [{"type": "command", "command": desired}]}
         )
         _write_settings(settings_file, settings)
         click.echo(f"freeze-recorder hook: registered in {settings_file} (backup written)")
@@ -137,17 +218,32 @@ def enable(no_launchd: bool) -> None:
     if sys.platform != "darwin":
         click.echo("watchdog: launchd is macOS-only — drive `rekol resume tick` via cron instead")
         return
-    rekol_bin = shutil.which("rekol")
-    if rekol_bin is None:
-        raise SystemExit("error: `rekol` not found on PATH — cannot install the watchdog")
+    log_file = cfg.index_dir / WATCHDOG_LOG_NAME
     plist = {
         "Label": _PLIST_LABEL,
-        "ProgramArguments": [rekol_bin, "resume", "tick"],
+        "ProgramArguments": [_rekol_executable(), "resume", "tick"],
         "StartInterval": _TICK_INTERVAL_SECONDS,
         "RunAtLoad": False,
+        # Pin the ALREADY-RESOLVED locations rather than copying a subset of the
+        # environment. An allowlist of variable names silently omitted
+        # REKOL_INDEX_DIR and XDG_CACHE_HOME, so a user with XDG_CACHE_HOME set
+        # had `enable` write the opt-in marker to one directory while the
+        # launchd tick looked in another, found no marker, and did nothing
+        # forever — while `status`, run in the user's shell, printed ENABLED.
+        # Passing resolved absolute paths removes the class: there is nothing
+        # left for the tick to resolve differently, and the next env override
+        # someone adds cannot reintroduce the bug.
         "EnvironmentVariables": {
-            k: v for k, v in os.environ.items() if k in ("REKOL_HOME", "MEMORY_HOME", "PATH")
+            "REKOL_HOME": str(cfg.memory_home),
+            "REKOL_INDEX_DIR": str(cfg.index_dir),
+            "CLAUDE_CONFIG_DIR": str(resolve_claude_config_dir()),
+            "PATH": _watchdog_path(),
         },
+        # Without these, launchd discards stdout/stderr — including the one
+        # "LAUNCH FAILED" line that says the feature is broken. A mechanism that
+        # fails must fail somewhere a human can look.
+        "StandardOutPath": str(log_file),
+        "StandardErrorPath": str(log_file),
     }
     plist_file = _plist_path()
     plist_file.parent.mkdir(parents=True, exist_ok=True)
@@ -205,8 +301,23 @@ def status() -> None:
     settings_file = _settings_path()
     settings = _load_settings(settings_file)
     click.echo(f"auto-resume:      {'ENABLED' if is_enabled(cfg.index_dir) else 'disabled'}")
-    registered = "yes" if _hook_registered(settings) else "no"
-    click.echo(f"hook registered:  {registered}  ({settings_file})")
+    # "Registered" is not "works". Every pre-#159 install has a bare `rekol`
+    # command that exits 127 in the non-interactive shell hooks run in, so
+    # reporting only registration is how this feature claimed to be armed for
+    # weeks while recording nothing. Say which one it is.
+    hooks = _our_hooks(settings)
+    if not hooks:
+        click.echo(f"hook registered:  no  ({settings_file})")
+    else:
+        stale = [h for h in hooks if str(h.get("command", "")) != _hook_command()]
+        if stale:
+            click.echo(
+                f"hook registered:  yes but BROKEN — {len(stale)} stale invocation(s) "
+                f"({settings_file})"
+            )
+            click.echo("                  run `rekol resume enable` to repair")
+        else:
+            click.echo(f"hook registered:  yes  ({settings_file})")
     click.echo(f"watchdog plist:   {'yes' if _plist_path().is_file() else 'no'}")
     journal = freeze_journal_path(cfg.index_dir)
     entries = journal.read_text(encoding="utf-8").splitlines() if journal.is_file() else []
@@ -215,7 +326,28 @@ def status() -> None:
         click.echo(f"  {line[:120]}")
     ledger = ledger_path(cfg.index_dir)
     resumed = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
-    click.echo(f"resumes launched: {len(resumed)}")
+    # Count CLAIMS and OUTCOMES separately. The ledger is claim-first by design,
+    # so counting raw lines reported a resume that may never have launched.
+    claims, launched, failed = 0, 0, 0
+    for line in resumed:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a torn append must not break status
+        outcome = record.get("outcome")
+        if outcome is None:
+            claims += 1
+        elif outcome == "launched":
+            launched += 1
+        else:
+            failed += 1
+    click.echo(f"resumes claimed:  {claims}")
+    click.echo(f"  launched:       {launched}")
+    if failed:
+        click.echo(f"  LAUNCH FAILED:  {failed}  (see {cfg.index_dir / WATCHDOG_LOG_NAME})")
+    unknown = claims - launched - failed
+    if unknown > 0:
+        click.echo(f"  outcome unknown:{unknown}  (claimed before this version recorded outcomes)")
     for line in resumed[-3:]:
         click.echo(f"  {line[:120]}")
 
