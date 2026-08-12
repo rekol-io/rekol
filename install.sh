@@ -78,6 +78,16 @@ say() {
   printf '%s\n' "$*"
 }
 
+# Abort with a diagnostic. This was CALLED (Step 6.9) before it was ever
+# DEFINED: bash then treated it as an external command, so the install did abort
+# — but via "die: command not found" (exit 127) instead of the explanation the
+# caller intended to print. Correct behaviour, useless report; exactly the
+# failure class #159 is about, sitting inside the #159 fix.
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
 usage() {
   cat <<'EOF'
 rekol install — idempotent installer; safe to rerun on an already-set-up machine.
@@ -635,7 +645,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
   # shellcheck disable=SC2064  # expand RENDERED_HOOK_DIR now, not at trap time
   trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
 
-  REKOL_INVOCATION="\$(command -v rekol || echo ${BIN_DIR}/rekol)"
+  REKOL_INVOCATION="\$(command -v rekol || echo '${BIN_DIR}/rekol')"
   # Same value, pre-quoted, for the steps that build a command string directly
   # rather than rendering a snippet.
   REKOL_INVOCATION_QUOTED="\"${REKOL_INVOCATION}\""
@@ -715,7 +725,10 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
         else . end
     ' "${SETTINGS_JSON}" 2>/dev/null || true
   )"
-  if [[ -n "$MIGRATED" ]] && ! diff -q <(printf '%s' "$MIGRATED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
+  # printf '%s\n', not '%s': command substitution strips the trailing newline
+  # while `jq .` emits one, so comparing them raw ALWAYS differed — the migration
+  # then rewrote settings.json and wrote a fresh .bak on every single run.
+  if [[ -n "$MIGRATED" ]] && ! diff -q <(printf '%s\n' "$MIGRATED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
     local_settings_mig_backup="${SETTINGS_JSON}.bak-159-${TS}"
     run "cp '${SETTINGS_JSON}' '${local_settings_mig_backup}'"
     log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_mig_backup}"
@@ -767,9 +780,10 @@ if [[ "$DO_HOOK" == "1" ]]; then
       jq -r --slurpfile snip "${SNIPPET}" '
         ($snip[0].hooks.SessionStart[0].hooks[0].command) as $cmd
         | [ (.hooks.SessionStart // [])[] | (.hooks // [])[]
-            | select((.command // "") | contains("REKOL.md")) ] as $loaders
+            | select(((.command // "") | contains("REKOL.md"))
+                     and ((.command // "") | contains("REKOL_HOME:-"))) ] as $loaders
         | if ($loaders | length) == 0 then "absent"
-          elif ($loaders | any(.command == $cmd)) then "current"
+          elif ($loaders | all(.command == $cmd)) then "current"
           else "upgrade" end
       ' "${SETTINGS_JSON}" 2>/dev/null || printf 'absent'
     )"
@@ -786,7 +800,9 @@ if [[ "$DO_HOOK" == "1" ]]; then
             ($snip[0].hooks.SessionStart[0].hooks[0].command) as $cmd
             | (.hooks.SessionStart) |= map(
                 (.hooks // []) |= map(
-                  if ((.command // "") | contains("REKOL.md")) then .command = $cmd else . end))
+                  if (((.command // "") | contains("REKOL.md"))
+                      and ((.command // "") | contains("REKOL_HOME:-")))
+                  then .command = $cmd else . end))
           ' "${SETTINGS_JSON}" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
         fi
         log_journal "UPGRADED SessionStart memory-loader in place in ${SETTINGS_JSON}"
@@ -813,7 +829,11 @@ fi
 # already invokes it.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
-  COV_CMD='rekol _hook session-coverage 2>/dev/null || true'
+  # PATH-independent (#159). This wrote a bare `rekol`, which exits 127 in a
+  # non-interactive hook shell — and this branch only runs for EXISTING installs,
+  # the exact population the fix is for. Step 7G had the same bug; three siblings
+  # were missed on the first pass.
+  COV_CMD="${REKOL_INVOCATION_QUOTED} _hook session-coverage 2>/dev/null || true"
   HAS_COV="$(
     jq '
       (.hooks.SessionStart // []) as $cur
@@ -841,7 +861,11 @@ fi
 # command), added idempotently — no-op when already wired.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
-  TASKS_CMD='rekol _hook session-tasks 2>/dev/null || true'
+  # PATH-independent (#159). This wrote a bare `rekol`, which exits 127 in a
+  # non-interactive hook shell — and this branch only runs for EXISTING installs,
+  # the exact population the fix is for. Step 7G had the same bug; three siblings
+  # were missed on the first pass.
+  TASKS_CMD="${REKOL_INVOCATION_QUOTED} _hook session-tasks 2>/dev/null || true"
   HAS_TASKS="$(
     jq '
       (.hooks.SessionStart // []) as $cur
@@ -1159,7 +1183,11 @@ fi
 # Idempotent: no-op when any UserPromptSubmit command already invokes it.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
-  NUDGE_CMD='rekol _hook capture-nudge 2>/dev/null || true'
+  # PATH-independent (#159). This wrote a bare `rekol`, which exits 127 in a
+  # non-interactive hook shell — and this branch only runs for EXISTING installs,
+  # the exact population the fix is for. Step 7G had the same bug; three siblings
+  # were missed on the first pass.
+  NUDGE_CMD="${REKOL_INVOCATION_QUOTED} _hook capture-nudge 2>/dev/null || true"
   HAS_NUDGE="$(
     jq '
       (.hooks.UserPromptSubmit // []) as $cur

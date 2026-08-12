@@ -103,3 +103,78 @@ def test_sessionend_snippet_includes_review_nudge():
     snip = json.loads((repo / "hooks" / "sessionend-snippet.json").read_text())
     cmds = [h["command"] for h in snip["hooks"]["SessionEnd"][0]["hooks"]]
     assert any("@REKOL@" in c and "review --nudge" in c for c in cmds)
+
+
+def test_migration_list_covers_every_shipped_hook_invocation():
+    """#159 guardrail: install.sh's migration list must cover every hook we ship.
+
+    Step 6.95 repairs old bare-`rekol` commands by rewriting a hardcoded list of
+    subcommand strings. That list is a hand-maintained shadow of what the snippets
+    (plus cli_resume.py) actually install. Add a tenth hook and forget the list and
+    NOTHING errors — the migration just silently skips it, and the downstream
+    idempotency checks then either append a duplicate or skip forever, silently
+    reproducing the original bug. So the omission has to fail CI, not a user.
+    """
+    import re
+
+    repo = Path(__file__).resolve().parents[1]
+    install_sh = (repo / "install.sh").read_text()
+
+    # The migration's list, as jq string literals inside the $subs array.
+    block = re.search(r"as \$subs", install_sh)
+    assert block, "could not locate the migration's $subs array in install.sh"
+    window = install_sh[max(0, block.start() - 900) : block.start()]
+    migration_subs = set(re.findall(r'"((?:_hook |review |session-index )[^"]+)"', window))
+    assert migration_subs, "parsed no entries from the migration list"
+
+    # Every invocation actually shipped in a snippet.
+    shipped = set()
+    for snippet in sorted((repo / "hooks").glob("*-snippet.json")):
+        for cmd in re.findall(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', snippet.read_text()):
+            for m in re.findall(
+                r"@REKOL@\\?\"? ((?:_hook |review |session-index )[a-z-]+(?: --[a-z-]+)?)", cmd
+            ):
+                shipped.add(m.strip())
+    assert shipped, "found no @REKOL@ invocations in the shipped snippets"
+
+    # Plus the one cli_resume.py registers itself, which lives outside the snippets.
+    from rekol.cli_resume import _HOOK_MARKER
+
+    shipped.add(_HOOK_MARKER)
+
+    missing = sorted(s for s in shipped if s not in migration_subs)
+    assert not missing, (
+        "these shipped hook invocations are NOT in install.sh's migration list, so an "
+        "existing install would never be repaired for them:\n  " + "\n  ".join(missing)
+    )
+
+
+def test_no_snippet_mentions_a_migrated_phrase_as_prose():
+    """#159 guardrail: the migration rewrites by substring, so prose is at risk.
+
+    Step 6.95 matches `rekol <subcmd>` after a shell boundary char, with no
+    awareness of quoting. Phrases like `review --nudge` and `session-index
+    --incremental` are prose-like; if a snippet's echoed message ever mentions one,
+    the migration would rewrite that TEXT — and if the match landed inside a
+    double-quoted string, the inserted quotes could break the hook's shell syntax.
+    Not currently triggered by anything shipped; this keeps it that way.
+    """
+    import re
+
+    repo = Path(__file__).resolve().parents[1]
+    prose_risky = ["review --nudge", "session-index --incremental"]
+    offenders = []
+    for snippet in sorted((repo / "hooks").glob("*-snippet.json")):
+        raw = snippet.read_text()
+        for cmd in re.findall(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', raw):
+            for phrase in prose_risky:
+                for m in re.finditer(re.escape(phrase), cmd):
+                    # Legitimate use: immediately preceded by the rendered/placeholder
+                    # invocation. Anything else is prose the migration could corrupt.
+                    before = cmd[max(0, m.start() - 40) : m.start()]
+                    if "@REKOL@" not in before:
+                        offenders.append(f"{snippet.name}: …{before[-30:]}[{phrase}]…")
+    assert not offenders, (
+        "phrase(s) the migration rewrites appear outside an invocation — it would "
+        "corrupt this text on the next install:\n  " + "\n  ".join(offenders)
+    )
