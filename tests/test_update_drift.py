@@ -8,11 +8,13 @@ from pathlib import Path
 from rekol import __version__
 from rekol.update import (
     OPT_IN_HANDLERS,
+    _hook_fallback_path,
     detect_drift,
     expected_handlers,
     load_settings,
     read_manifest,
     snippet_handlers,
+    unrunnable_hooks,
     wired_handlers,
 )
 
@@ -196,3 +198,106 @@ def test_json_settings_roundtrip_from_disk(tmp_path: Path) -> None:
     p = tmp_path / "settings.json"
     p.write_text(json.dumps(_settings(["session-tasks"])), encoding="utf-8")
     assert wired_handlers(load_settings(p)) == {"session-tasks"}
+
+
+# ---- registered is not runnable: the string-vs-execution gap (found by review) ----
+# `✓ hook wiring: all 6 shipped handlers registered` + `index is healthy` (exit 0)
+# was reproducibly printed for a settings.json where every command pointed at a
+# path that does not exist. The evidence was text; the property is execution.
+
+
+def _cmd(handler: str, fallback: str) -> str:
+    return f"\"$(command -v rekol || echo '{fallback}')\" _hook {handler} 2>/dev/null || true"
+
+
+def _settings_with(commands: list[str]) -> dict:
+    return {
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "", "hooks": [{"type": "command", "command": c}]} for c in commands
+            ]
+        }
+    }
+
+
+def test_unrunnable_when_fallback_path_does_not_exist() -> None:
+    settings = _settings_with([_cmd("session-tasks", "/nonexistent/path/rekol")])
+    broken = unrunnable_hooks(settings)
+    assert [name for name, _ in broken] == ["session-tasks"]
+    assert "does not exist" in broken[0][1]
+
+
+def test_unrunnable_when_command_is_bare() -> None:
+    """A bare `rekol …` has no absolute fallback at all — the #159 bug itself."""
+    settings = _settings_with(["rekol _hook session-tasks 2>/dev/null || true"])
+    broken = unrunnable_hooks(settings)
+    assert [name for name, _ in broken] == ["session-tasks"]
+    assert "bare invocation" in broken[0][1]
+
+
+def test_unrunnable_when_fallback_is_not_executable(tmp_path: Path) -> None:
+    notexe = tmp_path / "rekol"
+    notexe.write_text("#!/bin/sh\necho hi\n")
+    notexe.chmod(0o644)  # readable, NOT executable
+    broken = unrunnable_hooks(_settings_with([_cmd("session-tasks", str(notexe))]))
+    assert "not executable" in broken[0][1]
+
+
+def test_unrunnable_when_executable_cannot_actually_run(tmp_path: Path) -> None:
+    """A console script whose interpreter was replaced stays executable but cannot
+    import — existence and the x-bit are both insufficient."""
+    broken_exe = tmp_path / "rekol"
+    broken_exe.write_text("#!/nonexistent/python\nprint('never runs')\n")
+    broken_exe.chmod(0o755)
+    broken = unrunnable_hooks(_settings_with([_cmd("session-tasks", str(broken_exe))]))
+    assert broken, "an unrunnable interpreter must be caught by the probe"
+    assert "cannot run" in broken[0][1] or "not executable" in broken[0][1]
+
+
+def test_runnable_hook_is_not_flagged() -> None:
+    """The probe must not cry wolf: a fallback that genuinely runs is fine."""
+    import sys
+
+    assert unrunnable_hooks(_settings_with([_cmd("session-tasks", sys.executable)])) == []
+
+
+def test_probe_ignores_non_rekol_hooks() -> None:
+    """Other tools' hooks in the user's settings.json are none of our business."""
+    settings = _settings_with(["some-other-tool --do-a-thing"])
+    assert unrunnable_hooks(settings) == []
+
+
+def test_fallback_is_anchored_to_the_substitution_not_the_first_echo() -> None:
+    """Regression for a false positive I shipped into review and had to fix.
+
+    The SessionStart memory-loader is a multi-statement shell command with several
+    `echo '…'` calls BEFORE the rekol invocation. An unanchored search for
+    `echo '…'` picked up `echo '[rekol] memory home not configured'` and reported
+    it as a missing binary — flagging a perfectly working install as broken on a
+    real machine. Same false-positive shape as calling a working hook "BROKEN" by
+    string comparison, which is the bug this probe replaced.
+    """
+    import sys
+
+    real = sys.executable
+    command = (
+        'HOME_DIR="${REKOL_HOME:-$MEMORY_HOME}"; '
+        "if [ -n \"$HOME_DIR\" ]; then echo '[rekol] loaded'; "
+        "elif [ -z \"$HOME_DIR\" ]; then echo '[rekol] memory home not configured'; "
+        "else echo '[rekol] no REKOL.md found'; fi; "
+        f"\"$(command -v rekol || echo '{real}')\" _hook session-confidence 2>/dev/null || true"
+    )
+    assert _hook_fallback_path(command) == real
+    assert unrunnable_hooks(_settings_with([command])) == []
+
+
+def test_decoy_echo_does_not_hide_a_genuinely_broken_fallback() -> None:
+    """The anchoring must not become a way to miss a real failure."""
+    command = (
+        "echo '[rekol] a banner'; "
+        "\"$(command -v nope-not-rekol || echo '/nonexistent/rekol')\" "
+        "_hook session-tasks 2>/dev/null || true"
+    )
+    broken = unrunnable_hooks(_settings_with([command]))
+    assert [name for name, _ in broken] == ["session-tasks"]
+    assert "/nonexistent/rekol" in broken[0][1]

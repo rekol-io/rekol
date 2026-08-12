@@ -257,6 +257,38 @@ def _relpath(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _classify_unindexed(
+    on_disk: list[Path],
+    indexed: set[str],
+    unwalked: set[Path],
+    root: Path,
+) -> list[tuple[str, str]]:
+    """Why each on-disk file is absent from the index: ``[(relpath, reason)]``.
+
+    Two causes with different remedies, which is why they are named differently:
+    *NEVER WALKED* is a scope bug in the indexer (the user's file is fine), while a
+    validation failure is a problem with the file. Files that are valid and simply
+    not indexed yet are NOT listed here — the caller counts them separately, since
+    they need a reindex rather than a fix.
+    """
+    rejected: list[tuple[str, str]] = []
+    for path in on_disk:
+        if str(path) in indexed:
+            continue
+        if path in unwalked:
+            rejected.append(
+                (_relpath(path, root), "NEVER WALKED by the indexer — outside its scope")
+            )
+            continue
+        try:
+            parse_file(path)
+        except ValidationError as exc:
+            rejected.append((_relpath(path, root), _skip_reason(exc)))
+        except OSError as exc:
+            rejected.append((_relpath(path, root), f"unreadable: {exc}"))
+    return rejected
+
+
 def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Disk-vs-index coverage for the curated store (#123).
 
@@ -305,30 +337,19 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
         store.close()
 
     indexed_count = sum(1 for path in on_disk if str(path) in indexed)
-    unwalked_set = set(unwalked)
-    rejected: list[tuple[str, str]] = []
-    for path in on_disk:
-        if str(path) in indexed:
-            continue
-        if path in unwalked_set:
-            # A scope bug, not a bad file: name it as such so the remedy is
-            # "the indexer never visits this directory", not "fix your frontmatter".
-            rejected.append(
-                (_relpath(path, root), "NEVER WALKED by the indexer — outside its scope")
-            )
-            continue
-        try:
-            parse_file(path)
-        except ValidationError as exc:
-            rejected.append((_relpath(path, root), _skip_reason(exc)))
-        except OSError as exc:
-            rejected.append((_relpath(path, root), f"unreadable: {exc}"))
-        # else: valid but not yet indexed → transient staleness, not reported here.
+    rejected = _classify_unindexed(on_disk, indexed, set(unwalked), root)
 
     # Always state the excluded count. Silence about them is what let "52/52"
     # read as complete coverage when it was not.
     suffix = f"; {len(excluded)} deliberately excluded (tasks/, MEMORY.md)" if excluded else ""
-    if not rejected:
+    # The verdict must consider the NUMERATOR too. #158 fixed the denominator
+    # (disk truth, not the indexer's walk) but left OK/PROBLEM keyed on `rejected`
+    # alone — so `1/6 curated files indexed (none rejected)` printed a green tick
+    # and "index is healthy" while five of six files were unreachable by search.
+    # Computing a number, printing it, and then not judging it is the same class
+    # of bug one level up.
+    unindexed = len(on_disk) - indexed_count
+    if not rejected and unindexed <= 0:
         return [
             Finding(
                 label="curated coverage",
@@ -336,6 +357,22 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
                 detail=(
                     f"{indexed_count}/{len(on_disk)} curated files indexed (none rejected){suffix}"
                 ),
+            )
+        ]
+    if not rejected:
+        # Valid files that simply have not been indexed yet. Transient for one
+        # cycle; indefinite if the reindex hook is dead — which is exactly the
+        # #159 world, so it cannot be waved through as "the next run picks it up".
+        return [
+            Finding(
+                label="curated coverage",
+                status=Status.PROBLEM,
+                detail=(
+                    f"{indexed_count}/{len(on_disk)} curated files indexed{suffix} — "
+                    f"{unindexed} valid file(s) on disk are NOT in the index and are "
+                    "therefore invisible to search"
+                ),
+                remedy="rekol index update   (if this persists, the reindex hook is not running)",
             )
         ]
     shown = rejected[:_MAX_LISTED_REJECTS]
@@ -763,7 +800,13 @@ def _check_install_drift(cfg: Config) -> list[Finding]:
       predates version stamping; conflating "unknown" with "different" is how you
       get a warning that cannot be cleared.
     """
-    from rekol.update import detect_drift, expected_handlers, manifest_path
+    from rekol.update import (
+        detect_drift,
+        expected_handlers,
+        load_settings,
+        manifest_path,
+        unrunnable_hooks,
+    )
 
     if not manifest_path(cfg.memory_home).is_file():
         # No manifest at all: install.sh was never run against this REKOL_HOME.
@@ -794,13 +837,35 @@ def _check_install_drift(cfg: Config) -> list[Finding]:
             )
         )
     else:
-        findings.append(
-            Finding(
-                label="hook wiring",
-                status=Status.OK,
-                detail=f"all {len(expected_handlers())} shipped handlers registered",
+        # "Registered" is a claim about TEXT. Verified reproducibly: this line
+        # printed `all 6 shipped handlers registered` + `index is healthy` (exit 0)
+        # for a settings.json where every command pointed at a path that does not
+        # exist. So presence is necessary and nowhere near sufficient — probe that
+        # each hook's absolute fallback can actually run before claiming health.
+        broken = unrunnable_hooks(load_settings())
+        if broken:
+            lines = "\n".join(f"      {name} — {why}" for name, why in broken)
+            findings.append(
+                Finding(
+                    label="hook wiring",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"all {len(expected_handlers())} handlers are registered but "
+                        f"{len(broken)} cannot execute:\n{lines}"
+                    ),
+                    remedy="./install.sh   (re-renders hook commands with a working path)",
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    label="hook wiring",
+                    status=Status.OK,
+                    detail=(
+                        f"all {len(expected_handlers())} shipped handlers registered and executable"
+                    ),
+                )
+            )
     if drift.version_unknown:
         findings.append(
             Finding(

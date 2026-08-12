@@ -525,6 +525,7 @@ def _seed_manifest(home: Path, **kv: str) -> None:
 def _seed_settings(tmp_path: Path, monkeypatch, handlers: list[str]) -> None:
     """Point CLAUDE_CONFIG_DIR at a sandbox holding a settings.json we control."""
     import json as _json
+    import sys
 
     cc = tmp_path / "claudeconfig"
     cc.mkdir(parents=True, exist_ok=True)
@@ -533,7 +534,19 @@ def _seed_settings(tmp_path: Path, monkeypatch, handlers: list[str]) -> None:
             {
                 "hooks": {
                     "SessionStart": [
-                        {"hooks": [{"type": "command", "command": f"rekol _hook {h}"}]}
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    # Render the real #159 form with a fallback that
+                                    # genuinely runs, so this fixture isolates the
+                                    # property under test (version drift) from hook
+                                    # executability, which is graded separately.
+                                    "command": f"\"$(command -v rekol || echo '{sys.executable}')\" "
+                                    f"_hook {h} 2>/dev/null || true",
+                                }
+                            ]
+                        }
                         for h in handlers
                     ]
                 }
@@ -592,3 +605,32 @@ def test_doctor_says_drift_unknown_when_never_installed(tmp_path: Path, monkeypa
     assert findings[0].label == "install record"
     assert "drift unknown" in findings[0].detail
     assert findings[0].status is Status.INFO
+
+
+def test_doctor_flags_valid_but_unindexed_files_as_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """#158's residual, found by review: fixing the DENOMINATOR was not enough.
+
+    The verdict stayed keyed on `rejected` alone, so `1/6 curated files indexed
+    (none rejected)` printed a green tick and "index is healthy" while five of six
+    files were unreachable by search. Computing a number, printing it, and then not
+    judging it is the same class of bug one level up.
+
+    Valid-but-unindexed is only transient if a reindex actually runs — and in the
+    #159 world the reindex hook was dead, so it was indefinite.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    _build_curated_index(home)
+    # Add valid files AFTER indexing and do not reindex.
+    for n in (1, 2, 3):
+        (home / "knowledge").mkdir(exist_ok=True)
+        (home / "knowledge" / f"svc{n}.md").write_text(
+            f"---\nname: Svc{n}\ndescription: runbook\ntype: knowledge\n---\n\nbody {n}\n"
+        )
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert len(coverage) == 1
+    assert coverage[0].status is Status.PROBLEM, coverage[0].detail
+    assert "2/5" in coverage[0].detail
+    assert "invisible to search" in coverage[0].detail
+    assert not report.is_healthy, "doctor must not claim health with unsearchable files"

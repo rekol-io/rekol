@@ -27,7 +27,9 @@ here — see #27's version-check half.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +65,13 @@ _MANIFEST_KEYS = frozenset(
 OPT_IN_HANDLERS = frozenset({"context-watch", "stop-failure-record"})
 
 _HANDLER_RE = re.compile(r"_hook ([a-z][a-z-]*)")
+
+# The absolute fallback inside `$(command -v <name> || echo <path>)`. Anchored to
+# that substitution so a multi-statement hook command's own `echo` statements
+# cannot be mistaken for it.
+_FALLBACK_RE = re.compile(
+    r"command\s+-v\s+\S+\s*\|\|\s*echo\s+(?:'([^']+)'|\"([^\"]+)\"|([^\s)]+))"
+)
 
 
 @dataclass
@@ -162,13 +171,103 @@ def snippet_handlers(snippet_dir: Path) -> set[str]:
 
 
 def wired_handlers(settings: dict) -> set[str]:
-    """Handlers actually registered in a parsed ``settings.json``."""
+    """Handlers registered in a parsed ``settings.json`` — by NAME only.
+
+    This answers "is it present?", never "does it work?". Keep the two apart:
+    ``✓ all handlers registered`` was reproducibly printed for a settings.json
+    where every command pointed at a path that does not exist, because the
+    evidence here is text while the property users care about is execution. See
+    :func:`unrunnable_hooks` for the half that actually runs something.
+    """
     found: set[str] = set()
     for blocks in (settings.get("hooks") or {}).values():
         for block in blocks or []:
             for hook in block.get("hooks") or []:
                 found.update(_HANDLER_RE.findall(str(hook.get("command", ""))))
     return found
+
+
+def _hook_fallback_path(command: str) -> str | None:
+    """The absolute path a rendered hook falls back to when PATH lacks rekol.
+
+    #159's fix renders every hook as
+    ``"$(command -v rekol || echo '<abs>/rekol')" _hook <name> …``. That absolute
+    fallback is the entire guarantee: it is what makes the hook work in the
+    non-interactive shell that has no ``.zshrc``. So the fallback is the right
+    thing to verify — checking whether ``rekol`` happens to be on *this* shell's
+    PATH would pass for a reason the hook cannot rely on.
+
+    Returns ``None`` for a bare ``rekol …`` command, i.e. one with no fallback at
+    all — the #159 bug itself.
+
+    Anchored to the ``command -v … || echo …`` substitution, NOT to the first
+    ``echo`` in the command. The SessionStart memory-loader is a multi-statement
+    shell command containing several ``echo '…'`` calls before the rekol
+    invocation, so an unanchored search picked up ``echo '[rekol] memory home not
+    configured'`` and reported it as a missing binary — flagging a perfectly
+    working install as broken on a real machine. That is the same false-positive
+    shape as reporting a working hook "BROKEN" by string comparison.
+    """
+    match = _FALLBACK_RE.search(command)
+    if match:
+        return next((g for g in match.groups() if g), None)
+    return None
+
+
+def unrunnable_hooks(settings: dict, probe: bool = True) -> list[tuple[str, str]]:
+    """Registered rekol hooks that cannot actually execute: ``[(handler, why)]``.
+
+    The check the whole #159 family needed and never had: *nothing anywhere in
+    this repo ever executed a hook it had registered.* Every assertion — the
+    installer's jq gates, ``resume status``, and (until now) this module — matched
+    strings. So a hook could be present, correctly spelled, and dead.
+
+    Verifies the absolute fallback path resolves to something that can actually
+    run, by invoking ``<exe> --version``. That is side-effect free, which matters:
+    running the hook commands themselves would record a stop, fire a nudge, or
+    launch an indexer as a side effect of asking whether they work.
+    """
+    problems: list[tuple[str, str]] = []
+    for blocks in (settings.get("hooks") or {}).values():
+        for block in blocks or []:
+            for hook in block.get("hooks") or []:
+                command = str(hook.get("command", ""))
+                handlers = _HANDLER_RE.findall(command)
+                if not handlers:
+                    continue
+                name = handlers[0]
+                fallback = _hook_fallback_path(command)
+                if fallback is None:
+                    problems.append(
+                        (name, "bare invocation with no absolute fallback — exits 127 (#159)")
+                    )
+                    continue
+                exe = Path(os.path.expandvars(fallback))
+                if not exe.exists():
+                    problems.append((name, f"fallback path does not exist: {exe}"))
+                elif not os.access(exe, os.X_OK):
+                    problems.append((name, f"fallback path is not executable: {exe}"))
+                elif probe and not _runs(exe):
+                    problems.append((name, f"fallback path cannot run: {exe} --version failed"))
+    return problems
+
+
+def _runs(exe: Path) -> bool:
+    """True when the executable actually runs.
+
+    A console script whose interpreter was replaced (``brew upgrade python``)
+    stays executable but cannot import, so existence is not enough.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [str(exe), "--version"],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def load_settings(path: Path | None = None) -> dict:
