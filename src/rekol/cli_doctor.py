@@ -32,7 +32,7 @@ import click
 from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
-from rekol.indexer import _iter_memory_files, _skip_reason
+from rekol.indexer import _iter_memory_files, _skip_reason, is_non_memory, iter_all_markdown
 from rekol.model import ValidationError, parse_file
 from rekol.onboarding.detect import default_cloud_sync_candidates
 from rekol.sessions.store import SessionStore
@@ -270,11 +270,26 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
 
     A file that parses cleanly but is not yet indexed is transient staleness (the
     next incremental run picks it up), so it is deliberately NOT flagged here.
+
+    The denominator comes from the FILESYSTEM, never from the indexer's walk
+    (#158). Deriving it from ``_iter_memory_files`` meant this check inherited the
+    indexer's scope exactly, so any directory outside that scope was invisible to
+    both — it reported "52/52 indexed (none rejected)" on a store with 62 files,
+    of which 10 were unreachable by search. A green check over a missing file is
+    worse than the missing file. The two categories below are therefore reported
+    separately, because they have different causes and different fixes:
+    **rejected** (walked, failed validation) and **outside the walk** (never
+    visited — a scope bug in the indexer, not a problem with the user's file).
     """
     db_path = cfg.index_db_path
     if not db_path.exists():
         return []  # an unbuilt index is already reported by _check_curated_index
-    on_disk = list(_iter_memory_files(cfg.memory_home))
+    root = cfg.memory_home
+    all_markdown = list(iter_all_markdown(root))
+    excluded = [p for p in all_markdown if is_non_memory(p, root)]
+    on_disk = [p for p in all_markdown if p not in set(excluded)]
+    walked = set(_iter_memory_files(root))
+    unwalked = [p for p in on_disk if p not in walked]
     if not on_disk:
         return []
 
@@ -290,24 +305,37 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
         store.close()
 
     indexed_count = sum(1 for path in on_disk if str(path) in indexed)
+    unwalked_set = set(unwalked)
     rejected: list[tuple[str, str]] = []
     for path in on_disk:
         if str(path) in indexed:
             continue
+        if path in unwalked_set:
+            # A scope bug, not a bad file: name it as such so the remedy is
+            # "the indexer never visits this directory", not "fix your frontmatter".
+            rejected.append(
+                (_relpath(path, root), "NEVER WALKED by the indexer — outside its scope")
+            )
+            continue
         try:
             parse_file(path)
         except ValidationError as exc:
-            rejected.append((_relpath(path, cfg.memory_home), _skip_reason(exc)))
+            rejected.append((_relpath(path, root), _skip_reason(exc)))
         except OSError as exc:
-            rejected.append((_relpath(path, cfg.memory_home), f"unreadable: {exc}"))
+            rejected.append((_relpath(path, root), f"unreadable: {exc}"))
         # else: valid but not yet indexed → transient staleness, not reported here.
 
+    # Always state the excluded count. Silence about them is what let "52/52"
+    # read as complete coverage when it was not.
+    suffix = f"; {len(excluded)} deliberately excluded (tasks/, MEMORY.md)" if excluded else ""
     if not rejected:
         return [
             Finding(
                 label="curated coverage",
                 status=Status.OK,
-                detail=f"{indexed_count}/{len(on_disk)} curated files indexed (none rejected)",
+                detail=(
+                    f"{indexed_count}/{len(on_disk)} curated files indexed (none rejected){suffix}"
+                ),
             )
         ]
     shown = rejected[:_MAX_LISTED_REJECTS]
@@ -319,8 +347,8 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
             label="curated coverage",
             status=Status.PROBLEM,
             detail=(
-                f"{indexed_count}/{len(on_disk)} curated files indexed — "
-                f"{len(rejected)} invisible to search (rejected at index time):\n{lines}"
+                f"{indexed_count}/{len(on_disk)} curated files indexed{suffix} — "
+                f"{len(rejected)} invisible to search:\n{lines}"
             ),
             remedy="fix the frontmatter of the files above, then `rekol index update`",
         )
