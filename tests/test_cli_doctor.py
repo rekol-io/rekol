@@ -509,3 +509,86 @@ def test_skip_manifest_counts_unwalked_files(tmp_path: Path, monkeypatch) -> Non
     assert "notalayer/orphan.md" in manifest["paths"]
     # The deliberate exclusion must NOT inflate the banner.
     assert not any("tasks/" in p for p in manifest["paths"])
+
+
+# ----------------------- #27: install drift in doctor -------------------------
+
+
+def _seed_manifest(home: Path, **kv: str) -> None:
+    d = home / ".install-logs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.env").write_text(
+        "\n".join(f"{k}={v}" for k, v in kv.items()) + "\n", encoding="utf-8"
+    )
+
+
+def _seed_settings(tmp_path: Path, monkeypatch, handlers: list[str]) -> None:
+    """Point CLAUDE_CONFIG_DIR at a sandbox holding a settings.json we control."""
+    import json as _json
+
+    cc = tmp_path / "claudeconfig"
+    cc.mkdir(parents=True, exist_ok=True)
+    (cc / "settings.json").write_text(
+        _json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": f"rekol _hook {h}"}]}
+                        for h in handlers
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+
+
+def test_doctor_flags_unwired_handlers_as_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """The bug this feature exists for: handlers ship, nothing registers them."""
+    from rekol import __version__
+    from rekol.cli_doctor import _check_install_drift
+    from rekol.update import expected_handlers
+
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    _seed_manifest(home, VERSION=__version__, INSTALLED_AT="20260601-000000")
+    _seed_settings(tmp_path, monkeypatch, sorted(expected_handlers())[1:])  # one short
+
+    findings = _check_install_drift(load_config())
+    wiring = [f for f in findings if f.label == "hook wiring"]
+    assert len(wiring) == 1
+    assert wiring[0].status is Status.PROBLEM, wiring[0].detail
+    assert "install.sh" in (wiring[0].remedy or "")
+
+
+def test_doctor_reports_version_drift_as_info_not_problem(tmp_path: Path, monkeypatch) -> None:
+    """A dev checkout drifts from its recorded install on every `git pull`. Making
+    that a PROBLEM would leave doctor permanently red for anyone working on rekol,
+    and a check that is always red is a check nobody reads. The actionable failure
+    is missing wiring, which is graded separately."""
+    from rekol.cli_doctor import _check_install_drift
+    from rekol.update import expected_handlers
+
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    _seed_manifest(home, VERSION="0.3.1", INSTALLED_AT="20260601-000000")
+    _seed_settings(tmp_path, monkeypatch, sorted(expected_handlers()))
+
+    findings = _check_install_drift(load_config())
+    version = [f for f in findings if f.label == "install version"]
+    assert len(version) == 1
+    assert version[0].status is Status.INFO
+    assert "0.3.1" in version[0].detail
+    assert all(f.status is not Status.PROBLEM for f in findings)
+
+
+def test_doctor_says_drift_unknown_when_never_installed(tmp_path: Path, monkeypatch) -> None:
+    """No manifest means install.sh never ran here. Reporting 'no drift' would be
+    a claim about wiring we have no evidence for."""
+    from rekol.cli_doctor import _check_install_drift
+
+    _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    findings = _check_install_drift(load_config())
+    assert len(findings) == 1
+    assert findings[0].label == "install record"
+    assert "drift unknown" in findings[0].detail
+    assert findings[0].status is Status.INFO

@@ -5,6 +5,36 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Offline drift detection — "is what I have actually installed?" (#27, first half.)** The
+  motivating case: a machine ran a *current* checkout while its recorded install was 65 days and
+  three minor versions old, and three hook handlers shipped in that window were never registered.
+  A version check would have reported "up to date", because the code genuinely was — only
+  comparing the shipped handlers against the wiring catches it.
+  - `install.sh` now **version-stamps the install**: the manifest records `VERSION` (read from the
+    venv, i.e. the code that will actually run) and `COMMIT` (best-effort; a tarball install has no
+    git). Previously it recorded `INSTALLED_AT` but never *what* was installed, so nothing on disk
+    could answer the question at all. An unresolvable version hard-fails the install rather than
+    writing an empty `VERSION`, which a drift check would read as "unknown" forever.
+  - `rekol doctor` gains two checks. **hook wiring** lists any handler this version ships that is
+    not registered in `settings.json` — a PROBLEM, with `./install.sh` as the remedy. **install
+    version** compares the recorded install against the running code.
+  - Severity is deliberately asymmetric: missing wiring is a PROBLEM (real, silent feature loss),
+    while version drift *alone* is INFO. An editable checkout drifts on every `git pull`, and a
+    check that is permanently red is a check nobody reads. "No recorded version" is reported as
+    *unknown*, never as a mismatch — a warning that cannot be cleared is worse than none.
+  - The expected-handler set is derived from the **CLI's own hook group**, not from
+    `hooks/*.json`: those are repo files, so a wheel install has no `hooks/` directory and a check
+    reading them would find nothing to compare and report "no drift" for every such install — the
+    same shape as #158. A test asserts the CLI-derived set and the snippet-derived set agree, so
+    adding a handler and forgetting either to wire it or to mark it opt-in fails CI.
+  - Acceptance test (the one that matters): a settings.json wired the **old** way — bare `rekol`,
+    no `session-confidence` tail, handlers missing — is run through `install.sh` and asserted to
+    end up with every shipped handler registered, zero bare invocations, exactly one memory
+    loader, a stamped `VERSION`, and the user's own `env` keys intact. Detection that notifies but
+    does not repair would pass every other test and still not fix the problem.
+  - Network-based "is something newer available?" is deliberately **not** in this change.
+
 ### ⚠️ Action required for existing installs
 - **If you installed rekol before this version, re-run `install.sh` to get the hook fix
   (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in

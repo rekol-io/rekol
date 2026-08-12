@@ -414,6 +414,37 @@ else
 fi
 readonly ARCHIVE_DIR_RESOLVED
 
+# --- Version-stamp the install (#27) ---
+# Prerequisite for drift detection, and missing until now: the manifest recorded
+# INSTALLED_AT but never WHAT was installed. So an install could be months and
+# several minor versions stale with nothing able to say so — which is exactly how
+# a machine ended up missing three hooks shipped over 11 days, on a version that
+# `rekol --version` correctly reported as current-at-install-time.
+#
+# Read from the venv (the code that will actually run), not from the repo's
+# pyproject.toml, so the stamp describes what is installed rather than what
+# happened to be checked out. COMMIT is best-effort: a tarball install has no git.
+REKOL_VERSION=""
+REKOL_COMMIT=""
+if [[ "$DRY_RUN" == "1" ]]; then
+  say "DRY-RUN: resolve installed version via '${TOOLS_HOME}/.venv/bin/python'"
+else
+  REKOL_VERSION="$(
+    "${TOOLS_HOME}/.venv/bin/python" -c 'import rekol; print(rekol.__version__)' 2>/dev/null || true
+  )"
+  if [[ -z "$REKOL_VERSION" ]]; then
+    # Hard-fail like INDEX_DIR does: a manifest with an empty VERSION is worse
+    # than no VERSION, because a drift check would read it as "unknown" forever
+    # and silently never fire — the failure mode #27 exists to remove.
+    say "ERROR: could not resolve the installed rekol version from the venv" >&2
+    exit 1
+  fi
+  REKOL_COMMIT="$(git -C "${COMPONENT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  say "installed version: ${REKOL_VERSION}${REKOL_COMMIT:+ (${REKOL_COMMIT})}"
+fi
+readonly REKOL_VERSION
+readonly REKOL_COMMIT
+
 # --- Install manifest ---
 # Records the resolved install parameters so uninstall.sh can be deterministic:
 # when a user installs with custom --tools-home/--bin-dir and later runs
@@ -440,6 +471,8 @@ else
     printf 'INDEX_DIR=%s\n' "${INDEX_DIR}"
     printf 'ARCHIVE_DIR=%s\n' "${ARCHIVE_DIR_RESOLVED}"
     printf 'INSTALLED_AT=%s\n' "${TS}"
+    printf 'VERSION=%s\n' "${REKOL_VERSION}"
+    printf 'COMMIT=%s\n' "${REKOL_COMMIT}"
   } > "${MANIFEST}"
   log_journal "WROTE manifest ${MANIFEST}"
   say "wrote install manifest ${MANIFEST}"

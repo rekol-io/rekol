@@ -742,6 +742,100 @@ def _check_deep(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     return findings
 
 
+def _check_install_drift(cfg: Config) -> list[Finding]:
+    """Is what's installed actually wired? — offline drift detection (#27).
+
+    The finding that motivated this: a machine ran a current checkout while three
+    hook handlers shipped over 11 days were never registered, and *nothing could
+    say so*. A version check would have reported "up to date", because the code
+    genuinely was. Only comparing the shipped handlers against the wiring catches
+    it, so that comparison is what decides the severity here.
+
+    Severity is deliberately asymmetric:
+
+    * **missing handlers → PROBLEM.** This is real, silent feature loss with a
+      one-command remedy.
+    * **version drift alone → INFO.** An editable/dev checkout drifts from its
+      recorded install on every ``git pull``; making that a PROBLEM would put
+      ``doctor`` permanently red for the people who work on rekol, and a check
+      that is always red is a check nobody reads.
+    * **no recorded version → INFO,** not a mismatch. It means the install
+      predates version stamping; conflating "unknown" with "different" is how you
+      get a warning that cannot be cleared.
+    """
+    from rekol.update import detect_drift, expected_handlers, manifest_path
+
+    if not manifest_path(cfg.memory_home).is_file():
+        # No manifest at all: install.sh was never run against this REKOL_HOME.
+        # Say so plainly rather than reporting "no drift", which would be a claim
+        # about wiring we have no evidence for.
+        return [
+            Finding(
+                label="install record",
+                status=Status.INFO,
+                detail=f"no install manifest at {manifest_path(cfg.memory_home)} — drift unknown",
+                remedy="./install.sh   (records what is installed, so drift becomes detectable)",
+            )
+        ]
+
+    drift = detect_drift(cfg.memory_home)
+    findings: list[Finding] = []
+    if drift.missing_handlers:
+        listed = ", ".join(drift.missing_handlers)
+        findings.append(
+            Finding(
+                label="hook wiring",
+                status=Status.PROBLEM,
+                detail=(
+                    f"{len(drift.missing_handlers)} handler(s) this version ships are NOT "
+                    f"registered in settings.json: {listed}"
+                ),
+                remedy="./install.sh   (idempotent; repairs and adds hooks in place)",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                label="hook wiring",
+                status=Status.OK,
+                detail=f"all {len(expected_handlers())} shipped handlers registered",
+            )
+        )
+    if drift.version_unknown:
+        findings.append(
+            Finding(
+                label="install version",
+                status=Status.INFO,
+                detail=(
+                    f"running {drift.running_version}; install record predates version "
+                    f"stamping (installed {drift.installed_at or 'unknown'})"
+                ),
+                remedy="./install.sh   (re-stamps the manifest)",
+            )
+        )
+    elif drift.version_drifted:
+        findings.append(
+            Finding(
+                label="install version",
+                status=Status.INFO,
+                detail=(
+                    f"running {drift.running_version} but the recorded install is "
+                    f"{drift.installed_version} (installed {drift.installed_at or 'unknown'})"
+                ),
+                remedy="./install.sh   (re-wires hooks and re-stamps the manifest)",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                label="install version",
+                status=Status.OK,
+                detail=f"{drift.running_version} matches the recorded install",
+            )
+        )
+    return findings
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -762,6 +856,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
     findings.extend(_check_session_index(cfg, embedder))
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
+    findings.extend(_check_install_drift(cfg))
     if deep:
         findings.extend(_check_deep(cfg, embedder))
     return DoctorReport(findings=findings)
