@@ -133,11 +133,64 @@ def test_tick_fallback_delay_when_no_reset_in_message(tmp_path: Path) -> None:
 
 
 def test_tick_ignores_non_limit_error_types(tmp_path: Path) -> None:
+    # The message must ALSO be non-limit-shaped. This test used to override only
+    # error_type while keeping the default message ("...session limit · resets
+    # 3:45pm"), so the payload contradicted itself and the test passed only
+    # because the message was ignored entirely — which was the bug.
     index, home = tmp_path / "idx", tmp_path / "home"
     _enable(index)
     _claim(home, "t", "sess-1")
-    _freeze(index, "sess-1", ts="2026-07-30T12:10:00", error_type="server_error")
+    _freeze(
+        index,
+        "sess-1",
+        ts="2026-07-30T12:10:00",
+        error_type="server_error",
+        message="Internal server error — please try again",
+    )
     assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+
+
+def test_tick_fires_on_the_real_payload_shape(tmp_path: Path) -> None:
+    """Regression: the shape four CAPTURED freezes actually had.
+
+    No ``error_type``/``errorType`` key at all — only ``error`` — so the old
+    ``error_type not in LIMIT_ERROR_TYPES`` gate skipped every entry and tick
+    could never fire, while `status` reported the feature ENABLED.
+    """
+    index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
+    _claim(home, "t", "sess-1")
+    index.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": "2026-07-30T12:10:00",
+        "payload": {
+            "session_id": "sess-1",
+            "error": "You've reached your Fable 5 limit · resets 3:45pm",
+        },
+    }
+    with freeze_journal_path(index).open("a") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+    actions = tick(index, home, now=NOW, launcher=lambda sid, log: True)
+    assert len(actions) == 1
+    assert actions[0].session_id == "sess-1"
+
+
+def test_ledger_records_a_failed_launch_distinctly(tmp_path: Path) -> None:
+    """A launch that did not happen must not read as a resume that did."""
+    index, home = tmp_path / "idx", tmp_path / "home"
+    _enable(index)
+    _claim(home, "t", "sess-1")
+    _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
+
+    actions = tick(index, home, now=NOW, launcher=lambda sid, log: False)
+    assert len(actions) == 1 and actions[0].launched is False
+
+    records = [json.loads(line) for line in ledger_path(index).read_text().splitlines()]
+    outcomes = [r["outcome"] for r in records if "outcome" in r]
+    assert outcomes == ["launch_failed"]
+    # The claim is still recorded, so the failed attempt is never silently retried.
+    assert any("outcome" not in r for r in records)
 
 
 def test_tick_ignores_stale_freezes(tmp_path: Path) -> None:
@@ -307,3 +360,146 @@ def test_disable_clears_marker_and_journal(tmp_path: Path, monkeypatch) -> None:
     assert not freeze_journal_path(index_dir).exists()
     _claim(home, "t", "sess-1")
     assert tick(index_dir, home, now=NOW, launcher=lambda sid, log: True) == []
+
+
+# --------------- The four defects that made this feature inert -----------------
+# All four presented identically: `status` reported the feature ENABLED while the
+# mechanism could not work. Each test asserts the mechanism, never the report.
+
+
+def test_hook_command_is_path_independent() -> None:
+    """Defect 1 (#159 sibling): a bare `rekol` exits 127 in the non-interactive
+    shell hooks run in, and the hook's own `|| true` swallows it — so the freeze
+    journal stayed empty forever."""
+    import re
+
+    from rekol.cli_resume import _hook_command
+
+    command = _hook_command()
+    assert not command.startswith("rekol ")
+    assert "command -v rekol" in command
+    fallback = re.search(r"echo '([^']+)'", command)
+    assert fallback is not None, command
+    assert Path(fallback.group(1)).is_absolute()
+
+
+def test_enable_repairs_a_stale_bare_invocation(tmp_path: Path, monkeypatch) -> None:
+    """Registration is not health. Every install that ran `enable` before this
+    fix carries a command that cannot execute; `enable` used to see the marker,
+    print "already registered", and leave it broken — the untested upgrade path."""
+    _rekol_home(tmp_path, monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "StopFailure": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "rekol _hook stop-failure-record "
+                                    "2>/dev/null || true",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings))
+    runner = CliRunner()
+
+    result = runner.invoke(resume_cli, ["enable", "--no-launchd"])
+    assert result.exit_code == 0, result.output
+    assert "REPAIRED" in result.output
+    command = json.loads(settings.read_text())["hooks"]["StopFailure"][0]["hooks"][0]["command"]
+    assert "command -v rekol" in command
+
+    # Repair is idempotent: a second enable must not rewrite or duplicate.
+    result = runner.invoke(resume_cli, ["enable", "--no-launchd"])
+    assert "already registered" in result.output
+    data = json.loads(settings.read_text())
+    commands = [h["command"] for b in data["hooks"]["StopFailure"] for h in b["hooks"]]
+    assert len(commands) == 1
+
+
+def test_status_reports_a_stale_hook_as_broken(tmp_path: Path, monkeypatch) -> None:
+    _rekol_home(tmp_path, monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "StopFailure": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {"type": "command", "command": "rekol _hook stop-failure-record"}
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings))
+    result = CliRunner().invoke(resume_cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "BROKEN" in result.output
+
+
+def test_settings_path_honours_claude_config_dir(tmp_path: Path, monkeypatch) -> None:
+    """Defect 3: Claude Code relocates its tree via CLAUDE_CONFIG_DIR. Writing to
+    ~/.claude anyway put the hook in a settings.json Claude Code never reads."""
+    monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "relocated"))
+    from rekol.cli_resume import _settings_path
+
+    assert _settings_path() == tmp_path / "relocated" / "settings.json"
+
+
+def test_empty_claude_config_dir_falls_back(tmp_path: Path, monkeypatch) -> None:
+    """`Path("")` is `PosixPath(".")` and truthy — the same trap as B1."""
+    monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "   ")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    from rekol.cli_resume import _settings_path
+
+    assert _settings_path() == tmp_path / ".claude" / "settings.json"
+
+
+def test_plist_pins_the_resolved_index_dir(tmp_path: Path, monkeypatch) -> None:
+    """Defect 2: the plist copied an ALLOWLIST of variable names that omitted
+    REKOL_INDEX_DIR and XDG_CACHE_HOME. With XDG_CACHE_HOME set, `enable` wrote
+    the opt-in marker to one directory and the launchd tick looked in another,
+    found no marker, and did nothing forever — silently, since launchd discarded
+    stderr. Assert the plist points at the directory the marker is actually in."""
+    import plistlib
+
+    import rekol.cli_resume as mod
+    from rekol.config import load_config
+    from rekol.resume import RESUME_ENABLED_NAME
+
+    monkeypatch.setenv("REKOL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    plist_file = tmp_path / "agent.plist"
+    monkeypatch.setattr(mod, "_plist_path", lambda: plist_file)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: None)
+
+    result = CliRunner().invoke(resume_cli, ["enable"])
+    assert result.exit_code == 0, result.output
+
+    plist = plistlib.loads(plist_file.read_bytes())
+    env = plist["EnvironmentVariables"]
+    resolved = load_config().index_dir
+    assert env["REKOL_INDEX_DIR"] == str(resolved)
+    assert (resolved / RESUME_ENABLED_NAME).is_file()
+    assert str(tmp_path / "cache") in env["REKOL_INDEX_DIR"]
+    # Defect 4's diagnostic half: launchd must not discard the failure message.
+    assert plist["StandardErrorPath"].endswith("resume-watchdog.log")

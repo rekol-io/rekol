@@ -43,6 +43,30 @@ follow [Semantic Versioning](https://semver.org/).
   here: the `SessionStart` merge keyed idempotency on an exact command match, so an install
   predating the `session-confidence` tail would get a **second memory-loader** and inject
   REKOL.md twice — it now classifies and upgrades in place (the #135 Step-7D pattern).
+- Opt-in auto-resume (#143) was **inert while reporting itself ENABLED** — four independent
+  defects, each alone sufficient to guarantee no freeze was ever recorded. Anyone who ran
+  `rekol resume enable` before this version should re-run it; `enable` now repairs an existing
+  install in place instead of printing "already registered" over a broken hook.
+  1. The `StopFailure` hook was registered as a bare `rekol …`, the same defect as #159 but in a
+     file #159 never touched, because this hook is written by `resume enable` rather than
+     `install.sh`. Hooks run in a non-interactive shell (no `.zshrc`), so it exited 127 — and the
+     hook's own `2>/dev/null || true` swallowed it.
+  2. The launchd plist copied an **allowlist of variable names** that omitted `REKOL_INDEX_DIR`
+     and `XDG_CACHE_HOME`, so a user with `XDG_CACHE_HOME` set had `enable` write the opt-in
+     marker to one directory while the tick looked in another, found no marker, and did nothing
+     forever. The plist now pins the **already-resolved** absolute paths, so there is nothing left
+     for the tick to resolve differently and the next env override cannot reintroduce the bug.
+  3. `CLAUDE_CONFIG_DIR` was read nowhere in the package, so a relocated Claude Code config tree
+     got the hook written into a `settings.json` Claude Code never reads. Now resolved in one
+     place (`config.resolve_claude_config_dir`).
+  4. Real `StopFailure` payloads carry `error`, not `error_type` — confirmed against four captured
+     freezes — so the limit-shape gate skipped every entry unconditionally. Classification now
+     also reads `error` and matches limit-shaped **messages**, which is the only signal the real
+     payloads actually contain.
+  Also: the launchd job now has `StandardOutPath`/`StandardErrorPath` (launchd was discarding the
+  one "LAUNCH FAILED" line that says the feature is broken); the ledger records the launch
+  **outcome** as well as the claim, so `status` can no longer count a failed launch as a resume;
+  and `status` distinguishes "registered" from "registered but cannot execute".
 - CI no longer randomly fails on a network call (#155): a unit test in
   `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
   `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the

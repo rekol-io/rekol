@@ -42,6 +42,7 @@ FREEZE_JOURNAL_NAME = "freeze-journal.jsonl"
 RESUME_LEDGER_NAME = "resume-ledger.jsonl"
 RESUME_LOG_NAME = "resume-launches.log"
 RESUME_ENABLED_NAME = "resume-enabled"
+WATCHDOG_LOG_NAME = "resume-watchdog.log"
 
 # Error types we treat as limit-shaped. Docs are explicit that StopFailure
 # matchers include rate_limit and billing_error but silent on which one an
@@ -174,9 +175,35 @@ def _entry_fields(entry: dict) -> tuple[str, str, str]:
     """
     payload = entry.get("payload") or {}
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
-    error_type = str(payload.get("error_type") or payload.get("errorType") or "").lower()
+    # `error` is the key real StopFailure payloads actually carry — confirmed
+    # against four captured freezes. Reading only error_type/errorType meant
+    # error_type was ALWAYS "" and the `not in LIMIT_ERROR_TYPES` gate below
+    # skipped every entry, so tick could never fire no matter what was journaled.
+    error_type = str(
+        payload.get("error_type") or payload.get("errorType") or payload.get("error") or ""
+    ).lower()
     message = str(payload.get("message") or payload.get("error") or "")
     return session_id, error_type, message
+
+
+def is_limit_shaped(error_type: str, message: str) -> bool:
+    """True when a StopFailure looks like a usage limit rather than a real error.
+
+    Type-based matching alone is insufficient: the captured freezes carry no
+    error *type* at all — only a human-readable message ("You've reached your
+    … limit"). So the message is the only signal that exists in practice, and
+    matching on it is what makes the mechanism able to fire at all.
+
+    Deliberately narrow. A false positive costs one wasted headless request at
+    the wrong time; the resume is still gated on an ``in_progress`` task claim
+    and one-resume-per-tick, which is where the real safety lives.
+    """
+    if any(known in error_type for known in LIMIT_ERROR_TYPES):
+        return True
+    lowered = message.lower()
+    return "limit" in lowered and any(
+        phrase in lowered for phrase in ("reached your", "usage limit", "rate limit", "resets")
+    )
 
 
 def _launch_detached(session_id: str, log_path: Path) -> bool:
@@ -205,7 +232,7 @@ def tick(
 ) -> list[ResumeAction]:
     """One watchdog pass: decide (and unless dry-run, launch) at most ONE resume.
 
-    Resume iff ALL of: a journal entry is limit-shaped (`LIMIT_ERROR_TYPES`),
+    Resume iff ALL of: a journal entry is limit-shaped (`is_limit_shaped`),
     its reset time (parsed, else freeze+`FALLBACK_DELAY_MINUTES`) has passed,
     the #113 task layer holds an ``in_progress`` task claimed by that session
     (the intent semaphore), and the (session, freeze) pair is not already in
@@ -236,7 +263,7 @@ def tick(
     for entry in reversed(entries):  # newest freeze first
         session_id, error_type, message = _entry_fields(entry)
         entry_ts = str(entry.get("ts") or "")
-        if not session_id or error_type not in LIMIT_ERROR_TYPES:
+        if not session_id or not is_limit_shaped(error_type, message):
             continue
         if (session_id, entry_ts) in already:
             continue
@@ -272,6 +299,24 @@ def tick(
                     + "\n"
                 )
             launched = launcher(session_id, index_dir / RESUME_LOG_NAME)
+            # Record the OUTCOME as a second append. The claim above must stay
+            # first (it is what makes a double-fire impossible), but without this
+            # a failed launch was indistinguishable from a successful one
+            # afterwards, and `status` counted it as a resume that happened.
+            # Appended rather than rewritten so the ledger stays append-only and
+            # a torn write can never destroy an existing claim.
+            with ledger_path(index_dir).open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "entry_ts": entry_ts,
+                            "outcome": "launched" if launched else "launch_failed",
+                            "recorded_at": now.isoformat(timespec="seconds"),
+                        }
+                    )
+                    + "\n"
+                )
         actions.append(
             ResumeAction(
                 session_id=session_id,
