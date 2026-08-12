@@ -5,6 +5,46 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **A custom `--tools-home` install had every hook dead, and nothing could see it (#170).** Two
+  bugs, both found within minutes of adding a test that *runs* the commands the installer writes:
+  - `hooks/posttooluse-snippet.json` hardcoded `$HOME/.local/share/rekol/hooks/auto-reindex.sh`
+    while `install.sh` symlinks it into `${TOOLS_HOME}/hooks/`. With `--tools-home /custom` the
+    PostToolUse hook pointed at a path that does not exist — so auto-reindex, the hook #159's own
+    notes called "the only immune hook", was silently dead. Now rendered from a `@TOOLS_HOME@`
+    placeholder, and rendering failure aborts the install like `@REKOL@` already did.
+  - `bin/rekol` resolves its venv from `REKOL_TOOLS_HOME`, defaulting to
+    `$HOME/.local/share/rekol` — and nothing propagated that to hooks. Every hook therefore died
+    with `rekol venv not found` even though its command was a correct absolute path to the shim:
+    the command was right and the shim could not find its own venv. `install.sh` now writes
+    `REKOL_TOOLS_HOME` into `settings.json`'s `env` block beside `REKOL_HOME`.
+
+### Added
+- **A test that executes every hook command the installer wrote (#170).** Nothing in this repo
+  ever did. `install.sh`'s eight jq gates, `cli_resume.py`'s marker match, `update.py`'s regex and
+  all 85 `run` invocations in the bats suite were *string* checks — which is why #159 shipped with
+  five hooks silently dead, why the plugin's coexistence guard broke unnoticed, and why a
+  "✓ all handlers registered" check reached review while every command pointed at a nonexistent
+  path. The new test:
+  - runs each command with a PATH that **excludes** `BIN_DIR`, because that is the #159 condition
+    — a bare `rekol` must fail there, so an interactive PATH would make the test pass for a reason
+    the hooks cannot rely on;
+  - takes its environment from `settings.json`'s own `env` block, the only channel that reaches a
+    hook subshell — so a variable the installer fails to propagate *fails the test* instead of
+    being papered over by the harness exporting it (this is how the missing `REKOL_TOOLS_HOME`
+    surfaced);
+  - strips only the trailing `2>/dev/null || true` so a real failure surfaces as a real exit code,
+    and asserts the strip left something non-empty with no mask remaining — a previous attempt at
+    this emptied the command, and `bash -c ""` returns 0;
+  - asserts the extracted command count matches the JSON array length, so a command containing a
+    newline fails loudly instead of being executed as fragments.
+- `tests/test_sessionstart_hook.py` now renders `@REKOL@` and asserts exit codes. It previously
+  ran the command **straight from the repo**, so its last segment was `"@REKOL@" _hook
+  session-confidence` → exit 127, `bash: @REKOL@: command not found` — masked by the hook's own
+  `|| true` and then discarded, because the helper returned only stdout. Three tests passed on a
+  substring while the handler never ran. Adds a test that runs the command **unmasked** and
+  requires exit 0, plus one that proves an unrendered placeholder really does fail, so the
+  rendering cannot be "simplified" away later.
 ### Added
 - **Offline drift detection — "is what I have actually installed?" (#27, first half.)** The
   motivating case: a machine ran a *current* checkout while its recorded install was 65 days and

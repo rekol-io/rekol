@@ -690,14 +690,21 @@ if [[ "$DO_HOOK" == "1" ]]; then
   for local_snippet_src in "${COMPONENT_DIR}"/hooks/*-snippet.json; do
     local_snippet_dst="${RENDERED_HOOK_DIR}/$(basename "${local_snippet_src}")"
     local_snippet_body="$(cat "${local_snippet_src}")"
-    printf '%s\n' "${local_snippet_body//@REKOL@/${REKOL_INVOCATION}}" \
-      > "${local_snippet_dst}"
+    local_snippet_body="${local_snippet_body//@REKOL@/${REKOL_INVOCATION}}"
+    # @TOOLS_HOME@ for the scripts we symlink rather than invoke through the shim.
+    # The PostToolUse snippet used to hardcode `$HOME/.local/share/rekol/hooks/`
+    # while Step 8 symlinks into `${TOOLS_HOME}/hooks/` — so `--tools-home /custom`
+    # wired a PostToolUse hook pointing at a path that does not exist, and the
+    # auto-reindex hook (the one #159 called "the only immune hook") was dead.
+    # Found by the #170 test that executes what the installer writes.
+    local_snippet_body="${local_snippet_body//@TOOLS_HOME@/${TOOLS_HOME}}"
+    printf '%s\n' "${local_snippet_body}" > "${local_snippet_dst}"
   done
 
-  # Fail loudly rather than silently merging an unrendered @REKOL@ into a user's
-  # settings.json — that would install a hook that can never run.
-  if grep -q '@REKOL@' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null; then
-    die "hook snippet rendering failed — @REKOL@ placeholder still present"
+  # Fail loudly rather than silently merging an unrendered placeholder into a
+  # user's settings.json — that would install a hook that can never run.
+  if grep -qE '@REKOL@|@TOOLS_HOME@' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null; then
+    die "hook snippet rendering failed — a placeholder is still present"
   fi
 
   say "rendered hook snippets with rekol at ${BIN_DIR}/rekol"
@@ -965,14 +972,21 @@ if [[ "$DO_HOOK" == "1" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; skipping Claude settings.json env update — add env.REKOL_HOME manually"
   else
+    # Both keys must match, or we rewrite. REKOL_TOOLS_HOME is required because
+    # the `rekol` shim resolves its venv from it, defaulting to
+    # $HOME/.local/share/rekol (bin/rekol:6) — so with `--tools-home /custom`
+    # EVERY hook died with "rekol venv not found", even though the hook command
+    # itself was a correct absolute path to the shim. The command was right and
+    # the shim could not find its own venv. Found by the #170 test that runs what
+    # the installer writes; a string check could not have seen it.
     HAS_REKOL_HOME="$(
-      jq --arg want "${RESOLVED_HOME}" \
-        '(.env.REKOL_HOME // "") == $want' \
+      jq --arg want "${RESOLVED_HOME}" --arg wantth "${TOOLS_HOME}" \
+        '((.env.REKOL_HOME // "") == $want) and ((.env.REKOL_TOOLS_HOME // "") == $wantth)' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
     if [[ "$HAS_REKOL_HOME" == "true" ]]; then
-      say "REKOL_HOME already in ${SETTINGS_JSON} env — no-op"
+      say "REKOL_HOME + REKOL_TOOLS_HOME already in ${SETTINGS_JSON} env — no-op"
     else
       # Independent backup before this step's mutation.  Step 7's earlier
       # backup of ${SETTINGS_JSON} reflects the file BEFORE the hook merge,
@@ -982,11 +996,11 @@ if [[ "$DO_HOOK" == "1" ]]; then
       log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_env_backup}"
 
       local_tmp="${SETTINGS_JSON}.tmp.$$"
-      run "jq --arg val '${RESOLVED_HOME}' \
-        '.env = ((.env // {}) + {REKOL_HOME: \$val})' \
+      run "jq --arg val '${RESOLVED_HOME}' --arg th '${TOOLS_HOME}' \
+        '.env = ((.env // {}) + {REKOL_HOME: \$val, REKOL_TOOLS_HOME: \$th})' \
         '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "SET env.REKOL_HOME in ${SETTINGS_JSON}"
-      say "added REKOL_HOME to ${SETTINGS_JSON} env"
+      log_journal "SET env.REKOL_HOME + env.REKOL_TOOLS_HOME in ${SETTINGS_JSON}"
+      say "added REKOL_HOME + REKOL_TOOLS_HOME to ${SETTINGS_JSON} env"
     fi
   fi
 fi

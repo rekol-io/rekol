@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.local/share/rekol/hooks/auto-reindex.sh"
+            "command": "@TOOLS_HOME@/hooks/auto-reindex.sh"
           }
         ]
       }
