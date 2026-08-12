@@ -572,12 +572,20 @@ PY
       --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
   [ "$status" -eq 0 ]
 
-  run jq -e '.hooks.UserPromptSubmit[].hooks[] | select(.command == "rekol _hook time-context")' \
+  # Present, but NOT as a bare `rekol` — that exits 127 in a non-interactive
+  # hook shell (#159), so assert the subcommand and the absence of the bare form.
+  run jq -e '.hooks.UserPromptSubmit[].hooks[] | select(.command | test("_hook time-context"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
-  run jq -e '.hooks.Stop[].hooks[] | select(.command == "rekol _hook record-stop")' \
+  run jq -e '[.hooks.UserPromptSubmit[].hooks[].command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
+  run jq -e '.hooks.Stop[].hooks[] | select(.command | test("_hook record-stop"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
+  run jq -e '[.hooks.Stop[].hooks[].command] | any(. == "rekol _hook record-stop")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
 }
 
 @test "double-injection guard warns and skips on a legacy mac_setup time hook" {
@@ -631,9 +639,13 @@ PY
       --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
   [ "$status" -eq 0 ]
 
-  run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(. == "rekol review --nudge")' \
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(test("review --nudge"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
+  # ...and never as a bare `rekol` (#159).
+  run jq -e '[.hooks.SessionEnd[].hooks[].command] | any(. == "rekol review --nudge")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
   # session-index must not be duplicated by the merge — exactly one handler.
   run jq -e '[.hooks.SessionEnd[].hooks[].command | select(test("session-index --incremental"))] | length == 1' \
     "$SBHOME/.claude/settings.json"
@@ -914,10 +926,15 @@ PY
     [ "$status" -eq 0 ]
   done
 
-  # time-context survives, capture-nudge added exactly once.
-  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+  # time-context survives -- but MIGRATED to the PATH-independent form (#159), so
+  # match the stable subcommand rather than the old bare text, and assert the bare
+  # form is gone (a bare `rekol` in a hook exits 127).
+  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(contains("_hook time-context"))' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
+  run jq -e '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | any(. == "rekol _hook time-context")' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -ne 0 ]
   run jq '[.hooks.UserPromptSubmit[]?.hooks[]?.command | select(contains("_hook capture-nudge"))] | length' \
     "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]

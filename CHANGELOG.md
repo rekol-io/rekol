@@ -5,6 +5,22 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### ⚠️ Action required for existing installs
+- **If you installed rekol before this version, re-run `install.sh` to get the hook fix
+  (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in
+  any session whose shell lacks an interactive PATH (desktop app, multiplexer, agent). Three
+  of the eight failed visibly; **five failed silently**, so features like the review nudge
+  simply never ran and nothing said so. The fix cannot reach an existing install on its own —
+  there is no self-update yet (#27).
+
+  ```bash
+  cd /path/to/rekol && git pull && ./install.sh
+  ```
+
+  Re-running is safe and idempotent: it repairs the old hook commands **in place** (writing a
+  timestamped `settings.json` backup first), preserves any hooks you added yourself, and does
+  not duplicate anything. It also adds handlers shipped since your install.
+
 ### Fixed
 - CI now runs the uninstall suite it already gated on: the change filter has named
   `tests/test_uninstall.bats` since it was written, but only `test_install.bats` was ever
@@ -13,6 +29,20 @@ follow [Semantic Versioning](https://semver.org/).
   fixed for the suite to pass on Linux: `md5 -q` is macOS-only (the suite could never have run on
   ubuntu), and one assertion in `test_install.bats` compared two empty strings and therefore
   asserted nothing.
+- Hooks no longer fail (often silently) when the shell has no interactive PATH (#159):
+  hooks read `.zshenv`/`.zprofile` but **not** `.zshrc`, which is where `BIN_DIR` is added —
+  so a bare `rekol` in a hook exits 127 whenever a session is launched from the desktop app,
+  a multiplexer, or an agent. Three of the eight invocations failed visibly; **five failed
+  silently** behind `|| true`, so the review nudge and others simply never ran. Snippets now
+  invoke the CLI through an `@REKOL@` placeholder that `install.sh` renders to
+  `"$(command -v rekol || echo <BIN_DIR>/rekol)"`, applying the pattern `auto-reindex.sh`
+  already used to be the only immune hook. `rekol resume enable` writes the same guarded form.
+  A new **migration step repairs existing installs in place** — without it, changing the
+  command text would have *appended duplicates* where idempotency keyed on an exact match and
+  *skipped forever* where it keyed on a substring, i.e. worse than the bug. Also fixed while
+  here: the `SessionStart` merge keyed idempotency on an exact command match, so an install
+  predating the `session-confidence` tail would get a **second memory-loader** and inject
+  REKOL.md twice — it now classifies and upgrades in place (the #135 Step-7D pattern).
 - CI no longer randomly fails on a network call (#155): a unit test in
   `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
   `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the

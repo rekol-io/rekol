@@ -26,7 +26,21 @@ from rekol.config import load_config
 from rekol.resume import enabled_marker_path, freeze_journal_path, is_enabled, ledger_path
 from rekol.resume import tick as run_tick
 
-_HOOK_COMMAND = "rekol _hook stop-failure-record 2>/dev/null || true"
+
+def _hook_command() -> str:
+    """The StopFailure hook command, PATH-independent (#159).
+
+    A bare `rekol` fails with exit 127 in any hook whose shell did not inherit an
+    interactive PATH — hooks read .zshenv/.zprofile but not .zshrc, and that is
+    where BIN_DIR is added. This hook is registered by `resume enable` rather than
+    by install.sh, so it needs the same guard the snippets get: try PATH first,
+    fall back to the absolute path of the rekol we are currently running as.
+    """
+    resolved = shutil.which("rekol") or str(Path(sys.executable).with_name("rekol"))
+    return f'"$(command -v rekol || echo {resolved})" _hook stop-failure-record 2>/dev/null || true'
+
+
+_HOOK_MARKER = "_hook stop-failure-record"
 _PLIST_LABEL = "io.rekol.resume-watchdog"
 _TICK_INTERVAL_SECONDS = 300
 
@@ -63,7 +77,7 @@ def _load_settings(path: Path) -> dict:
 def _hook_registered(settings: dict) -> bool:
     for block in settings.get("hooks", {}).get("StopFailure", []) or []:
         for hook in block.get("hooks", []) or []:
-            if "stop-failure-record" in str(hook.get("command", "")):
+            if _HOOK_MARKER in str(hook.get("command", "")):
                 return True
     return False
 
@@ -110,7 +124,7 @@ def enable(no_launchd: bool) -> None:
     else:
         hooks = settings.setdefault("hooks", {})
         hooks.setdefault("StopFailure", []).append(
-            {"matcher": "", "hooks": [{"type": "command", "command": _HOOK_COMMAND}]}
+            {"matcher": "", "hooks": [{"type": "command", "command": _hook_command()}]}
         )
         _write_settings(settings_file, settings)
         click.echo(f"freeze-recorder hook: registered in {settings_file} (backup written)")
@@ -164,7 +178,7 @@ def disable() -> None:
     kept = [
         b
         for b in blocks
-        if not any("stop-failure-record" in str(h.get("command", "")) for h in b.get("hooks", []))
+        if not any(_HOOK_MARKER in str(h.get("command", "")) for h in b.get("hooks", []))
     ]
     if len(kept) != len(blocks):
         settings["hooks"]["StopFailure"] = kept
