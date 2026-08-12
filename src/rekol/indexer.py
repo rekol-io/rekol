@@ -34,8 +34,54 @@ class IndexStats:
 # Top-level layer dirs walked by the indexer.  Memory files in any of these
 # are searchable.  ``projects/`` is also walked but treated specially below —
 # its sublayer is ``projects/<slug>/<layer>/<file>.md``.
-INDEXED_DIRS = ("always", "when", "topics", "knowledge")
+INDEXED_DIRS = ("always", "when", "topics", "knowledge", "feedback")
 PROJECTS_DIR = "projects"
+
+# Paths under the store root that are deliberately NOT curated memory. Listed
+# explicitly rather than left to "whatever the walk happens to miss" (#157/#158):
+# a coverage check has to tell "excluded on purpose" apart from "silently outside
+# the walk", and it cannot do that if the only definition of scope IS the walk.
+#
+# `tasks/` is the #113 operational task layer — its own schema, machine-managed,
+# and indexing it would pollute memory search with task churn. `MEMORY.md` is the
+# pointer index injected at SessionStart; it carries no frontmatter by design, so
+# indexing it would report a permanent rejection for a file that is working
+# exactly as intended.
+NON_MEMORY_DIRS = ("tasks",)
+NON_MEMORY_FILES = ("MEMORY.md",)
+
+
+def iter_all_markdown(root: Path) -> Iterable[Path]:
+    """Every ``.md`` file under ``root`` — the FILESYSTEM truth, not the walk's.
+
+    Deliberately independent of :func:`_iter_memory_files`. ``doctor``'s coverage
+    check used the indexer's own walk, so it compared the index against itself and
+    structurally could not report a file the indexer never discovered — it printed
+    "52/52 indexed" for a store holding 62 files (#158). A check that shares the
+    walk shares its blind spot, so this one does not share the walk.
+    """
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.glob("**/*.md") if not _in_hidden_dir(p, root))
+
+
+def _in_hidden_dir(path: Path, root: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:  # pragma: no cover — glob results are always under root
+        return False
+    return any(part.startswith(".") for part in rel.parts)
+
+
+def is_non_memory(path: Path, root: Path) -> bool:
+    """True for paths excluded from memory ON PURPOSE (see NON_MEMORY_*)."""
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    if rel.parts and rel.parts[0] in NON_MEMORY_DIRS:
+        return True
+    return len(rel.parts) == 1 and rel.parts[0] in NON_MEMORY_FILES
 
 
 def _iter_memory_files(root: Path) -> Iterable[Path]:
@@ -51,6 +97,13 @@ def _iter_memory_files(root: Path) -> Iterable[Path]:
             yield from sorted(d.glob("**/*.md"))
     projects_root = root / PROJECTS_DIR
     if projects_root.is_dir():
+        # Flat `projects/<name>.md` as well as `projects/<slug>/<layer>/`. Real
+        # stores contain BOTH — the legacy Claude "project" memory type migrates
+        # to a flat file (declaring `type: project` → `topic`), while rekol's own
+        # per-project layout nests under a slug. Walking only the nested form left
+        # the flat files unreachable by search, and the coverage check could not
+        # see it because it shared this walk (#157/#158).
+        yield from sorted(projects_root.glob("*.md"))
         for slug_dir in sorted(projects_root.iterdir()):
             if not slug_dir.is_dir():
                 continue
@@ -314,13 +367,21 @@ class Indexer:
 
         Always rewritten (even to 0) so a store that was fixed clears the banner.
         Best-effort: a write failure must never fail the index run it rides on.
+
+        The denominator is the FILESYSTEM, minus the paths excluded on purpose —
+        not ``_iter_memory_files`` (#158). Using the walk here made the banner
+        report "1 memory file invisible" when the true number was 10: the nine
+        files the walk never visited could not appear in a set derived from that
+        same walk. A file outside the indexer's scope is exactly the case this
+        banner exists to surface, so it must be counted by something that does not
+        share the scope.
         """
         try:
             indexed = {f["path"] for f in self.store.all_files()}
             uncovered = sorted(
                 self._relpath(path)
-                for path in _iter_memory_files(self.memory_root)
-                if str(path) not in indexed
+                for path in iter_all_markdown(self.memory_root)
+                if str(path) not in indexed and not is_non_memory(path, self.memory_root)
             )
             self.index_dir.mkdir(parents=True, exist_ok=True)
             (self.index_dir / SKIP_MANIFEST_NAME).write_text(

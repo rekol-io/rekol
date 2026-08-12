@@ -402,3 +402,110 @@ def test_doctor_flags_rejected_file_invisible_to_search(tmp_path: Path, monkeypa
     assert result.exit_code == 1, result.output
     assert "topics/broken.md" in result.output
     assert "rekol index update" in result.output
+
+
+# ------------- #157/#158: the denominator must come from the DISK -------------
+# The coverage check used to derive its denominator from the indexer's own walk,
+# so it compared the index against itself and structurally could not report a
+# file the indexer never discovered — it printed "52/52 indexed (none rejected)"
+# on a store where 10 files were unreachable by search.
+
+
+def test_doctor_reports_a_file_the_indexer_never_walks(tmp_path: Path, monkeypatch) -> None:
+    """#158: the check must catch a file OUTSIDE the indexer's scope.
+
+    This is the structural guarantee, not a fix for one directory: a layer added
+    to the store tomorrow that the walk does not know about must show up here.
+    Uses a directory name the indexer has no knowledge of, so the test keeps
+    working after `feedback`/flat-`projects` were added to the walk.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "notalayer").mkdir()
+    (home / "notalayer" / "orphan.md").write_text(
+        "---\nname: Orphan\ndescription: valid but unreachable\ntype: topic\n---\n\nbody\n"
+    )
+    _build_curated_index(home)
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert len(coverage) == 1
+    assert coverage[0].status is Status.PROBLEM, coverage[0].detail
+    assert "notalayer/orphan.md" in coverage[0].detail
+    # Named as a SCOPE bug, so the remedy isn't "fix your frontmatter" — the file
+    # is perfectly valid.
+    assert "NEVER WALKED" in coverage[0].detail
+    assert "2/3" in coverage[0].detail
+
+
+def test_feedback_layer_is_walked_and_indexed(tmp_path: Path, monkeypatch) -> None:
+    """#157: `feedback/` holds the behavioural-correction layer. It was never
+    walked, so 0 of its facts were retrievable by search — reachable only via the
+    MEMORY.md pointer a session might not follow."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "feedback").mkdir()
+    (home / "feedback" / "correction.md").write_text(
+        "---\nname: Correction\ndescription: how to work\ntype: feedback\n---\n\nbody\n"
+    )
+    _build_curated_index(home)
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert coverage[0].status is Status.OK, coverage[0].detail
+    assert "3/3" in coverage[0].detail
+
+
+def test_flat_project_files_are_walked(tmp_path: Path, monkeypatch) -> None:
+    """A real store holds BOTH `projects/<name>.md` (migrated legacy "project"
+    memories) and `projects/<slug>/<layer>/`. Only the nested form was walked."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "projects").mkdir()
+    (home / "projects" / "flat.md").write_text(
+        "---\nname: Flat\ndescription: a project memory\ntype: project\n---\n\nbody\n"
+    )
+    _build_curated_index(home)
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert coverage[0].status is Status.OK, coverage[0].detail
+    assert "3/3" in coverage[0].detail
+
+
+def test_tasks_and_memory_md_are_excluded_not_rejected(tmp_path: Path, monkeypatch) -> None:
+    """`tasks/` is operational state and `MEMORY.md` carries no frontmatter by
+    design. Both must be excluded EXPLICITLY and counted out loud — reporting them
+    as rejections would make doctor permanently red for files working as intended,
+    and saying nothing is what let "52/52" read as complete."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "some-task.md").write_text("---\nid: t1\nstatus: open\n---\n\nwork\n")
+    (home / "MEMORY.md").write_text("# Memory Index\n\n- pointer\n")
+    _build_curated_index(home)
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    coverage = [f for f in report.findings if f.label == "curated coverage"]
+    assert coverage[0].status is Status.OK, coverage[0].detail
+    assert "2/2" in coverage[0].detail
+    assert "2 deliberately excluded" in coverage[0].detail
+
+
+def test_skip_manifest_counts_unwalked_files(tmp_path: Path, monkeypatch) -> None:
+    """#158's other half: the SessionStart banner read the same wrong denominator,
+    so it said "1 memory file invisible" when the real number was 10."""
+    import json
+
+    from rekol.config import SKIP_MANIFEST_NAME
+
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "notalayer").mkdir()
+    (home / "notalayer" / "orphan.md").write_text(
+        "---\nname: Orphan\ndescription: unreachable\ntype: topic\n---\n\nbody\n"
+    )
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t.md").write_text("---\nid: t1\nstatus: open\n---\n\nwork\n")
+    _build_curated_index(home)
+
+    manifest = json.loads((load_config().index_dir / SKIP_MANIFEST_NAME).read_text())
+    assert manifest["count"] == 1, manifest
+    assert "notalayer/orphan.md" in manifest["paths"]
+    # The deliberate exclusion must NOT inflate the banner.
+    assert not any("tasks/" in p for p in manifest["paths"])

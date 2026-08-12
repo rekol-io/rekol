@@ -81,6 +81,29 @@ follow [Semantic Versioning](https://semver.org/).
   one "LAUNCH FAILED" line that says the feature is broken); the ledger records the launch
   **outcome** as well as the claim, so `status` can no longer count a failed launch as a resume;
   and `status` distinguishes "registered" from "registered but cannot execute".
+- Memory files were invisible to search, and `doctor` reported full coverage anyway
+  (#157/#158). Measured on a real 65-file store: 62 files should be searchable, **10 were
+  not**, and `doctor` printed `✓ curated coverage: 52/52 curated files indexed (none
+  rejected)`. Three separate scope gaps, plus the reason nobody could see them:
+  - `feedback/` — the behavioural-correction layer — was never walked. Those files were
+    reachable *only* via the `MEMORY.md` pointer injected at SessionStart, so any session
+    that didn't follow the pointer never saw them. Now indexed (their `type: feedback`
+    frontmatter already maps to the `when` layer).
+  - Flat `projects/<name>.md` files were never walked — only the nested
+    `projects/<slug>/<layer>/` form was. Real stores contain both, since a migrated legacy
+    "project" memory lands as a flat file.
+  - `tasks/` and the root `MEMORY.md` are now **explicitly** excluded rather than
+    accidentally missed, and `doctor` states the excluded count out loud. `tasks/` is
+    operational state with its own schema; `MEMORY.md` carries no frontmatter by design, so
+    reporting it as a rejection would make `doctor` permanently red over a working file.
+  - **The reason it was invisible:** `doctor`'s coverage check and the SessionStart banner
+    both derived their denominator from the indexer's own walk, so they compared the index
+    against itself and *structurally could not* report a file the indexer never discovered.
+    Both now take the denominator from the filesystem. The check also distinguishes
+    "rejected" (walked, failed validation) from "NEVER WALKED" (a scope bug in the indexer,
+    not a problem with the user's file) — different causes, different remedies. This new
+    check immediately found the flat-`projects/` gap that the first pass of the fix missed,
+    which is the point of not sharing the walk.
 - CI no longer randomly fails on a network call (#155): a unit test in
   `test_invalidate_session.py` built a memory home without a `rekol.config.yaml`, so
   `load_config()` fell back to the real `BAAI/bge-small-en-v1.5` and the test downloaded the
