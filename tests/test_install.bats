@@ -982,3 +982,74 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *"local copy of your sessions"* ]]
 }
+
+# --------------- #27: does the update REPAIR the drift it detects? -------------
+# QA's most important acceptance criterion: the case for #27 is a machine that
+# was wired at an older version and silently missing handlers shipped since. The
+# test is therefore NOT "detects a new version" but "a machine wired the old way
+# ends up correctly wired". A version bump that notifies but does not re-wire
+# would pass every other test and still not fix the problem that motivated this.
+@test "install repairs an old-style install: all shipped handlers wired + version stamped" {
+  SBHOME="$TESTROOT/sandhome-drift"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-drift"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  # Simulate a v0.3.1-era install: a BARE `rekol` memory loader with no
+  # session-confidence tail, and none of the handlers shipped since.
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "HOME_DIR=\"${REKOL_HOME:-$MEMORY_HOME}\"; cat \"$HOME_DIR/REKOL.md\""}]}
+    ],
+    "UserPromptSubmit": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook time-context"}]}
+    ]
+  },
+  "env": {"KEEP_ME": "1"}
+}
+JSON
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # 1. EVERY handler the shipped snippets declare must now be registered. The
+  #    expected list is derived from the snippets, never hardcoded here — a
+  #    hardcoded list would silently stop covering the next handler added.
+  expected="$(grep -ohE '_hook [a-z-]+' "$COMPONENT_DIR"/hooks/*-snippet.json \
+              | sed 's/.*_hook //' | sort -u)"
+  [ -n "$expected" ]
+  wired="$(grep -oE '_hook [a-z-]+' "$SBHOME/.claude/settings.json" \
+           | sed 's/.*_hook //' | sort -u)"
+  missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$wired"))"
+  [ -z "$missing" ] || { echo "NOT wired after install: $missing"; false; }
+
+  # 2. No bare `rekol` invocation survives the repair (#159).
+  bare="$(jq -r '[.hooks[]?[]?.hooks[]?.command] | map(select(startswith("rekol "))) | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$bare" -eq 0 ] || { echo "$bare bare invocation(s) left"; false; }
+
+  # 3. Exactly ONE memory loader — the repair must upgrade in place, never append
+  #    a second (the #135 Step-7D failure).
+  loaders="$(jq -r '[.hooks.SessionStart[]?.hooks[]?.command | select(test("REKOL.md"))] | length' \
+             "$SBHOME/.claude/settings.json")"
+  [ "$loaders" -eq 1 ] || { echo "expected 1 memory loader, found $loaders"; false; }
+
+  # 4. The manifest records WHAT was installed, so drift is detectable at all.
+  mf="$REKOLH/.install-logs/manifest.env"
+  [ -f "$mf" ]
+  ver="$(sed -n 's/^VERSION=//p' "$mf")"
+  [ -n "$ver" ] || { echo "manifest has no VERSION"; false; }
+  pkg="$(sed -n 's/^version = "\(.*\)"/\1/p' "$COMPONENT_DIR/pyproject.toml" | head -1)"
+  [ "$ver" = "$pkg" ] || { echo "manifest VERSION=$ver but package is $pkg"; false; }
+
+  # 5. The user's own env keys survive.
+  run jq -e '.env.KEEP_ME == "1"' "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
