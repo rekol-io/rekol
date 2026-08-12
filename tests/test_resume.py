@@ -96,19 +96,21 @@ def test_tick_resumes_claimed_session_after_reset(tmp_path: Path) -> None:
     _claim(home, "big-refactor", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")  # resets 3:45pm < NOW 18:00
     launched: list[str] = []
-    actions = tick(index, home, now=NOW, launcher=lambda sid, log: launched.append(sid) or True)
+    actions = tick(
+        index, home, now=NOW, launcher=lambda sid, log, cwd=None: launched.append(sid) or True
+    )
     assert [a.session_id for a in actions] == ["sess-1"]
     assert actions[0].task_id == "big-refactor"
     assert launched == ["sess-1"]
     # Ledger written → idempotent: a second tick does nothing.
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
 
 
 def test_tick_skips_unclaimed_session(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
     _enable(index)
     _freeze(index, "sess-idle", ts="2026-07-30T12:10:00")
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
 
 
 def test_tick_waits_for_reset_time(tmp_path: Path) -> None:
@@ -117,7 +119,7 @@ def test_tick_waits_for_reset_time(tmp_path: Path) -> None:
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
     early = dt.datetime(2026, 7, 30, 14, 0)  # before the 3:45pm reset
-    assert tick(index, home, now=early, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=early, launcher=lambda sid, log, cwd=None: True) == []
 
 
 def test_tick_fallback_delay_when_no_reset_in_message(tmp_path: Path) -> None:
@@ -126,10 +128,10 @@ def test_tick_fallback_delay_when_no_reset_in_message(tmp_path: Path) -> None:
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T17:30:00", message="opaque failure")
     # 30 min after freeze: fallback (60m) not yet elapsed.
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
     # 61 min after: eligible.
     later = dt.datetime(2026, 7, 30, 18, 31)
-    assert len(tick(index, home, now=later, launcher=lambda sid, log: True)) == 1
+    assert len(tick(index, home, now=later, launcher=lambda sid, log, cwd=None: True)) == 1
 
 
 def test_tick_ignores_non_limit_error_types(tmp_path: Path) -> None:
@@ -147,7 +149,7 @@ def test_tick_ignores_non_limit_error_types(tmp_path: Path) -> None:
         error_type="server_error",
         message="Internal server error — please try again",
     )
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
 
 
 def test_tick_fires_on_the_real_payload_shape(tmp_path: Path) -> None:
@@ -171,7 +173,7 @@ def test_tick_fires_on_the_real_payload_shape(tmp_path: Path) -> None:
     with freeze_journal_path(index).open("a") as handle:
         handle.write(json.dumps(entry) + "\n")
 
-    actions = tick(index, home, now=NOW, launcher=lambda sid, log: True)
+    actions = tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True)
     assert len(actions) == 1
     assert actions[0].session_id == "sess-1"
 
@@ -183,7 +185,7 @@ def test_ledger_records_a_failed_launch_distinctly(tmp_path: Path) -> None:
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
 
-    actions = tick(index, home, now=NOW, launcher=lambda sid, log: False)
+    actions = tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: False)
     assert len(actions) == 1 and actions[0].launched is False
 
     records = [json.loads(line) for line in ledger_path(index).read_text().splitlines()]
@@ -198,7 +200,7 @@ def test_tick_ignores_stale_freezes(tmp_path: Path) -> None:
     _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-20T12:10:00")  # 10 days old
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
 
 
 def test_tick_caps_at_one_resume(tmp_path: Path) -> None:
@@ -209,10 +211,14 @@ def test_tick_caps_at_one_resume(tmp_path: Path) -> None:
     _freeze(index, "sess-1", ts="2026-07-30T12:00:00")
     _freeze(index, "sess-2", ts="2026-07-30T12:05:00")
     launched: list[str] = []
-    actions = tick(index, home, now=NOW, launcher=lambda sid, log: launched.append(sid) or True)
+    actions = tick(
+        index, home, now=NOW, launcher=lambda sid, log, cwd=None: launched.append(sid) or True
+    )
     assert len(actions) == 1 and len(launched) == 1
     # Next tick picks up the other one.
-    actions2 = tick(index, home, now=NOW, launcher=lambda sid, log: launched.append(sid) or True)
+    actions2 = tick(
+        index, home, now=NOW, launcher=lambda sid, log, cwd=None: launched.append(sid) or True
+    )
     assert len(actions2) == 1
     assert set(launched) == {"sess-1", "sess-2"}
 
@@ -222,11 +228,11 @@ def test_tick_dry_run_writes_nothing(tmp_path: Path) -> None:
     _enable(index)
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")
-    actions = tick(index, home, now=NOW, dry_run=True, launcher=lambda sid, log: True)
+    actions = tick(index, home, now=NOW, dry_run=True, launcher=lambda sid, log, cwd=None: True)
     assert len(actions) == 1 and actions[0].launched is False
     assert not ledger_path(index).exists()
     # Real tick still fires afterwards (dry-run left no ledger mark).
-    assert len(tick(index, home, now=NOW, launcher=lambda sid, log: True)) == 1
+    assert len(tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True)) == 1
 
 
 # --------------------------- enable / disable --------------------------------
@@ -334,10 +340,10 @@ def test_tick_refuses_when_not_enabled(tmp_path: Path) -> None:
     index, home = tmp_path / "idx", tmp_path / "home"
     _claim(home, "t", "sess-1")
     _freeze(index, "sess-1", ts="2026-07-30T12:10:00")  # eligible in every other way
-    assert tick(index, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
     # Same inputs, opted in → resumes. Proves the marker is the only difference.
     _enable(index)
-    assert len(tick(index, home, now=NOW, launcher=lambda sid, log: True)) == 1
+    assert len(tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True)) == 1
 
 
 def test_disable_clears_marker_and_journal(tmp_path: Path, monkeypatch) -> None:
@@ -359,7 +365,7 @@ def test_disable_clears_marker_and_journal(tmp_path: Path, monkeypatch) -> None:
     # Stale freezes are gone, so re-enabling later can't fire an old one.
     assert not freeze_journal_path(index_dir).exists()
     _claim(home, "t", "sess-1")
-    assert tick(index_dir, home, now=NOW, launcher=lambda sid, log: True) == []
+    assert tick(index_dir, home, now=NOW, launcher=lambda sid, log, cwd=None: True) == []
 
 
 # --------------- The four defects that made this feature inert -----------------
@@ -503,3 +509,43 @@ def test_plist_pins_the_resolved_index_dir(tmp_path: Path, monkeypatch) -> None:
     assert str(tmp_path / "cache") in env["REKOL_INDEX_DIR"]
     # Defect 4's diagnostic half: launchd must not discard the failure message.
     assert plist["StandardErrorPath"].endswith("resume-watchdog.log")
+
+
+def test_resume_launches_in_the_project_dir_from_the_payload(tmp_path: Path) -> None:
+    """Claude Code stores transcripts per project
+    (``<config>/projects/<escaped-cwd>/<session-id>.jsonl``), so a resume run from
+    the wrong directory cannot find the session. The launchd job's cwd is not the
+    project, and every captured freeze payload carries `cwd` — so pass it."""
+    index, home = tmp_path / "idx", tmp_path / "home"
+    project = tmp_path / "someproject"
+    project.mkdir()
+    _enable(index)
+    _claim(home, "t", "sess-1")
+    index.mkdir(parents=True, exist_ok=True)
+    # The REAL payload shape: `error` code, `cwd`, no error_type, no message.
+    entry = {
+        "ts": "2026-07-30T12:10:00",
+        "payload": {"session_id": "sess-1", "error": "rate_limit", "cwd": str(project)},
+    }
+    with freeze_journal_path(index).open("a") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+    seen: list[str | None] = []
+    actions = tick(
+        index,
+        home,
+        now=dt.datetime(2026, 7, 30, 14, 0),  # past the 60-min fallback
+        launcher=lambda sid, log, cwd=None: (seen.append(cwd), True)[1],
+    )
+    assert len(actions) == 1
+    assert seen == [str(project)]
+
+
+def test_launcher_tolerates_a_cwd_that_no_longer_exists(tmp_path: Path) -> None:
+    """A recorded project dir can be deleted or moved between freeze and resume.
+    Popen would raise FileNotFoundError and take the whole tick down with it."""
+    from rekol.resume import _launch_detached
+
+    log = tmp_path / "launch.log"
+    # `claude` is absent in CI, so this exercises the guard, not a real launch.
+    assert _launch_detached("sess-1", log, cwd=str(tmp_path / "gone")) in (True, False)

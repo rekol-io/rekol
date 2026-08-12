@@ -175,6 +175,9 @@ def _entry_fields(entry: dict) -> tuple[str, str, str]:
     """
     payload = entry.get("payload") or {}
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
+    # NB: the payload also carries `cwd` — see entry_cwd(). Claude Code scopes
+    # sessions per project directory, so resuming from the wrong cwd cannot find
+    # the session at all.
     # `error` is the key real StopFailure payloads actually carry — confirmed
     # against four captured freezes. Reading only error_type/errorType meant
     # error_type was ALWAYS "" and the `not in LIMIT_ERROR_TYPES` gate below
@@ -189,14 +192,28 @@ def _entry_fields(entry: dict) -> tuple[str, str, str]:
 def is_limit_shaped(error_type: str, message: str) -> bool:
     """True when a StopFailure looks like a usage limit rather than a real error.
 
-    Type-based matching alone is insufficient: the captured freezes carry no
-    error *type* at all — only a human-readable message ("You've reached your
-    … limit"). So the message is the only signal that exists in practice, and
-    matching on it is what makes the mechanism able to fire at all.
+    GROUND TRUTH from four captured freezes (2026-08-05 … 08-07). The payload
+    keys are::
 
-    Deliberately narrow. A false positive costs one wasted headless request at
-    the wrong time; the resume is still gated on an ``in_progress`` task claim
-    and one-resume-per-tick, which is where the real safety lives.
+        agent_id, cwd, effort, error, error_details, hook_event_name,
+        last_assistant_message, prompt_id, session_id, transcript_path
+
+    ``error`` holds a short CODE, not prose — the observed values were
+    ``rate_limit`` (×2) and ``invalid_request`` (×2). There is no ``error_type``
+    key, no ``message`` key, and **no reset time anywhere in the payload** (which
+    is why :func:`parse_reset_time` never fires on this path and the
+    ``FALLBACK_DELAY_MINUTES`` branch is the real one).
+
+    So code matching is the evidence-backed path, and reading ``error`` is what
+    makes it work at all: the old gate read only ``error_type``/``errorType``,
+    which are absent, so it compared ``""`` and skipped every entry forever.
+    ``invalid_request`` is correctly ignored by the same test.
+
+    The message branch below is **speculative** — no captured payload carries
+    prose. It is kept only so an account-level limit that words itself
+    differently is not missed, and it is deliberately narrow. A false positive
+    costs one wasted headless request; the real safety is elsewhere and
+    unchanged (an ``in_progress`` task claim, and one resume per tick).
     """
     if any(known in error_type for known in LIMIT_ERROR_TYPES):
         return True
@@ -206,14 +223,36 @@ def is_limit_shaped(error_type: str, message: str) -> bool:
     )
 
 
-def _launch_detached(session_id: str, log_path: Path) -> bool:
-    """Fire `claude -p --resume` fully detached; the tick never waits on the turn."""
+def entry_cwd(entry: dict) -> str | None:
+    """The project directory a freeze happened in, if the payload recorded it.
+
+    Verified present in every captured freeze. Required for a resume to work at
+    all: Claude Code stores transcripts per project
+    (``<config>/projects/<escaped-cwd>/<session-id>.jsonl``), so
+    ``claude --resume <id>`` run from elsewhere cannot find the session.
+    """
+    payload = entry.get("payload") or {}
+    raw = payload.get("cwd")
+    return str(raw) if raw else None
+
+
+def _launch_detached(session_id: str, log_path: Path, cwd: str | None = None) -> bool:
+    """Fire `claude -p --resume` fully detached; the tick never waits on the turn.
+
+    ``cwd`` is the project directory the freeze occurred in. Without it the child
+    inherits the launchd job's directory — which is not the project — and the
+    resume silently resolves nothing while the ledger records an attempt.
+    """
     claude = shutil.which("claude")
     if claude is None:
         return False
+    # A recorded cwd that no longer exists must not raise inside the launcher:
+    # Popen would fail with FileNotFoundError and take the whole tick down.
+    launch_dir = cwd if cwd and Path(cwd).is_dir() else None
     with log_path.open("a", encoding="utf-8") as log:
         subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             [claude, "-p", "--resume", session_id, _RESUME_NUDGE],
+            cwd=launch_dir,
             stdout=log,
             stderr=log,
             stdin=subprocess.DEVNULL,
@@ -298,7 +337,7 @@ def tick(
                     )
                     + "\n"
                 )
-            launched = launcher(session_id, index_dir / RESUME_LOG_NAME)
+            launched = launcher(session_id, index_dir / RESUME_LOG_NAME, entry_cwd(entry))
             # Record the OUTCOME as a second append. The claim above must stay
             # first (it is what makes a double-fire impossible), but without this
             # a failed launch was indistinguishable from a successful one
