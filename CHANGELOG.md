@@ -5,29 +5,23 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
-### Fixed
-- **A custom `--tools-home` install had every hook dead, and nothing could see it (#170).** Two
-  bugs, both found within minutes of adding a test that *runs* the commands the installer writes:
-  - `hooks/posttooluse-snippet.json` hardcoded `$HOME/.local/share/rekol/hooks/auto-reindex.sh`
-    while `install.sh` symlinks it into `${TOOLS_HOME}/hooks/`. With `--tools-home /custom` the
-    PostToolUse hook pointed at a path that does not exist — so auto-reindex, the hook #159's own
-    notes called "the only immune hook", was silently dead. Now rendered from a `@TOOLS_HOME@`
-    placeholder, and rendering failure aborts the install like `@REKOL@` already did.
-  - `bin/rekol` resolves its venv from `REKOL_TOOLS_HOME`, defaulting to
-    `$HOME/.local/share/rekol` — and nothing propagated that to hooks. Every hook therefore died
-    with `rekol venv not found` even though its command was a correct absolute path to the shim:
-    the command was right and the shim could not find its own venv. `install.sh` now writes
-    `REKOL_TOOLS_HOME` into `settings.json`'s `env` block beside `REKOL_HOME`.
-- **`uninstall.sh` left a hook and an env key behind while reporting them removed.** Its
-  `strip_event` list covered SessionStart / PostToolUse / SessionEnd / UserPromptSubmit / Stop but
-  **not `StopFailure`** — the one event `rekol resume enable` writes to. So uninstall printed
-  "stripped rekol hooks" while leaving a hook wired to the venv it had just deleted. Worse, the
-  `HAS_REKOL` detector walks *every* event, so it saw the survivor and each subsequent uninstall
-  re-backed-up, re-claimed removal, and stripped nothing: **a detector whose scope is wider than
-  its remover's can never confirm its own claim.** Both scopes now match, and the new test asserts
-  a second `uninstall.sh` reports "nothing to strip" — making the claim confirmable rather than
-  merely printed. (Adding `REKOL_TOOLS_HOME` above would otherwise have created a second leftover
-  of exactly this shape.)
+
+## [0.5.0] - 2026-08-12
+### ⚠️ Action required for existing installs
+- **If you installed rekol before this version, re-run `install.sh` to get the hook fix
+  (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in
+  any session whose shell lacks an interactive PATH (desktop app, multiplexer, agent). Three
+  of the eight failed visibly; **five failed silently**, so features like the review nudge
+  simply never ran and nothing said so. The fix cannot reach an existing install on its own —
+  there is no self-update yet (#27).
+
+  ```bash
+  cd /path/to/rekol && git pull && ./install.sh
+  ```
+
+  Re-running is safe and idempotent: it repairs the old hook commands **in place** (writing a
+  timestamped `settings.json` backup first), preserves any hooks you added yourself, and does
+  not duplicate anything. It also adds handlers shipped since your install.
 
 ### Added
 - **A test that executes every hook command the installer wrote (#170).** Nothing in this repo
@@ -55,7 +49,6 @@ follow [Semantic Versioning](https://semver.org/).
   substring while the handler never ran. Adds a test that runs the command **unmasked** and
   requires exit 0, plus one that proves an unrendered placeholder really does fail, so the
   rendering cannot be "simplified" away later.
-### Added
 - **Offline drift detection — "is what I have actually installed?" (#27, first half.)** The
   motivating case: a machine ran a *current* checkout while its recorded install was 65 days and
   three minor versions old, and three hook handlers shipped in that window were never registered.
@@ -85,23 +78,38 @@ follow [Semantic Versioning](https://semver.org/).
     does not repair would pass every other test and still not fix the problem.
   - Network-based "is something newer available?" is deliberately **not** in this change.
 
-### ⚠️ Action required for existing installs
-- **If you installed rekol before this version, re-run `install.sh` to get the hook fix
-  (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in
-  any session whose shell lacks an interactive PATH (desktop app, multiplexer, agent). Three
-  of the eight failed visibly; **five failed silently**, so features like the review nudge
-  simply never ran and nothing said so. The fix cannot reach an existing install on its own —
-  there is no self-update yet (#27).
-
-  ```bash
-  cd /path/to/rekol && git pull && ./install.sh
-  ```
-
-  Re-running is safe and idempotent: it repairs the old hook commands **in place** (writing a
-  timestamped `settings.json` backup first), preserves any hooks you added yourself, and does
-  not duplicate anything. It also adds handlers shipped since your install.
+- Claude Code plugin spike (#153): prototype plugin under `plugin/` that declares rekol's
+  hooks natively (`hooks/hooks.json`) instead of merging them into the user's
+  `settings.json`. Findings in `docs/plugin-spike-findings.md` — 4 of 5 acceptance criteria
+  pass with evidence (failure visibility, concurrency under 12 simultaneous cold starts,
+  scriptable install, coexistence stand-down); the fifth needs a live install. Surfaced a
+  real blocker: the bootstrap needs a package source and rekol is not on PyPI, which makes
+  #28 a dependency of the plugin path.
 
 ### Fixed
+- **A custom `--tools-home` install had every hook dead, and nothing could see it (#170).** Two
+  bugs, both found within minutes of adding a test that *runs* the commands the installer writes:
+  - `hooks/posttooluse-snippet.json` hardcoded `$HOME/.local/share/rekol/hooks/auto-reindex.sh`
+    while `install.sh` symlinks it into `${TOOLS_HOME}/hooks/`. With `--tools-home /custom` the
+    PostToolUse hook pointed at a path that does not exist — so auto-reindex, the hook #159's own
+    notes called "the only immune hook", was silently dead. Now rendered from a `@TOOLS_HOME@`
+    placeholder, and rendering failure aborts the install like `@REKOL@` already did.
+  - `bin/rekol` resolves its venv from `REKOL_TOOLS_HOME`, defaulting to
+    `$HOME/.local/share/rekol` — and nothing propagated that to hooks. Every hook therefore died
+    with `rekol venv not found` even though its command was a correct absolute path to the shim:
+    the command was right and the shim could not find its own venv. `install.sh` now writes
+    `REKOL_TOOLS_HOME` into `settings.json`'s `env` block beside `REKOL_HOME`.
+- **`uninstall.sh` left a hook and an env key behind while reporting them removed.** Its
+  `strip_event` list covered SessionStart / PostToolUse / SessionEnd / UserPromptSubmit / Stop but
+  **not `StopFailure`** — the one event `rekol resume enable` writes to. So uninstall printed
+  "stripped rekol hooks" while leaving a hook wired to the venv it had just deleted. Worse, the
+  `HAS_REKOL` detector walks *every* event, so it saw the survivor and each subsequent uninstall
+  re-backed-up, re-claimed removal, and stripped nothing: **a detector whose scope is wider than
+  its remover's can never confirm its own claim.** Both scopes now match, and the new test asserts
+  a second `uninstall.sh` reports "nothing to strip" — making the claim confirmable rather than
+  merely printed. (Adding `REKOL_TOOLS_HOME` above would otherwise have created a second leftover
+  of exactly this shape.)
+
 - CI now runs the uninstall suite it already gated on: the change filter has named
   `tests/test_uninstall.bats` since it was written, but only `test_install.bats` was ever
   executed — so nothing verified uninstall, or (the part that matters) reinstall-after-uninstall.
@@ -192,16 +200,6 @@ follow [Semantic Versioning](https://semver.org/).
   files, and CI now runs pytest with `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` so this class of
   bug fails loudly on the offending test instead of intermittently on an innocent PR. The full
   suite passes offline (and ~3x faster).
-
-### Added
-- Claude Code plugin spike (#153): prototype plugin under `plugin/` that declares rekol's
-  hooks natively (`hooks/hooks.json`) instead of merging them into the user's
-  `settings.json`. Findings in `docs/plugin-spike-findings.md` — 4 of 5 acceptance criteria
-  pass with evidence (failure visibility, concurrency under 12 simultaneous cold starts,
-  scriptable install, coexistence stand-down); the fifth needs a live install. Surfaced a
-  real blocker: the bootstrap needs a package source and rekol is not on PyPI, which makes
-  #28 a dependency of the plugin path.
-
 
 ## [0.4.0] - 2026-08-04
 ### Added
