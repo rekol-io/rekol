@@ -32,8 +32,27 @@ readonly COMPONENT_DIR
 # fallback so an existing install dir is still found, else the rekol default.
 TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/rekol}}"
 BIN_DIR_DEFAULT="$HOME/bin"
-readonly SETTINGS_JSON="$HOME/.claude/settings.json"
-readonly SKILL_BASE="$HOME/.claude/skills"
+# Claude Code's config tree, honouring CLAUDE_CONFIG_DIR (#176). Both of these
+# hardcoded $HOME/.claude, so a user who relocated the tree got hooks written
+# into a settings.json Claude Code never reads, and skills installed where
+# nothing looks — with the install reporting success both times, because the
+# files were written. It just wrote them somewhere nothing loads from.
+#
+# Mirrors config.resolve_claude_config_dir(). Duplicating the rule in bash is
+# deliberate: uninstall must resolve it with the venv already deleted, and
+# SETTINGS_JSON is needed long before the venv exists. A test asserts the shell
+# rule and the Python one agree, so the two cannot drift.
+#
+# Blank-but-set is treated as unset, matching the Python `.strip()`: an empty
+# CLAUDE_CONFIG_DIR must fall back, not resolve to "/skills".
+if [[ -z "${CLAUDE_CONFIG_DIR:-}" || -z "${CLAUDE_CONFIG_DIR//[[:space:]]/}" ]]; then
+  CLAUDE_CONFIG_HOME="$HOME/.claude"
+else
+  CLAUDE_CONFIG_HOME="${CLAUDE_CONFIG_DIR}"
+fi
+readonly CLAUDE_CONFIG_HOME
+readonly SETTINGS_JSON="${CLAUDE_CONFIG_HOME}/settings.json"
+readonly SKILL_BASE="${CLAUDE_CONFIG_HOME}/skills"
 
 # The interactive shell rc where we add the PATH + REKOL_HOME exports. Detected
 # from the user's login shell ($SHELL) so bash users get a working CLI too, not

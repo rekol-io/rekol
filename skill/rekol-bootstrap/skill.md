@@ -1,6 +1,6 @@
 ---
 name: rekol-bootstrap
-description: Cold-start memory bootstrap. Distil recurring "we always X / repos live in Y / we decided Z" from indexed Claude Code history into curated, review-gated REKOL memory. Trigger on "bootstrap my memory", "seed rekol from my history", "what should I remember from past sessions", or right after a first-run `rekol session-index`. Resumable: a reaped run picks up where it left off.
+description: 'Cold-start memory bootstrap. Distil recurring "we always X / repos live in Y / we decided Z" from indexed Claude Code history into curated, review-gated REKOL memory. Trigger on "bootstrap my memory", "seed rekol from my history", "what should I remember from past sessions", or right after a first-run `rekol session-index`. Resumable: a reaped run picks up where it left off.'
 ---
 
 # rekol-bootstrap

@@ -5,6 +5,29 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **`install.sh` and `uninstall.sh` hardcoded `$HOME/.claude`, ignoring `CLAUDE_CONFIG_DIR`
+  (#176).** Last surviving members of the family fixed in v0.5.2 — missed because the sweep that
+  found the others was scoped to `src/`. Two paths were affected, and the second is the serious
+  one: `SKILL_BASE` (skills installed where nothing looks) and **`SETTINGS_JSON`** — so on a
+  relocated tree *every hook* was written into a `settings.json` Claude Code never reads. Both
+  reported success, because the files were written; they were simply written somewhere nothing
+  loads from. `uninstall.sh` had the identical pair, so it would have reported removing skills and
+  hooks it never touched — the detector-wider-than-remover shape it already fixed once.
+  The rule is now duplicated in bash deliberately (uninstall must resolve it with the venv already
+  deleted, and `SETTINGS_JSON` is needed long before the venv exists) and **a test asserts the
+  shell rule and `config.resolve_claude_config_dir()` agree** across unset / empty / whitespace /
+  path / path-with-spaces, so the two copies cannot drift.
+- **rekol shipped a skill whose YAML frontmatter does not parse (#175).**
+  `skill/rekol-bootstrap/skill.md` had an unquoted `: ` inside a plain scalar, so
+  `yaml.safe_load` raised `mapping values are not allowed here`. Claude Code's parser is more
+  forgiving, so it loaded and the damage stayed invisible — but `description` is the string Claude
+  Code relevance-matches on, and anything of ours that parses strictly would silently drop the
+  skill. **Third instance of this exact bug**, after a live memory file and a template, so the fix
+  ships with a test that `yaml.safe_load`s the frontmatter of *every* file rekol ships
+  (`skill/*/*.md`, `src/rekol/template/**/*.md`) and asserts each skill declares a non-empty
+  `name` and `description`.
+
 
 ## [0.5.2] - 2026-08-12
 ### ⚠️ Action required for existing installs
