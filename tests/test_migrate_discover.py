@@ -71,6 +71,7 @@ def test_discover_auto_memory_sources_empty_when_missing(tmp_path: Path, monkeyp
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(fake_home / ".claude"))
     sources = discover_auto_memory_sources()
     assert sources == []
 
@@ -88,6 +89,7 @@ def test_discover_auto_memory_sources_finds_project_dirs(tmp_path: Path, monkeyp
     # proj-b is retired and should be skipped
 
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(fake_home / ".claude"))
     sources = discover_auto_memory_sources()
     names = sorted(s.name for s in sources)
     assert names == ["-Users-foo-proj-a"]

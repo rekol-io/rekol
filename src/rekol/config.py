@@ -79,6 +79,26 @@ def resolve_claude_config_dir() -> Path:
     return Path(os.path.expanduser(raw)) if raw.strip() else Path.home() / ".claude"
 
 
+def _resolve_projects_dir(configured: object) -> Path:
+    """Resolve ``claude_projects_dir``, honouring ``CLAUDE_CONFIG_DIR`` (#165).
+
+    An explicit value in ``rekol.config.yaml`` always wins — the user said where
+    it is. But the DEFAULT must follow ``CLAUDE_CONFIG_DIR``, because it is how
+    Claude Code relocates its whole tree. Hardcoding ``~/.claude/projects`` meant
+    a relocated install pointed at a directory that does not exist, so
+    ``session-index`` exited 2 on every SessionEnd — into ``>/dev/null 2>&1``,
+    forever — and ``doctor`` still reported "index is healthy".
+
+    Compared against the DEFAULTS literal rather than a sentinel so an existing
+    config that merely *restates* the old default still gets the corrected path;
+    those files were written by an installer that had no other value to offer.
+    """
+    raw = str(configured)
+    if raw == DEFAULTS["claude_projects_dir"]:
+        return resolve_claude_config_dir() / "projects"
+    return Path(os.path.expanduser(raw))
+
+
 def resolve_index_dir(memory_home: Path) -> Path:
     """Resolve the local-only cache dir that holds all derived index state.
 
@@ -363,7 +383,7 @@ def load_config() -> Config:
         secret_check_on_capture=bool(data["secret_check_on_capture"]),
         git_track=bool(data["git_track"]),
         chunk_max_bytes=int(data["chunk_max_bytes"]),
-        claude_projects_dir=Path(os.path.expanduser(str(data["claude_projects_dir"]))),
+        claude_projects_dir=_resolve_projects_dir(data["claude_projects_dir"]),
         session_search_enabled=bool(data["session_search_enabled"]),
         temporal_exclude_invalidated=bool(data["temporal_exclude_invalidated"]),
         temporal_respect_valid_from=bool(data["temporal_respect_valid_from"]),

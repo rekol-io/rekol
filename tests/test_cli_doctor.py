@@ -634,3 +634,82 @@ def test_doctor_flags_valid_but_unindexed_files_as_a_problem(tmp_path: Path, mon
     assert "2/5" in coverage[0].detail
     assert "invisible to search" in coverage[0].detail
     assert not report.is_healthy, "doctor must not claim health with unsearchable files"
+
+
+# ----------------- #165: "index is healthy" with nothing indexed --------------
+
+
+def test_claude_projects_dir_default_follows_claude_config_dir(tmp_path, monkeypatch) -> None:
+    """Claude Code relocates its whole tree via CLAUDE_CONFIG_DIR. Hardcoding
+    ~/.claude/projects meant a relocated install pointed at a directory that does
+    not exist, so session-index exited 2 on every SessionEnd — into /dev/null,
+    forever — while doctor still said healthy."""
+    home = tmp_path / "home"
+    (home / "topics").mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "relocated"))
+
+    assert load_config().claude_projects_dir == tmp_path / "relocated" / "projects"
+
+
+def test_explicit_claude_projects_dir_still_wins(tmp_path, monkeypatch) -> None:
+    """An explicit config value means the user said where it is — do not override."""
+    home = tmp_path / "home"
+    (home / "topics").mkdir(parents=True)
+    chosen = tmp_path / "somewhere-else"
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {chosen}\n"
+    )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "relocated"))
+
+    assert load_config().claude_projects_dir == chosen
+
+
+def test_doctor_flags_a_missing_transcript_source_as_a_problem(tmp_path, monkeypatch) -> None:
+    """A configured-but-absent projects dir makes session-index exit 2 forever, so
+    the index can NEVER build. Reporting that as INFO is how doctor printed
+    'index is healthy' and exited 0 for an install with zero transcripts indexed."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nsession_search_enabled: true\n"
+        f"claude_projects_dir: {tmp_path / 'does-not-exist'}\n"
+    )
+    _build_curated_index(home)
+
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    src = [f for f in report.findings if f.label == "transcript source"]
+    assert len(src) == 1
+    assert src[0].status is Status.PROBLEM, src[0].detail
+    assert "does not exist" in src[0].detail
+    assert not report.is_healthy
+
+
+def test_doctor_flags_unindexed_transcripts_but_not_an_empty_source(tmp_path, monkeypatch) -> None:
+    """'not built yet' is only benign when there is nothing to index. With
+    transcripts sitting there unindexed, session search silently returns nothing."""
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    projects = tmp_path / "projects"
+    (projects / "proj").mkdir(parents=True, exist_ok=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nsession_search_enabled: true\n"
+        f"claude_projects_dir: {projects}\n"
+    )
+    _build_curated_index(home)
+
+    # Empty projects dir → genuinely nothing to index → INFO, still healthy.
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    idx = [f for f in report.findings if f.label == "session index"][0]
+    assert idx.status is Status.INFO, idx.detail
+
+    # Now a transcript exists and is unindexed → PROBLEM.
+    (projects / "proj" / "session.jsonl").write_text(
+        '{"type":"user","message":{"role":"user","content":"hi"},'
+        '"uuid":"u-1","timestamp":"2026-04-24T01:29:01.303Z","sessionId":"s-1","cwd":"/tmp/r"}\n'
+    )
+    report = run_doctor(load_config(), HashingEmbedder(dim=384))
+    idx = [f for f in report.findings if f.label == "session index"][0]
+    assert idx.status is Status.PROBLEM, idx.detail
+    assert "unsearchable" in idx.detail
+    assert not report.is_healthy

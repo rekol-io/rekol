@@ -608,7 +608,8 @@ manifest_index_dir() {
     "StopFailure": [{"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook stop-failure-record"}]}],
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "other-tool run"}]}]
   },
-  "env": {"REKOL_HOME": "/x", "REKOL_TOOLS_HOME": "/y", "KEEP_ME": "1"}
+  "env": {"REKOL_HOME": "/x", "REKOL_TOOLS_HOME": "/y", "REKOL_INDEX_DIR": "/i",
+          "REKOL_ARCHIVE_DIR": "/a", "MEMORY_HOME": "/legacy", "KEEP_ME": "1"}
 }
 JSON
   REKOLH="$TESTROOT/rekolhome-scope"
@@ -623,8 +624,12 @@ JSON
           "$SBHOME/.claude/settings.json")"
   [ "$left" -eq 0 ] || { echo "$left rekol hook(s) survived"; jq '.hooks' "$SBHOME/.claude/settings.json"; false; }
 
-  # Both rekol env keys gone; the user's own key kept.
-  run jq -e '(.env | has("REKOL_HOME") or has("REKOL_TOOLS_HOME")) | not' "$SBHOME/.claude/settings.json"
+  # EVERY rekol-namespace env key gone (asserted by prefix, not by an enumerated
+  # list — a list here would pass while a newly-added key leaked, which is the
+  # exact drift this predicate exists to prevent). The user's own key kept.
+  run jq -e '(.env // {} | keys
+              | map(startswith("REKOL_") or . == "MEMORY_HOME" or . == "MEMORY_TOOLS_HOME")
+              | any) | not' "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
   run jq -e '.env.KEEP_ME == "1"' "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]

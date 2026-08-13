@@ -447,14 +447,21 @@ if [[ -f "$SETTINGS_JSON" ]]; then
     note_preserved "settings.json (jq missing — edit by hand)"
   else
     # Only mutate if there is actually something rekol to remove. Keying on the
-    # literal substring "rekol" in any command, or either rekol env key. The key
-    # list here MUST match the one the remover deletes below: a detector wider
-    # than its remover can never confirm its own claim — it re-reports "removed"
-    # on every subsequent run while the survivor stays put.
+    # A rekol hook command, or any env key in the rekol NAMESPACE.
+    #
+    # Namespace rather than an enumerated list, deliberately: an explicit list has
+    # to be updated in two places every time a key is added, and the last time a
+    # key was added (REKOL_TOOLS_HOME) exactly one of those places was updated.
+    # A detector wider than its remover can never confirm its own claim — it
+    # re-reports "removed" on every run while the survivor stays put. Matching by
+    # prefix means the detector and the remover cannot drift apart, and any future
+    # REKOL_* key is cleaned up without anyone remembering to come back here.
     HAS_REKOL="$(
       jq '
         ([.hooks // {} | .. | objects | .command? // empty] | any(. | test("rekol")))
-        or (has("env") and (.env | has("REKOL_HOME") or has("REKOL_TOOLS_HOME")))
+        or ((.env // {} | keys
+             | map(startswith("REKOL_") or . == "MEMORY_HOME" or . == "MEMORY_TOOLS_HOME")
+             | any))
       ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
@@ -487,7 +494,9 @@ if [[ -f "$SETTINGS_JSON" ]]; then
         | strip_event(\"UserPromptSubmit\")
         | strip_event(\"Stop\")
         | strip_event(\"StopFailure\")
-        | if has(\"env\") then .env |= del(.REKOL_HOME, .REKOL_TOOLS_HOME) else . end
+        | if has(\"env\") then .env |= with_entries(select(
+              (.key | startswith(\"REKOL_\")) or .key == \"MEMORY_HOME\"
+              or .key == \"MEMORY_TOOLS_HOME\" | not)) else . end
         | if has(\"env\") and (.env | length) == 0 then del(.env) else . end
         | if has(\"hooks\") and (.hooks | length) == 0 then del(.hooks) else . end
       ' '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"

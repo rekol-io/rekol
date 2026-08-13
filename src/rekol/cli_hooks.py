@@ -17,6 +17,8 @@ from pathlib import Path
 
 import click
 
+from rekol.config import resolve_claude_config_dir
+
 # Claude Code session ids are UUID-like; restrict to a safe charset before
 # using one in a filesystem path (prevents traversal from a malformed payload).
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -24,7 +26,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 def _state_path(session_id: str) -> Path:
     """Return (and ensure the dir of) the per-session state file path."""
-    directory = Path.home() / ".claude" / "session-env"
+    directory = resolve_claude_config_dir() / "session-env"
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -310,7 +312,7 @@ _CAPTURE_NUDGE_THRESHOLD_PCT = 60
 
 def _session_env_path(name: str, session_id: str) -> Path:
     """Per-session state file under ~/.claude/session-env (shared soft-fail dir)."""
-    directory = Path.home() / ".claude" / "session-env"
+    directory = resolve_claude_config_dir() / "session-env"
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:
