@@ -5,50 +5,8 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
-### Fixed
-- **Hooks resolved a different index than your shell, and `doctor` reported health anyway
-  (#164).** The index location depends on `XDG_CACHE_HOME` and the archive on `XDG_DATA_HOME`,
-  and neither reaches a hook — `install.sh` documents that only `settings.json`'s `env` block
-  does, and it carried just `REKOL_HOME`. So a user who exports `XDG_CACHE_HOME` from `.zshrc`
-  had **two indexes**: interactive `rekol search` read one while every hook (SessionEnd
-  `session-index`, auto-reindex, `session-coverage`) wrote the other. Transcripts went into the
-  index nobody searched, search silently returned nothing, `doctor` — running in the user's shell
-  — printed the shell's path and "index is healthy", and `uninstall.sh` deleted one and left the
-  other on disk. The env block now carries the **already-resolved absolute** `REKOL_INDEX_DIR`
-  and `REKOL_ARCHIVE_DIR`, which kills the class rather than the instance: there is nothing left
-  for a hook to resolve differently, and the XDG variables need no propagation because their
-  effect is already baked in. Same move as the launchd plist fix in #143.
-- **`doctor` printed "index is healthy" and exited 0 for an install that had never indexed a
-  single transcript (#165).** Same family as #158 — a health check that cannot report the failure
-  it exists to catch. Three parts:
-  - `claude_projects_dir` hardcoded `~/.claude/projects` and `CLAUDE_CONFIG_DIR` was read nowhere
-    in the package. Claude Code relocates its whole tree with that variable, so a relocated
-    install pointed at a directory that does not exist — `session-index` exited 2 on **every**
-    session end, and because the SessionEnd hook runs it under `>/dev/null 2>&1`, the message and
-    the exit code were discarded forever. The default now follows `CLAUDE_CONFIG_DIR`; an explicit
-    `claude_projects_dir` in the config still wins, because there the user said where it is.
-  - `doctor` never checked that the transcript source exists. It does now, as a PROBLEM with a
-    remedy — distinct from "nothing to index yet", because the two need different fixes.
-  - "session index: not built yet" was graded INFO unconditionally, and `is_healthy` is *"no
-    PROBLEM findings"*. It is now INFO only when the projects dir is genuinely empty; if
-    transcripts are sitting there unindexed, session search silently returns nothing and that is
-    a PROBLEM.
-  Also routes the two remaining hardcoded `~/.claude` sites through the resolver: the
-  `session-env` dir (`cli_hooks.py`) and `migrate/discover.py`, which additionally bypassed the
-  `claude_projects_dir` config key entirely and used a bare `os.environ["HOME"]` subscript — so
-  `rekol migrate auto` reported "nothing to migrate" instead of finding the user's legacy memory.
-- Test isolation: the suite reached into the developer's **real** `~/.claude/projects`. The
-  autouse fixture now points `CLAUDE_CONFIG_DIR` at a per-test temp dir. The leak was invisible
-  while "no session index" was graded INFO; grading it on whether transcripts exist turned it
-  into a failing test and revealed that ten test files had the same exposure.
-- `uninstall.sh` now removes rekol env keys **by namespace** (`REKOL_*`, plus the legacy
-  `MEMORY_HOME`/`MEMORY_TOOLS_HOME`) rather than an enumerated list. The list had to be updated in
-  two places whenever a key was added, and the last time one was added exactly one of those places
-  was updated — leaving a key behind while the run reported it removed. Detector and remover now
-  share one predicate, so they cannot drift and any future `REKOL_*` key is cleaned up without
-  anyone remembering to come back.
 
-## [0.5.0] - 2026-08-12
+## [0.5.2] - 2026-08-12
 ### ⚠️ Action required for existing installs
 - **If you installed rekol before this version, re-run `install.sh` to get the hook fix
   (#159).** Every prior version wired hooks that invoke a bare `rekol`, which exits 127 in
@@ -242,6 +200,48 @@ follow [Semantic Versioning](https://semver.org/).
   files, and CI now runs pytest with `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` so this class of
   bug fails loudly on the offending test instead of intermittently on an innocent PR. The full
   suite passes offline (and ~3x faster).
+
+- **Hooks resolved a different index than your shell, and `doctor` reported health anyway
+  (#164).** The index location depends on `XDG_CACHE_HOME` and the archive on `XDG_DATA_HOME`,
+  and neither reaches a hook — `install.sh` documents that only `settings.json`'s `env` block
+  does, and it carried just `REKOL_HOME`. So a user who exports `XDG_CACHE_HOME` from `.zshrc`
+  had **two indexes**: interactive `rekol search` read one while every hook (SessionEnd
+  `session-index`, auto-reindex, `session-coverage`) wrote the other. Transcripts went into the
+  index nobody searched, search silently returned nothing, `doctor` — running in the user's shell
+  — printed the shell's path and "index is healthy", and `uninstall.sh` deleted one and left the
+  other on disk. The env block now carries the **already-resolved absolute** `REKOL_INDEX_DIR`
+  and `REKOL_ARCHIVE_DIR`, which kills the class rather than the instance: there is nothing left
+  for a hook to resolve differently, and the XDG variables need no propagation because their
+  effect is already baked in. Same move as the launchd plist fix in #143.
+- **`doctor` printed "index is healthy" and exited 0 for an install that had never indexed a
+  single transcript (#165).** Same family as #158 — a health check that cannot report the failure
+  it exists to catch. Three parts:
+  - `claude_projects_dir` hardcoded `~/.claude/projects` and `CLAUDE_CONFIG_DIR` was read nowhere
+    in the package. Claude Code relocates its whole tree with that variable, so a relocated
+    install pointed at a directory that does not exist — `session-index` exited 2 on **every**
+    session end, and because the SessionEnd hook runs it under `>/dev/null 2>&1`, the message and
+    the exit code were discarded forever. The default now follows `CLAUDE_CONFIG_DIR`; an explicit
+    `claude_projects_dir` in the config still wins, because there the user said where it is.
+  - `doctor` never checked that the transcript source exists. It does now, as a PROBLEM with a
+    remedy — distinct from "nothing to index yet", because the two need different fixes.
+  - "session index: not built yet" was graded INFO unconditionally, and `is_healthy` is *"no
+    PROBLEM findings"*. It is now INFO only when the projects dir is genuinely empty; if
+    transcripts are sitting there unindexed, session search silently returns nothing and that is
+    a PROBLEM.
+  Also routes the two remaining hardcoded `~/.claude` sites through the resolver: the
+  `session-env` dir (`cli_hooks.py`) and `migrate/discover.py`, which additionally bypassed the
+  `claude_projects_dir` config key entirely and used a bare `os.environ["HOME"]` subscript — so
+  `rekol migrate auto` reported "nothing to migrate" instead of finding the user's legacy memory.
+- Test isolation: the suite reached into the developer's **real** `~/.claude/projects`. The
+  autouse fixture now points `CLAUDE_CONFIG_DIR` at a per-test temp dir. The leak was invisible
+  while "no session index" was graded INFO; grading it on whether transcripts exist turned it
+  into a failing test and revealed that ten test files had the same exposure.
+- `uninstall.sh` now removes rekol env keys **by namespace** (`REKOL_*`, plus the legacy
+  `MEMORY_HOME`/`MEMORY_TOOLS_HOME`) rather than an enumerated list. The list had to be updated in
+  two places whenever a key was added, and the last time one was added exactly one of those places
+  was updated — leaving a key behind while the run reported it removed. Detector and remover now
+  share one predicate, so they cannot drift and any future `REKOL_*` key is cleaned up without
+  anyone remembering to come back.
 
 ## [0.4.0] - 2026-08-04
 ### Added
