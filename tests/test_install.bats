@@ -24,7 +24,7 @@ setup_file() {
     cdir="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
     seed="${BATS_FILE_TMPDIR}/seed"
     mkdir -p "${seed}/mem" "${seed}/home"
-    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${seed}/mem/rekol.config.yaml"
     # Real install (no --skip-deps): builds the venv + pip installs rekol once.
     REKOL_HOME="${seed}/mem" HOME="${seed}/home" \
@@ -319,7 +319,7 @@ manifest_index_dir() {
     unset TEST_MODE || true
     local sbhome="${TESTROOT}/home-bash" rekolh="${TESTROOT}/rekolhome-bash"
     mkdir -p "${sbhome}/.claude" "${rekolh}"
-    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${rekolh}/rekol.config.yaml"
     run env -u TEST_MODE -u MEMORY_HOME \
         REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/bash" \
@@ -345,7 +345,7 @@ manifest_index_dir() {
     unset TEST_MODE || true
     local sbhome="${TESTROOT}/home-83" rekolh="${TESTROOT}/rekolhome-83"
     mkdir -p "${sbhome}/.claude" "${rekolh}"
-    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${rekolh}/rekol.config.yaml"
     run env -u TEST_MODE -u MEMORY_HOME \
         REKOL_HOME="${rekolh}" HOME="${sbhome}" SHELL="/bin/zsh" \
@@ -374,7 +374,7 @@ manifest_index_dir() {
     unset TEST_MODE || true
     local sbhome="${TESTROOT}/home-upg" rekolh="${TESTROOT}/rekolhome-upg"
     mkdir -p "${sbhome}/.claude" "${rekolh}"
-    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${rekolh}/rekol.config.yaml"
     # Pre-seed the OLD hardcoded (unguarded) form, as a pre-#119 install left it.
     printf '# rekol\nexport PATH="%s/bin:$PATH"\nexport REKOL_HOME="%s"\n' "${sbhome}" "${rekolh}" \
@@ -432,7 +432,7 @@ manifest_index_dir() {
   # under `set -o pipefail`, so a config missing the key aborts the install.
   REKOLH="$TESTROOT/rekolhome"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\nclaude_projects_dir: %s/.claude/projects\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: true\ngit_track: false\nclaude_projects_dir: %s/.claude/projects\n' \
     "$SBHOME" > "$REKOLH/rekol.config.yaml"
 
   # Hooks ON (no --no-hook); skip skill/shellrc to keep side effects in the box.
@@ -466,7 +466,7 @@ manifest_index_dir() {
   REKOLH="$TESTROOT/rekolhome-gt"
   mkdir -p "$REKOLH"
   # Deliberately NO git_track line, and no projects dir (backfill self-gates).
-  printf 'embedding_model: test-hashing\nsession_search_enabled: true\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: true\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -562,7 +562,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-time"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: true\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -598,7 +598,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-legacy"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: true\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -629,7 +629,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-nudge"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: true\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: true\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -665,7 +665,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-legacy-idx"
   mkdir -p "$REKOLH/always" "$REKOLH/.index"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
   printf -- '---\nname: id\ndescription: d\ntype: always\n---\nbody\n' \
     > "$REKOLH/always/identity.md"
@@ -704,7 +704,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-no-ssnudge"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -735,7 +735,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-strip-ssnudge"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -767,7 +767,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-idem-strip"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   for _ in 1 2; do
@@ -792,7 +792,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-cov-fresh"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -821,7 +821,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-cov-add"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   for _ in 1 2; do
@@ -852,7 +852,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-tasks-fresh"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -879,7 +879,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-tasks-add"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   for _ in 1 2; do
@@ -914,7 +914,7 @@ PY
     > "$SBHOME/.claude/settings.json"
   REKOLH="$TESTROOT/rekolhome-nudge-add"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   for _ in 1 2; do
@@ -994,7 +994,7 @@ PY
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-drift"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   # Simulate a v0.3.1-era install: a BARE `rekol` memory loader with no
@@ -1075,7 +1075,7 @@ JSON
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-exec"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
   printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
 
@@ -1163,7 +1163,7 @@ JSON
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-xdg"
   mkdir -p "$REKOLH"
-  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
     > "$REKOLH/rekol.config.yaml"
 
   # A NON-default cache home, exactly like an `export` in .zshrc.

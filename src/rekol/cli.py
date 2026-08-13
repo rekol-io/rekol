@@ -28,6 +28,7 @@ from rekol.cli_review import main as review_cmd
 from rekol.cli_search import main as search_cmd
 from rekol.cli_session_index import main as session_index_cmd
 from rekol.cli_task import main as task_grp
+from rekol.cli_update import main as update_cmd
 
 
 @click.group()
@@ -50,6 +51,7 @@ main.add_command(bootstrap_cmd, name="bootstrap")
 main.add_command(review_cmd, name="review")
 main.add_command(migrate_grp, name="migrate")
 main.add_command(session_index_cmd, name="session-index")
+main.add_command(update_cmd, name="update")
 main.add_command(archive_cmd, name="archive")
 main.add_command(import_cmd, name="import")
 main.add_command(init_cmd, name="init")

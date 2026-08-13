@@ -763,7 +763,8 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
     jq --arg rekol "${REKOL_INVOCATION}" '
       ["_hook time-context","_hook record-stop","_hook session-confidence",
        "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
-       "_hook stop-failure-record","review --nudge","session-index --incremental"]
+       "_hook stop-failure-record","_hook update-check",
+       "review --nudge","session-index --incremental"]
       as $subs
       # Type-guard every level. `(.hooks // {}) |= ...` LOOKS safe but throws
       # "Invalid path expression" when .hooks is absent entirely — which is
@@ -940,6 +941,41 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart task injection to ${SETTINGS_JSON}"
+  fi
+fi
+
+# =============================================================================
+# Step 7H — SessionStart update-availability check (#27)
+# =============================================================================
+# `rekol _hook update-check` announces a newer release, but ONLY when the release
+# is marked high/critical — an unmarked release says nothing at all. Silence is
+# the default on purpose: the loud tier only stays meaningful if the quiet one
+# exists, and a channel that speaks every session is one people learn to skip.
+#
+# Throttled to one network call per day, hard-bounded, and silent on every
+# failure path, so an offline machine costs nothing visible. Opt out entirely
+# with `update_check: false` in rekol.config.yaml.
+#
+# Its own handler, added idempotently, never appended to the memory-loader
+# command (Step 7's idempotency keys on that command's exact text).
+
+if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
+  UPDATE_CMD="${REKOL_INVOCATION_QUOTED} _hook update-check 2>/dev/null || true"
+  HAS_UPDATE="$(
+    jq '
+      (.hooks.SessionStart // []) as $cur
+      | any($cur[]; (.hooks // []) | any(.command // "" | contains("_hook update-check")))
+    ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
+  )"
+
+  if [[ "$HAS_UPDATE" == "true" ]]; then
+    say "SessionStart update check already present — no-op"
+  else
+    local_tmp="${SETTINGS_JSON}.tmp.$$"
+    run "jq --arg cmd '${UPDATE_CMD}' \
+      '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
+      '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
+    log_journal "ADDED SessionStart update check to ${SETTINGS_JSON}"
   fi
 fi
 

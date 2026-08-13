@@ -27,6 +27,15 @@
             "command": "\"@REKOL@\" _hook session-tasks 2>/dev/null || true"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"@REKOL@\" _hook update-check 2>/dev/null || true"
+          }
+        ]
       }
     ]
   }

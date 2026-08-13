@@ -27,7 +27,44 @@ follow [Semantic Versioning](https://semver.org/).
   ships with a test that `yaml.safe_load`s the frontmatter of *every* file rekol ships
   (`skill/*/*.md`, `src/rekol/template/**/*.md`) and asserts each skill declares a non-empty
   `name` and `description`.
+### Added
+- **`rekol update` — "is something newer available?" (#27, network half).** The offline half
+  shipped in v0.5.2 and answers "is what I have actually installed?"; this answers the other
+  question, and the two are deliberately separate modules so a network failure can never suppress
+  a drift report.
+  - **No server, by construction.** `git ls-remote --tags` against the repo you already cloned
+    from — not a rekol.io endpoint and not the GitHub API. With no server of ours there is nothing
+    to log, count or identify with; that is a claim a sceptical reader can verify with `tcpdump`.
+    (The unauthenticated GitHub API is also 60 req/hr per IP, which trips for a company behind one
+    NAT.)
+  - **Severity comes from the tag, not from the version jump** — #159 was patch-level and needed
+    action. Two encodings, both visible in `ls-remote` (an annotated tag's *message* is not, so
+    prose severity would cost a fetch or the API): a suffix, `v0.5.4.High` / `v0.5.4.Critical`, or
+    a marker ref alongside a clean semver tag, `severity/critical/v0.5.4`.
+  - **Tiers.** Unmarked → total silence. `High` → one quiet SessionStart line. `Critical` → an
+    action-required line. Silence is the default because the loud tier only stays meaningful if
+    the quiet one exists. Dismissal is per-version: silencing 0.6.0 does not silence 0.7.0.
+  - **`rekol update` checks and dismisses. It never installs.** A deliberate limit: an agent that
+    can update itself unattended is scheduled remote code execution from a GitHub repo with no
+    human in the loop. The agent proposes, you run `./install.sh`.
+  - **`doctor` reports the checker itself.** The check must soft-fail so it can never break a
+    session, which reintroduces silent failure one level up — so `doctor` shows the last
+    *successful* check, keyed on success rather than on the state file existing, because a file
+    written by a permanently failing check would otherwise read as health.
+  - Four failure modes have tests that fail without the fix: `0.4.10` compared **numerically**,
+    not lexically (`"0.4.10" > "0.4.9"` is False, and we are one release from that mattering); a
+    **future** timestamp counts as due, so a clock reset cannot wedge the throttle forever;
+    "could not reach the network" never collapses into "no releases exist", or an offline machine
+    looks permanently current; and the throttle lives in the index dir, never `$TMPDIR`, which
+    macOS purges.
+  - Opt out with `update_check: false`.
 
+### Fixed
+- The bats suites would have made ~22 real network calls per run once the update hook was wired —
+  measured at 2.12s each, versus 0.18s and no state written with the check disabled. Every bats
+  fixture now pins `update_check: false`, so CI cannot acquire a hidden network dependency. Same
+  class as #155, where one unit test silently started downloading the embedding model and turned
+  CI red twice on unrelated PRs.
 
 ## [0.5.2] - 2026-08-12
 ### ⚠️ Action required for existing installs
