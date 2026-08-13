@@ -1053,3 +1053,95 @@ JSON
   run jq -e '.env.KEEP_ME == "1"' "$SBHOME/.claude/settings.json"
   [ "$status" -eq 0 ]
 }
+
+# ============================ #170 ============================================
+# Nothing in this repo ever executed a hook it registered. install.sh's eight jq
+# gates, cli_resume.py's marker match and update.py's regex are all STRING checks,
+# and this suite's 85 `run` invocations only ever assert presence. That is why
+# #159 shipped with five hooks silently dead, why the plugin's coexistence guard
+# broke unnoticed, and why a "✓ all handlers registered" check reached review
+# while every command pointed at a nonexistent path.
+#
+# This is the missing test. It runs every command the installer actually wrote.
+#
+# The environment is the whole point: PATH deliberately EXCLUDES ${BIN_DIR}.
+# Claude Code runs hooks in a non-interactive shell that never sourced .zshrc —
+# which is where install.sh adds BIN_DIR — so a bare `rekol` MUST fail here and
+# only the PATH-independent form can pass. Handing these commands an interactive
+# PATH would make the test pass for a reason the hooks cannot rely on, which is
+# precisely the mistake being corrected.
+@test "every hook command the installer wrote actually executes (#170)" {
+  SBHOME="$TESTROOT/sandhome-exec"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-exec"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # Every rekol-related hook command the install produced, one per line.
+  jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("rekol|REKOL"))' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/cmds.txt"
+
+  # Guard against a command containing a newline, which would silently split and
+  # leave us executing fragments: the line count must equal the array length.
+  expected_n="$(jq -r '[.hooks[]?[]?.hooks[]?.command | select(test("rekol|REKOL"))] | length' \
+                "$SBHOME/.claude/settings.json")"
+  actual_n="$(wc -l < "$TESTROOT/cmds.txt" | tr -d ' ')"
+  [ "$expected_n" = "$actual_n" ] || {
+    echo "command count mismatch ($expected_n vs $actual_n) — a command contains a newline"; false; }
+  # Never let this pass vacuously: there must be real hooks to run.
+  [ "$actual_n" -ge 6 ] || { echo "only $actual_n hook commands found — expected >= 6"; false; }
+
+  # A non-interactive PATH: no BIN_DIR, no venv bin. This is the #159 condition.
+  HOOK_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+  # The environment comes from settings.json's own `env` block — the only channel
+  # that reaches a hook subshell (install.sh Step 7.5 documents this). Reading it
+  # from the file the installer just wrote means a variable the installer FAILS to
+  # propagate makes this test fail, instead of being papered over by the harness
+  # exporting it. That is how the missing REKOL_TOOLS_HOME was found.
+  jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/hookenv.txt"
+  HOOK_ENV=""
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    [ -n "$kv" ] && HOOK_ENV="$HOOK_ENV $kv"
+  done < "$TESTROOT/hookenv.txt"
+  echo "hook env from settings.json:$HOOK_ENV"
+  failures=0
+  checked=0
+  while IFS= read -r cmd || [ -n "$cmd" ]; do
+    [ -n "$cmd" ] || continue
+    # Strip ONLY the trailing mask, so a real failure surfaces as a real exit code.
+    unmasked="${cmd% 2>/dev/null || true}"
+    unmasked="${unmasked% || true}"
+    # The strip itself must not silently produce nothing (a sed delimiter bug once
+    # emptied a command here and `bash -c ""` returned 0 for eleven "passes").
+    [ -n "$unmasked" ] || { echo "strip emptied the command — would pass vacuously"; false; }
+    case "$unmasked" in
+      *"|| true"*) echo "masking survived the strip: $unmasked"; false ;;
+    esac
+
+    checked=$((checked + 1))
+    if env -i HOME="$SBHOME" PATH="$HOOK_PATH" \
+         XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" \
+         $HOOK_ENV \
+         /bin/bash -c "$unmasked" </dev/null > "$TESTROOT/hook.out" 2>&1
+    then :; else
+      echo "--- HOOK FAILED (exit $?)"
+      echo "    command: $unmasked"
+      echo "    output : $(head -c 300 "$TESTROOT/hook.out")"
+      failures=$((failures + 1))
+    fi
+  done < "$TESTROOT/cmds.txt"
+
+  echo "executed $checked hook command(s), $failures failure(s)"
+  [ "$checked" -eq "$actual_n" ] || { echo "loop skipped commands: $checked/$actual_n"; false; }
+  [ "$failures" -eq 0 ]
+}

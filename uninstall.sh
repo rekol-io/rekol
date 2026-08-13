@@ -87,7 +87,8 @@ What it removes:
   - ~/.claude/skills/rekol and the ~/.claude/skills/memory shim
   - ~/.local/share/rekol/ (the venv + tools home)
   - rekol hook handlers from ~/.claude/settings.json (SessionStart, PostToolUse,
-    SessionEnd, UserPromptSubmit, Stop) and env.REKOL_HOME
+    SessionEnd, UserPromptSubmit, Stop, StopFailure) and the rekol env keys
+    (REKOL_HOME, REKOL_TOOLS_HOME)
   - the rekol PATH + REKOL_HOME (and matching MEMORY_HOME) export lines in your shell rc (~/.zshrc or ~/.bashrc)
 
 What it PRESERVES:
@@ -446,21 +447,24 @@ if [[ -f "$SETTINGS_JSON" ]]; then
     note_preserved "settings.json (jq missing — edit by hand)"
   else
     # Only mutate if there is actually something rekol to remove. Keying on the
-    # literal substring "rekol" in any command, or the presence of env.REKOL_HOME.
+    # literal substring "rekol" in any command, or either rekol env key. The key
+    # list here MUST match the one the remover deletes below: a detector wider
+    # than its remover can never confirm its own claim — it re-reports "removed"
+    # on every subsequent run while the survivor stays put.
     HAS_REKOL="$(
       jq '
         ([.hooks // {} | .. | objects | .command? // empty] | any(. | test("rekol")))
-        or (has("env") and (.env | has("REKOL_HOME")))
+        or (has("env") and (.env | has("REKOL_HOME") or has("REKOL_TOOLS_HOME")))
       ' "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
     if [[ "$HAS_REKOL" != "true" ]]; then
-      say "no rekol hooks or env.REKOL_HOME in ${SETTINGS_JSON} — nothing to strip"
+      say "no rekol hooks or rekol env keys in ${SETTINGS_JSON} — nothing to strip"
     else
       settings_backup="${SETTINGS_JSON}.bak-${TS}"
       say "backing up ${SETTINGS_JSON} -> ${settings_backup}"
       run "cp '${SETTINGS_JSON}' '${settings_backup}'"
-      note_removed "rekol hooks + env.REKOL_HOME from ${SETTINGS_JSON} (backup: ${settings_backup})"
+      note_removed "rekol hooks + rekol env keys from ${SETTINGS_JSON} (backup: ${settings_backup})"
 
       # For each known hook event: drop handlers whose command contains "rekol",
       # prune now-empty entries, and prune the event key if it ends up empty.
@@ -482,11 +486,12 @@ if [[ -f "$SETTINGS_JSON" ]]; then
         | strip_event(\"SessionEnd\")
         | strip_event(\"UserPromptSubmit\")
         | strip_event(\"Stop\")
-        | if has(\"env\") then .env |= del(.REKOL_HOME) else . end
+        | strip_event(\"StopFailure\")
+        | if has(\"env\") then .env |= del(.REKOL_HOME, .REKOL_TOOLS_HOME) else . end
         | if has(\"env\") and (.env | length) == 0 then del(.env) else . end
         | if has(\"hooks\") and (.hooks | length) == 0 then del(.hooks) else . end
       ' '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      say "stripped rekol hooks and env.REKOL_HOME from ${SETTINGS_JSON}"
+      say "stripped rekol hooks and rekol env keys from ${SETTINGS_JSON}"
     fi
   fi
 fi
