@@ -1145,3 +1145,60 @@ JSON
   [ "$checked" -eq "$actual_n" ] || { echo "loop skipped commands: $checked/$actual_n"; false; }
   [ "$failures" -eq 0 ]
 }
+
+# ------------------------------- #164 ----------------------------------------
+# The index location depends on XDG_CACHE_HOME and the archive on XDG_DATA_HOME,
+# and NEITHER reaches a hook — only settings.json's env block does. So a user who
+# exports XDG_CACHE_HOME from .zshrc got TWO indexes: interactive `rekol search`
+# read one while every hook wrote the other. Transcripts landed in the index
+# nobody searched, search silently returned nothing, and `doctor` — running in the
+# user's shell — printed the shell's path and "index is healthy".
+#
+# The fix pins the already-RESOLVED absolute paths, so there is nothing left for a
+# hook to resolve differently. This test asserts that equivalence directly: the
+# index a hook resolves, with NO XDG_CACHE_HOME in its environment, must be the
+# one the installer recorded.
+@test "a hook resolves the same index as the shell when XDG_CACHE_HOME is set (#164)" {
+  SBHOME="$TESTROOT/sandhome-xdg"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-xdg"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  # A NON-default cache home, exactly like an `export` in .zshrc.
+  CUSTOM_CACHE="$TESTROOT/custom-cache"
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" XDG_CACHE_HOME="$CUSTOM_CACHE" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  installed_idx="$(manifest_index_dir "$REKOLH")"
+  [ -n "$installed_idx" ]
+  # Sanity: the install really did honour the custom cache home, otherwise this
+  # test would be comparing two default paths and proving nothing.
+  case "$installed_idx" in
+    "$CUSTOM_CACHE"/*) : ;;
+    *) echo "install ignored XDG_CACHE_HOME: $installed_idx"; false ;;
+  esac
+
+  # Build the hook environment the way a hook actually gets it: settings.json's
+  # env block only. Note XDG_CACHE_HOME is deliberately ABSENT.
+  jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/xdgenv.txt"
+  HOOK_ENV=""
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    [ -n "$kv" ] && HOOK_ENV="$HOOK_ENV $kv"
+  done < "$TESTROOT/xdgenv.txt"
+  case "$HOOK_ENV" in
+    *XDG_CACHE_HOME*) echo "test flaw: XDG_CACHE_HOME leaked into the hook env"; false ;;
+  esac
+
+  hook_idx="$(env -i HOME="$SBHOME" PATH="/usr/bin:/bin" $HOOK_ENV \
+              "${BIN_DIR}/rekol" doctor 2>/dev/null | sed -n 's/^.*index cache: *//p' | head -1)"
+  [ -n "$hook_idx" ] || { echo "could not read the index dir a hook resolves"; false; }
+  [ "$hook_idx" = "$installed_idx" ] || {
+    echo "SPLIT INDEX — shell: $installed_idx"
+    echo "              hook : $hook_idx"; false; }
+}

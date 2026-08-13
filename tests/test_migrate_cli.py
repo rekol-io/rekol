@@ -64,6 +64,7 @@ def test_cli_auto_no_legacy_is_noop(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     (home / ".claude" / "projects").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     memory_home = tmp_path / "MEMORY_HOME"
     (memory_home / "topics").mkdir(parents=True)
     monkeypatch.setenv("MEMORY_HOME", str(memory_home))
@@ -80,6 +81,7 @@ def test_cli_auto_finds_project_dirs(tmp_path: Path, monkeypatch) -> None:
     shutil.copyfile(FIXTURES / "project_alpha.md", proj / "project_alpha.md")
     shutil.copyfile(FIXTURES / "MEMORY.md", proj / "MEMORY.md")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     memory_home = tmp_path / "MEMORY_HOME"
     for layer in ("always", "when", "topics", "knowledge"):
         (memory_home / layer).mkdir(parents=True)

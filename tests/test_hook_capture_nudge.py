@@ -17,6 +17,9 @@ SESSION = "sess-abc-123"
 def sandbox_home(tmp_path: Path, monkeypatch) -> Path:
     """Point Path.home() at a sandbox so session-env state never touches ~."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # The Claude tree follows CLAUDE_CONFIG_DIR (#165); conftest points it at a
+    # hermetic dir, so a test sandboxing HOME must redirect it to match.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     return tmp_path
 

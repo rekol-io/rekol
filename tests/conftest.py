@@ -58,3 +58,14 @@ def _isolate_index_cache(tmp_path_factory, monkeypatch) -> None:
     # MEMORY_HOME isn't shadowed by an exported REKOL_HOME (which has precedence).
     monkeypatch.delenv("REKOL_HOME", raising=False)
     monkeypatch.delenv("MEMORY_HOME", raising=False)
+    # Hermetic Claude config tree. `claude_projects_dir` defaults to
+    # <CLAUDE_CONFIG_DIR>/projects, so without this any test that calls
+    # load_config() without setting it explicitly reads the DEVELOPER'S REAL
+    # transcript store — thousands of files, and whatever is in them. That leak
+    # was invisible while "no session index" was graded INFO; #165 made the grade
+    # depend on whether transcripts exist, which turned it into a failing test in
+    # test_doctor_deep.py and revealed that ~10 other test files had the same
+    # exposure. Redirecting the whole tree fixes the class in one place; a test
+    # that needs a populated projects dir points claude_projects_dir at its own.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
+    monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)

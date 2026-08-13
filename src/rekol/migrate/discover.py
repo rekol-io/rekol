@@ -16,9 +16,10 @@ backward compatibility on machines installed under the old version.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from rekol.config import resolve_claude_config_dir
 
 # Hidden marker file the migrator writes after successfully migrating a dir.
 # Hidden so Claude Code's autoMemory does not inject it as context.
@@ -99,8 +100,12 @@ def discover_auto_memory_sources() -> list[Path]:
     migration marker and archive live in the same memory/ subdir.  Callers
     then pass ``<slug>/memory`` to ``discover_files_in_dir``.
     """
-    home = Path(os.environ["HOME"])
-    projects_root = home / ".claude" / "projects"
+    # Honour CLAUDE_CONFIG_DIR like every other consumer (#165). This used a bare
+    # `os.environ["HOME"]` subscript — a KeyError where the rest of the codebase
+    # uses Path.home() — and hardcoded the tree, so a relocated Claude Code (or a
+    # configured claude_projects_dir) made `rekol migrate auto` report "nothing to
+    # migrate" rather than finding the user's legacy memory.
+    projects_root = resolve_claude_config_dir() / "projects"
     if not projects_root.is_dir():
         return []
     out: list[Path] = []

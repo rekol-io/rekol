@@ -972,21 +972,38 @@ if [[ "$DO_HOOK" == "1" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; skipping Claude settings.json env update — add env.REKOL_HOME manually"
   else
-    # Both keys must match, or we rewrite. REKOL_TOOLS_HOME is required because
-    # the `rekol` shim resolves its venv from it, defaulting to
+    # EVERY key must match, or we rewrite.
+    #
+    # REKOL_TOOLS_HOME: the `rekol` shim resolves its venv from it, defaulting to
     # $HOME/.local/share/rekol (bin/rekol:6) — so with `--tools-home /custom`
-    # EVERY hook died with "rekol venv not found", even though the hook command
-    # itself was a correct absolute path to the shim. The command was right and
-    # the shim could not find its own venv. Found by the #170 test that runs what
-    # the installer writes; a string check could not have seen it.
+    # EVERY hook died with "rekol venv not found" even though the hook command
+    # itself was a correct absolute path to the shim (#170).
+    #
+    # REKOL_INDEX_DIR / REKOL_ARCHIVE_DIR: the index location depends on
+    # XDG_CACHE_HOME and the archive on XDG_DATA_HOME (config.py), and neither
+    # reaches a hook — only this env block does. A user with XDG_CACHE_HOME
+    # exported from .zshrc therefore got TWO indexes: interactive `rekol search`
+    # read one, while every hook (SessionEnd session-index, auto-reindex,
+    # session-coverage) wrote the other. Transcripts went into the index nobody
+    # searched, search silently returned nothing, and `doctor` — running in the
+    # user's shell — printed the shell's path and "index is healthy" (#164).
+    #
+    # Pinning the ALREADY-RESOLVED absolute paths kills the class rather than the
+    # instance: there is nothing left for a hook to resolve differently, and the
+    # XDG variables need not be propagated at all because their effect is already
+    # baked into these values. Same move as the launchd plist fix in #143.
     HAS_REKOL_HOME="$(
       jq --arg want "${RESOLVED_HOME}" --arg wantth "${TOOLS_HOME}" \
-        '((.env.REKOL_HOME // "") == $want) and ((.env.REKOL_TOOLS_HOME // "") == $wantth)' \
+         --arg wantidx "${INDEX_DIR}" --arg wantarc "${ARCHIVE_DIR_RESOLVED}" \
+        '((.env.REKOL_HOME // "") == $want)
+         and ((.env.REKOL_TOOLS_HOME // "") == $wantth)
+         and ((.env.REKOL_INDEX_DIR // "") == $wantidx)
+         and (($wantarc == "") or ((.env.REKOL_ARCHIVE_DIR // "") == $wantarc))' \
         "${SETTINGS_JSON}" 2>/dev/null || printf 'false'
     )"
 
     if [[ "$HAS_REKOL_HOME" == "true" ]]; then
-      say "REKOL_HOME + REKOL_TOOLS_HOME already in ${SETTINGS_JSON} env — no-op"
+      say "rekol env keys already current in ${SETTINGS_JSON} — no-op"
     else
       # Independent backup before this step's mutation.  Step 7's earlier
       # backup of ${SETTINGS_JSON} reflects the file BEFORE the hook merge,
@@ -995,12 +1012,20 @@ if [[ "$DO_HOOK" == "1" ]]; then
       run "cp '${SETTINGS_JSON}' '${local_settings_env_backup}'"
       log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_settings_env_backup}"
 
+      # `with_entries(select(.value != ""))` drops any value that failed to
+      # resolve rather than writing an empty string: an empty REKOL_ARCHIVE_DIR
+      # would be read back as "unset" by some callers and as "" by others, which
+      # is a worse state than absent. INDEX_DIR cannot be empty here (Step 1
+      # hard-fails on it); ARCHIVE_DIR_RESOLVED can be, so it is guarded.
       local_tmp="${SETTINGS_JSON}.tmp.$$"
       run "jq --arg val '${RESOLVED_HOME}' --arg th '${TOOLS_HOME}' \
-        '.env = ((.env // {}) + {REKOL_HOME: \$val, REKOL_TOOLS_HOME: \$th})' \
+        --arg idx '${INDEX_DIR}' --arg arc '${ARCHIVE_DIR_RESOLVED}' \
+        '.env = ((.env // {}) + ({REKOL_HOME: \$val, REKOL_TOOLS_HOME: \$th,
+                                  REKOL_INDEX_DIR: \$idx, REKOL_ARCHIVE_DIR: \$arc}
+                                 | with_entries(select(.value != \"\"))))' \
         '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "SET env.REKOL_HOME + env.REKOL_TOOLS_HOME in ${SETTINGS_JSON}"
-      say "added REKOL_HOME + REKOL_TOOLS_HOME to ${SETTINGS_JSON} env"
+      log_journal "SET rekol env keys in ${SETTINGS_JSON} (HOME, TOOLS_HOME, INDEX_DIR, ARCHIVE_DIR)"
+      say "added rekol env keys to ${SETTINGS_JSON} (home, tools, index, archive)"
     fi
   fi
 fi

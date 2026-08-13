@@ -281,6 +281,10 @@ def test_enable_then_disable_settings_roundtrip(tmp_path: Path, monkeypatch) -> 
 
 def test_settings_path_defaults_to_home_when_env_unset(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    # This test is ABOUT the ~/.claude fallback, so it must clear the override
+    # conftest sets — otherwise it would assert the override branch and the
+    # default branch (the one every user hits) would go unexercised again.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     from rekol.cli_resume import _settings_path
 

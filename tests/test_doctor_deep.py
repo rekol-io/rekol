@@ -29,7 +29,16 @@ def _home(tmp_path: Path, monkeypatch) -> Path:
         "---\nname: Deploy\ndescription: how we ship\ntype: topic\n---\n\n"
         "# Deploy\n\nWe always deploy via docker compose pull on the build box.\n"
     )
-    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    # Sandbox claude_projects_dir. Without it the default resolves to the REAL
+    # ~/.claude/projects, so these tests read the developer's actual transcript
+    # store — harmless while "no session index" was graded INFO, but it means the
+    # fixture was never isolated. #165 made the grade depend on whether
+    # transcripts exist, which turned that latent leak into a failure.
+    projects = tmp_path / "claude-projects"
+    projects.mkdir(parents=True, exist_ok=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {projects}\n"
+    )
     monkeypatch.setenv("REKOL_HOME", str(home))
     return home
 

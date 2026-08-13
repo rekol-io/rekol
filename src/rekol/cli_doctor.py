@@ -405,13 +405,44 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
         )
         return findings
 
+    # The transcript source must exist before "not built yet" can mean anything.
+    # A configured-but-absent projects dir makes `session-index` exit 2 on every
+    # SessionEnd — into `>/dev/null 2>&1`, so nobody ever sees it — and the index
+    # can then NEVER be built. Reporting that as INFO let `doctor` print "index is
+    # healthy" and exit 0 for an install that had never indexed one transcript
+    # (#165). It is a PROBLEM, and a distinct one from "nothing to index yet".
+    projects_root = cfg.claude_projects_dir
+    if not projects_root.is_dir():
+        findings.append(
+            Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir does not exist: {projects_root} — "
+                    "session-index fails on every session end and the index can never build"
+                ),
+                remedy=(
+                    "set claude_projects_dir in rekol.config.yaml, or CLAUDE_CONFIG_DIR "
+                    "if you relocated Claude Code's tree"
+                ),
+            )
+        )
+        return findings
+
     db_path = cfg.sessions_db_path
     if not db_path.exists():
+        # Only INFO when there is genuinely nothing to index. If transcripts are
+        # sitting there unindexed, the feature is silently not working and saying
+        # "healthy" would be false.
+        has_transcripts = any(projects_root.glob("*/*.jsonl"))
         findings.append(
             Finding(
                 label="session index",
-                status=Status.INFO,
-                detail=f"not built yet (no {db_path})",
+                status=Status.PROBLEM if has_transcripts else Status.INFO,
+                detail=(
+                    f"not built yet (no {db_path})"
+                    + (" — but transcripts exist and are unsearchable" if has_transcripts else "")
+                ),
                 remedy="rekol session-index --full",
             )
         )
