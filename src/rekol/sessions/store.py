@@ -519,8 +519,64 @@ class SessionStore:
         finally:
             self.conn.execute(f"DROP TABLE IF EXISTS {vocab_table}")
         orphaned = len(indexed_rowids - message_rowids)
-        unindexed = len(message_rowids - indexed_rowids)
+        # A message with NO TOKENIZABLE CONTENT can never appear in the vocab, so
+        # counting it as "unindexed" reports a desync that does not exist and that
+        # no rebuild can clear. Found in the wild: one message whose entire content
+        # was "👍" made `doctor` exit 1 permanently and print
+        # `rekol session-index --full` as the remedy — a remedy that cannot work,
+        # because there is nothing to index. A health check that is always red is
+        # one people learn to ignore, which then hides the checks that matter.
+        #
+        # `content` is non-empty here (empty is filtered before insert), but
+        # non-empty is NOT the same as tokenizable: "👍" and "   " are both
+        # non-empty and both produce zero tokens.
+        suspicious = message_rowids - indexed_rowids
+        unindexed = len(suspicious) - self._untokenizable_count(suspicious)
         return orphaned, unindexed
+
+    def _untokenizable_count(self, rowids: set[int]) -> int:
+        """How many of ``rowids`` hold content FTS5 cannot tokenize at all.
+
+        Asks FTS5 itself rather than guessing with a character class: the answer
+        must match the tokenizer the real index uses (``porter unicode61``), and a
+        hand-rolled "has at least one alphanumeric" rule would disagree with it at
+        the edges — which is how the original assumption went wrong.
+
+        Only ever runs on rows already missing from the vocab, so it is a handful
+        of inserts on a scratch table, not a scan of the corpus.
+        """
+        if not rowids:
+            return 0
+        probe = "_rekol_fts_tokenize_probe"
+        probe_vocab = f"{probe}_vocab"
+        self.conn.execute(f"DROP TABLE IF EXISTS {probe_vocab}")
+        self.conn.execute(f"DROP TABLE IF EXISTS {probe}")
+        # Same tokenizer as messages_fts, or the answer would not transfer.
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE {probe} USING fts5(content, tokenize='porter unicode61')"
+        )
+        try:
+            placeholders = ",".join("?" for _ in rowids)
+            rows = self.conn.execute(
+                f"SELECT id, content FROM messages WHERE id IN ({placeholders})",
+                tuple(sorted(rowids)),
+            ).fetchall()
+            for row in rows:
+                self.conn.execute(
+                    f"INSERT INTO {probe}(rowid, content) VALUES (?, ?)",
+                    (int(row["id"]), row["content"]),
+                )
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE {probe_vocab} USING fts5vocab('{probe}', 'instance')"
+            )
+            tokenizable = {
+                int(r["doc"])
+                for r in self.conn.execute(f"SELECT DISTINCT doc FROM {probe_vocab}").fetchall()
+            }
+            return len([r for r in rows if int(r["id"]) not in tokenizable])
+        finally:
+            self.conn.execute(f"DROP TABLE IF EXISTS {probe_vocab}")
+            self.conn.execute(f"DROP TABLE IF EXISTS {probe}")
 
     def fts_is_in_sync(self) -> bool:
         """True when the FTS inverted index exactly matches the ``messages`` rows.
@@ -531,10 +587,12 @@ class SessionStore:
         the triggers dropped) can hold orphaned postings and/or leave real rows
         unindexed. :meth:`fts_consistency` catches both; in sync means neither.
 
-        NOTE: a message that legitimately has no indexable tokens (e.g. content
-        that tokenises to nothing) would never appear in the vocab, so this is a
-        strict "every message contributes at least one posting" check — true for
-        the transcript corpus, where empty content is filtered before insert.
+        Messages whose content cannot be tokenized at all (an emoji-only or
+        whitespace-only message) are NOT counted as unindexed: they can never
+        appear in the vocab, so counting them reports a desync that no rebuild
+        can clear. That assumption used to read "empty content is filtered before
+        insert" — true, but non-empty is not the same as tokenizable, and one
+        "👍" was enough to make `doctor` permanently red.
         """
         orphaned, unindexed = self.fts_consistency()
         return orphaned == 0 and unindexed == 0

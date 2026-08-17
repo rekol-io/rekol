@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`doctor` reported a permanent FTS desync that no rebuild could clear.** Found on a live
+  machine: `✗ session FTS: keyword index out of sync: 0 orphaned postings, 1 unindexed messages`,
+  every run since 2026-08-05, with `rekol session-index --full` printed as the remedy — and
+  running it changed nothing.
+  The culprit was **one message whose entire content was `👍`**. FTS5 produces *zero tokens* for
+  emoji-only (or whitespace-only) content, so such a row can never appear in the inverted index;
+  counting it as "unindexed" reports a desync that does not exist and cannot be fixed. The old
+  code rested on an explicit assumption in its own docstring — *"empty content is filtered before
+  insert"* — which is true and beside the point: **non-empty is not the same as tokenizable**.
+  `fts_consistency()` now excludes rows FTS5 cannot tokenize, determined by asking FTS5 itself
+  with the same tokenizer (`porter unicode61`) rather than guessing with a character class, which
+  would disagree with the real tokenizer exactly at the edges where this bug lives. The probe only
+  runs on rows already missing from the vocab — a handful of scratch inserts, not a corpus scan.
+  A genuine desync is still detected: the tests delete a posting for a message that *does*
+  tokenize and assert it is still reported, so the false alarm was not traded for a false
+  all-clear. That mattered more than the fix — a health check that is always red is one people
+  learn to ignore, which then hides the checks that matter.
+
+### Fixed
 - **`install.sh` and `uninstall.sh` hardcoded `$HOME/.claude`, ignoring `CLAUDE_CONFIG_DIR`
   (#176).** Last surviving members of the family fixed in v0.5.2 — missed because the sweep that
   found the others was scoped to `src/`. Two paths were affected, and the second is the serious
