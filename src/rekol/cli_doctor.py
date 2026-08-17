@@ -932,6 +932,65 @@ def _check_install_drift(cfg: Config) -> list[Finding]:
     return findings
 
 
+def _check_update_staleness(cfg: Config) -> list[Finding]:
+    """Has the update check actually managed to run? — the backstop (#27).
+
+    The check must soft-fail so it can never break a session — which
+    reintroduces silent failure one level up: a checker that has been broken for
+    months looks exactly like one that has nothing to report. This is the
+    backstop, and it keys on the last SUCCESS rather than on the state file
+    existing, because a file written by a permanently failing check would
+    otherwise read as health.
+
+    Never a PROBLEM. Not knowing whether a newer version exists does not make
+    the installation unhealthy, and a doctor that exits 1 over it would train
+    people to ignore a non-zero exit.
+    """
+    import datetime as _dt
+
+    from rekol.release import STALE_AFTER_DAYS, last_success, read_state
+
+    if not getattr(cfg, "update_check", True):
+        return [
+            Finding(
+                label="update check",
+                status=Status.INFO,
+                detail="disabled (update_check: false)",
+            )
+        ]
+
+    seen = last_success(read_state(cfg.index_dir))
+    if seen is None:
+        return [
+            Finding(
+                label="update check",
+                status=Status.INFO,
+                detail="never completed — cannot tell whether a newer version exists",
+                remedy="rekol update --force",
+            )
+        ]
+    age = (_dt.datetime.now() - seen).days
+    if age >= STALE_AFTER_DAYS:
+        return [
+            Finding(
+                label="update check",
+                status=Status.INFO,
+                detail=(
+                    f"no successful check in {age} days (last {seen:%Y-%m-%d}) — "
+                    "the checking hook may be broken"
+                ),
+                remedy="rekol update --force",
+            )
+        ]
+    return [
+        Finding(
+            label="update check",
+            status=Status.OK,
+            detail=f"last successful {seen:%Y-%m-%d} ({age} day(s) ago)",
+        )
+    ]
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -953,6 +1012,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
     findings.extend(_check_install_drift(cfg))
+    findings.extend(_check_update_staleness(cfg))
     if deep:
         findings.extend(_check_deep(cfg, embedder))
     return DoctorReport(findings=findings)

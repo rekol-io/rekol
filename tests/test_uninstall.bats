@@ -27,7 +27,7 @@ setup() {
     # Fast hashing embedder; no model download. git_track off so install Step 8.5
     # doesn't init a repo. Non-empty config means template seeding is skipped, so
     # we seed our own markdown below to assert it survives uninstall.
-    printf 'embedding_model: test-hashing\nsession_search_enabled: false\ngit_track: false\n' \
+    printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${REKOLH}/rekol.config.yaml"
 
     # Pin the login shell so install/uninstall target .zshrc deterministically

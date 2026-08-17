@@ -399,3 +399,48 @@ def stop_failure_record() -> None:
         record_stop_failure(load_config().index_dir, _read_payload())
     except Exception:  # noqa: BLE001 — a hook must never break the harness
         return
+
+
+@hook_group.command(name="update-check")
+def update_check() -> None:
+    """Announce a newer rekol at SessionStart, but only when it matters (#27).
+
+    Silence is the default and it is what keeps the loud tier meaningful: an
+    unmarked release says nothing at all, and a dismissed version never speaks
+    again. Only `high` and `critical` reach the session.
+
+    Same soft-fail contract as every other handler — any error prints nothing and
+    exits 0. It is also throttled (24h) and hard-bounded on the network call, so
+    a captive portal costs a few seconds once a day and produces no output. An
+    offline machine must be SILENT, not slow.
+    """
+    try:
+        import datetime as _dt
+
+        from rekol import __version__
+        from rekol.config import load_config
+        from rekol.release import SEVERITY_CRITICAL, check_for_update, parse_version
+
+        cfg = load_config()
+        if not getattr(cfg, "update_check", True):
+            return
+        current = parse_version(__version__)
+        if current is None:
+            return
+        status = check_for_update(current, cfg.index_dir, now=_dt.datetime.now())
+        if not status.should_announce or status.latest is None:
+            return
+        if status.severity == SEVERITY_CRITICAL:
+            click.echo("")
+            click.echo(
+                f"[rekol] ⚠ {status.latest.text} is available and marked CRITICAL "
+                f"(you have {__version__}). Update: cd <rekol clone> && git pull && ./install.sh"
+            )
+        else:
+            click.echo("")
+            click.echo(
+                f"[rekol] {status.latest.text} available (you have {__version__}) — "
+                "`rekol update` for details, `rekol update --dismiss` to silence it"
+            )
+    except Exception:  # noqa: BLE001 — a hook must never break the session injection
+        return

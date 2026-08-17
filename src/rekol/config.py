@@ -30,6 +30,11 @@ DEFAULTS: dict = dict(
     chunk_max_bytes=1500,
     claude_projects_dir="~/.claude/projects",
     session_search_enabled=True,
+    # #27: opt OUT of the one network call rekol makes (a `git ls-remote`
+    # against the repo you cloned from). Flat key, not nested: load_config
+    # drops anything not in DEFAULTS, so a nested `update.check` would be
+    # silently discarded with no error.
+    update_check=True,
     temporal_exclude_invalidated=True,
     temporal_respect_valid_from=True,
     temporal_recency_weight=0.03,
@@ -241,6 +246,7 @@ class Config:
     chunk_max_bytes: int
     claude_projects_dir: Path
     session_search_enabled: bool
+    update_check: bool
     temporal_exclude_invalidated: bool
     temporal_respect_valid_from: bool
     temporal_recency_weight: float
@@ -385,6 +391,7 @@ def load_config() -> Config:
         chunk_max_bytes=int(data["chunk_max_bytes"]),
         claude_projects_dir=_resolve_projects_dir(data["claude_projects_dir"]),
         session_search_enabled=bool(data["session_search_enabled"]),
+        update_check=bool(data["update_check"]),
         temporal_exclude_invalidated=bool(data["temporal_exclude_invalidated"]),
         temporal_respect_valid_from=bool(data["temporal_respect_valid_from"]),
         temporal_recency_weight=float(data["temporal_recency_weight"]),
