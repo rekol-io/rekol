@@ -461,3 +461,76 @@ def test_iter_sessions_for_backfill_groups_by_session(tmp_path: Path) -> None:
     assert messages[0]["message_uuid"] == "u1"
     assert messages[0]["role"] == "user"
     store.close()
+
+
+# ---------------- untokenizable content is not a desync (found live) ----------
+
+
+def _store_with(tmp_path, contents: list[str]):
+    """A store holding one message per given content string."""
+    store = SessionStore(db_path=tmp_path / "s.db", dim=8, use_sqlite_vec=False)
+    store.init_schema()
+    for i, text in enumerate(contents, start=1):
+        store.conn.execute(
+            "INSERT INTO messages(session_id, message_uuid, role, content, "
+            "timestamp_iso, timestamp_unix, jsonl_path, line_number) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"s-{i}", f"u-{i}", "user", text, "2026-08-05T00:00:00Z", 1000 + i, "/x.jsonl", i),
+        )
+    store.conn.commit()
+    return store
+
+
+def test_emoji_only_message_is_not_reported_as_a_desync(tmp_path) -> None:
+    """Found in a live store: ONE message whose content was "👍" made `doctor`
+    exit 1 permanently and print `rekol session-index --full` as the remedy — a
+    remedy that cannot work, because FTS5 produces zero tokens for it so there is
+    nothing to index. A health check that is always red is one people learn to
+    ignore, which then hides the checks that matter."""
+    store = _store_with(tmp_path, ["hello world", "👍"])
+    orphaned, unindexed = store.fts_consistency()
+    assert (orphaned, unindexed) == (0, 0), "an untokenizable message is not a desync"
+    assert store.fts_is_in_sync()
+    store.close()
+
+
+def test_whitespace_only_message_is_not_reported_as_a_desync(tmp_path) -> None:
+    """Non-empty is NOT the same as tokenizable — the assumption the old
+    docstring rested on. '   ' is non-empty and yields zero tokens."""
+    store = _store_with(tmp_path, ["real content here", "   "])
+    assert store.fts_consistency() == (0, 0)
+    store.close()
+
+
+def test_a_REAL_desync_is_still_detected(tmp_path) -> None:
+    """The fix must not blind the check. Delete a posting for a message that DOES
+    tokenize, and it must still be reported — otherwise we traded a false alarm
+    for a false all-clear, which is worse."""
+    store = _store_with(tmp_path, ["findable words here", "👍"])
+    # Drop the real message from the FTS index only, simulating the pre-trigger
+    # DBs this check exists to catch.
+    row = store.conn.execute(
+        "SELECT id, content FROM messages WHERE content LIKE 'findable%'"
+    ).fetchone()
+    store.conn.execute(
+        "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?, ?)",
+        (row["id"], row["content"]),
+    )
+    store.conn.commit()
+
+    orphaned, unindexed = store.fts_consistency()
+    assert unindexed == 1, "a genuinely unindexed, tokenizable message must still be caught"
+    assert not store.fts_is_in_sync()
+    store.close()
+
+
+def test_orphaned_postings_still_detected(tmp_path) -> None:
+    """The other half of the check — a posting with no message — is untouched."""
+    store = _store_with(tmp_path, ["alpha beta"])
+    store.conn.execute(
+        "INSERT INTO messages_fts(rowid, content) VALUES (?, ?)", (99999, "ghost posting")
+    )
+    store.conn.commit()
+    orphaned, _ = store.fts_consistency()
+    assert orphaned == 1
+    store.close()
