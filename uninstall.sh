@@ -40,8 +40,20 @@ readonly COMPONENT_DIR
 # done with REKOL_TOOLS_HOME/MEMORY_TOOLS_HOME overrides is found and removed.
 TOOLS_HOME_DEFAULT="${REKOL_TOOLS_HOME:-${MEMORY_TOOLS_HOME:-$HOME/.local/share/rekol}}"
 BIN_DIR_DEFAULT="$HOME/bin"
-readonly SETTINGS_JSON="$HOME/.claude/settings.json"
-readonly SKILL_BASE="$HOME/.claude/skills"
+# Claude Code's config tree, honouring CLAUDE_CONFIG_DIR (#176). MUST match
+# install.sh's rule exactly, or uninstall looks in the wrong place and reports
+# "removed" for skills and hooks it never touched — the detector-wider-than-the
+# -remover failure this script already fixed once for StopFailure and env keys.
+# Resolved in bash rather than via the venv because uninstall runs when the venv
+# may already be gone. A test asserts this agrees with the Python resolver.
+if [[ -z "${CLAUDE_CONFIG_DIR:-}" || -z "${CLAUDE_CONFIG_DIR//[[:space:]]/}" ]]; then
+  CLAUDE_CONFIG_HOME="$HOME/.claude"
+else
+  CLAUDE_CONFIG_HOME="${CLAUDE_CONFIG_DIR}"
+fi
+readonly CLAUDE_CONFIG_HOME
+readonly SETTINGS_JSON="${CLAUDE_CONFIG_HOME}/settings.json"
+readonly SKILL_BASE="${CLAUDE_CONFIG_HOME}/skills"
 
 # Mirror install.sh: clean the rekol exports from the same shell rc install would
 # have written, detected from the user's login shell ($SHELL). Defaults to
