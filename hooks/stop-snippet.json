@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"@REKOL@\" _hook record-stop"
+            "command": "\"@REKOL@\" _hook record-stop 2>/dev/null || true"
           }
         ]
       }

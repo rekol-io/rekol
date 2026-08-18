@@ -48,6 +48,18 @@ setup() {
     # TOOLS_HOME locally. Per-test timeout is a safety net so a pathological test
     # fails fast instead of cancelling the whole job.
     TOOLS_HOME="${SHARED_TOOLS}"
+        # HERMETIC ENV (incident 2026-08-17): these tests run `uninstall.sh
+    # --purge-index`, which rm -rf's the resolved index dir. The suite sandboxes
+    # XDG_CACHE_HOME/XDG_DATA_HOME — but REKOL_INDEX_DIR takes PRECEDENCE over
+    # them, and since #164 that variable is exported into every Claude Code
+    # session's environment, which bats inherits. A test therefore resolved the
+    # DEVELOPER'S REAL index and deleted it (~36k indexed messages).
+    #
+    # tests/conftest.py already clears these for pytest; bats never got the same
+    # treatment, and hardening one harness is what made the gap in the other
+    # dangerous. Clear every override so only the sandboxed XDG paths decide.
+    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
+    unset MEMORY_TOOLS_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
     export REKOL_INSTALL_SKIP_DEPS=1
     export BATS_TEST_TIMEOUT=300
     BIN_DIR="${TESTROOT}/bin"
@@ -67,6 +79,20 @@ setup() {
     # Resolve component dir relative to this test file
     COMPONENT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
     export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME XDG_DATA_HOME
+}
+
+# Refuses to let a destructive test run against a path outside the sandbox.
+# The unset above prevents the KNOWN leak; this catches the next one, whatever
+# shape it takes. Call before anything that deletes.
+assert_sandboxed() {
+    local resolved="$1" label="$2"
+    [[ -n "$resolved" ]] || return 0
+    case "$resolved" in
+        "$TESTROOT"/*|/private"$TESTROOT"/*|/tmp/*|/private/tmp/*) : ;;
+        *) printf 'REFUSING: %s resolved OUTSIDE the sandbox: %s\n' "$label" "$resolved" >&2
+           printf '  TESTROOT=%s\n' "$TESTROOT" >&2
+           return 1 ;;
+    esac
 }
 
 teardown() {
@@ -1201,4 +1227,81 @@ JSON
   [ "$hook_idx" = "$installed_idx" ] || {
     echo "SPLIT INDEX — shell: $installed_idx"
     echo "              hook : $hook_idx"; false; }
+}
+
+# ---------------- a rekol hook must NEVER be able to block a session ---------
+# `_hook time-context` shipped on UserPromptSubmit without a `|| true`. A
+# non-zero exit there fails the EVENT, which blocks prompt submission — rekol
+# locking the user out of Claude Code. cli_hooks.py documents the soft-fail
+# contract four times and every handler catches broadly, but that only guards
+# exceptions INSIDE the handler; if the COMMAND fails (missing binary, deleted
+# venv, exit 127) the shell returns non-zero and Python never runs.
+@test "install repairs hooks that could block a session, and de-duplicates" {
+  SBHOME="$TESTROOT/sandhome-softfail"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-softfail"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+
+  # An install in the shape that locked a real user out: UserPromptSubmit and
+  # Stop unguarded, plus the duplicate auto-reindex handler #176 introduced.
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook time-context"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "rekol _hook record-stop"}]}],
+    "PostToolUse": [
+      {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "$HOME/.local/share/rekol/hooks/auto-reindex.sh"}]},
+      {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "/somewhere/rekol/hooks/auto-reindex.sh"}]}
+    ],
+    "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "other-tool --run"}]}]
+  },
+  "env": {"KEEP_ME": "1"}
+}
+JSON
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # 1. NO rekol hook can fail its event any more.
+  # The invariant is "cannot fail its event", not "ends with || true": a command
+  # ending in `&` is asynchronous, so the shell returns 0 immediately and it can
+  # never fail either. Appending a guard AFTER the `&` would start a separate
+  # command and corrupt the handler — which an earlier version of this fix did,
+  # caught by the #135 test asserting the detached form survives.
+  blocking="$(jq -r '[.hooks[]?[]?.hooks[]?.command
+                      | select(test("rekol|REKOL"))
+                      | select(test("\\|\\| true$") | not)
+                      | select(test("&[[:space:]]*$") | not)] | length' \
+              "$SBHOME/.claude/settings.json")"
+  [ "$blocking" -eq 0 ] || {
+    echo "$blocking rekol hook(s) can still fail their event:"
+    jq -r '.hooks[]?[]?.hooks[]?.command | select(test("rekol|REKOL"))
+           | select(test("\\|\\| true$")|not) | select(test("&[[:space:]]*$")|not)' \
+      "$SBHOME/.claude/settings.json"; false; }
+
+  # 2. The duplicate auto-reindex handler is collapsed to one.
+  ar="$(jq -r '[.hooks[]?[]?.hooks[]?.command | select(test("auto-reindex"))] | length' \
+        "$SBHOME/.claude/settings.json")"
+  [ "$ar" -eq 1 ] || { echo "expected 1 auto-reindex handler, found $ar"; false; }
+
+  # 3. Another tool's hook and the user's env key are untouched — the migration
+  #    rewrites settings.json, so proving it does not eat neighbours matters.
+  run jq -e '[.hooks.SessionEnd[]?.hooks[]?.command | select(. == "other-tool --run")] | length == 1' \
+    "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+  run jq -e '.env.KEEP_ME == "1"' "$SBHOME/.claude/settings.json"
+  [ "$status" -eq 0 ]
+
+  # 4. Idempotent: a second install reports a no-op rather than re-appending.
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already soft-fail"* ]] || { echo "second run did not report a no-op"; echo "$output" | grep -i soft; false; }
 }

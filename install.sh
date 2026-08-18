@@ -806,6 +806,75 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
 fi
 
 # =============================================================================
+# Step 6.96 — every rekol hook must be SOFT-FAIL, and de-duplicate handlers
+# =============================================================================
+# A hook that exits non-zero can fail its EVENT. For UserPromptSubmit that means
+# the user cannot submit a prompt at all — rekol locking someone out of Claude
+# Code, which is the worst failure this tool has. It happened: `_hook
+# time-context` shipped without a `|| true`, so any command-level failure (a
+# missing binary, a deleted venv, exit 127) blocked the session.
+#
+# cli_hooks.py documents the contract four times ("a hook must never break the
+# session injection") and every handler catches broadly to honour it — but that
+# only guards exceptions INSIDE the handler. If the COMMAND fails, the shell
+# returns non-zero and Python never runs. The contract was enforced on one side
+# of the boundary only.
+#
+# Also collapses duplicate auto-reindex handlers. #176 changed the rendered path
+# from $HOME/... to the resolved TOOLS_HOME while Step 7B's idempotency still
+# matched the old string, so a reinstall APPENDED a second handler instead of
+# upgrading in place — re-indexing twice on every Write/Edit. Exactly the
+# failure #159's migration exists to prevent, reintroduced by changing command
+# text without extending that migration.
+
+if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
+  SOFTEN_PROG='
+    def soften:
+      if (.command? // "") | test("rekol|REKOL")
+      then if (.command | test("\\|\\| true$")) then .              # already guarded
+           elif (.command | test("&[[:space:]]*$")) then .          # async: returns 0 already
+           else .command += " 2>/dev/null || true" end
+      else . end;
+    def soften_event:
+      if type == "array" then map(if (.hooks? | type) == "array"
+                                  then .hooks |= map(soften) else . end)
+      else . end;
+    def dedupe_autoreindex:
+      if type == "array" then
+        reduce .[] as $blk ({keep: [], seen: false};
+          ($blk.hooks // []) as $hs
+          | (($hs | map(select((.command // "") | test("auto-reindex\\.sh"))) | length) > 0) as $isAR
+          | if $isAR and .seen then .
+            else {keep: (.keep + [$blk]), seen: (.seen or $isAR)} end)
+        | .keep
+      else . end;
+    if (.hooks | type) == "object"
+    then .hooks |= with_entries(.value |= soften_event)
+         | if (.hooks.PostToolUse | type) == "array"
+           then .hooks.PostToolUse |= dedupe_autoreindex else . end
+    else . end'
+
+  SOFTENED="$(jq "${SOFTEN_PROG}" "${SETTINGS_JSON}" 2>/dev/null || true)"
+  if [[ -z "$SOFTENED" ]]; then
+    say "could not evaluate the hook soft-fail migration — leaving ${SETTINGS_JSON} untouched"
+  elif ! diff -q <(printf '%s\n' "$SOFTENED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
+    local_soften_backup="${SETTINGS_JSON}.bak-softfail-${TS}"
+    run "cp '${SETTINGS_JSON}' '${local_soften_backup}'"
+    log_journal "BACKED-UP ${SETTINGS_JSON} -> ${local_soften_backup}"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      say "DRY-RUN: make every rekol hook soft-fail + de-duplicate handlers"
+    else
+      local_tmp="${SETTINGS_JSON}.tmp.$$"
+      printf '%s\n' "$SOFTENED" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
+      log_journal "MIGRATED rekol hooks to soft-fail + de-duplicated handlers in ${SETTINGS_JSON}"
+      say "made every rekol hook soft-fail (a failing hook can no longer block a session)"
+    fi
+  else
+    say "rekol hooks already soft-fail and de-duplicated — no-op"
+  fi
+fi
+
+# =============================================================================
 # Step 7 — SessionStart hook merge into ~/.claude/settings.json
 # =============================================================================
 
@@ -1138,10 +1207,11 @@ if [[ "$DO_HOOK" == "1" ]]; then
       jq -r --slurpfile snip "${SNIPPET_PTU}" '
         (.hooks.PostToolUse // []) as $cur
         | ($snip[0].hooks.PostToolUse[0].hooks[0].command) as $cmd
-        | [ $cur[] | select(.hooks // [] | any(.command == $cmd)) ] as $matching
+        | [ $cur[] | select(.hooks // [] | any((.command // "") | test("auto-reindex[.]sh"))) ] as $matching
         | if ($matching | length) == 0 then "absent"
-          elif ($matching | any((.matcher // "") | contains("MultiEdit"))) then "current"
-          else "stale" end
+          elif ($matching | any((.matcher // "") | contains("MultiEdit") | not)) then "stale"
+          elif ($matching | any((.hooks // []) | any(.command != $cmd))) then "stale"
+          else "current" end
       ' "${SETTINGS_JSON}" 2>/dev/null || printf 'absent'
     )"
 
@@ -1156,13 +1226,21 @@ if [[ "$DO_HOOK" == "1" ]]; then
 
       local_tmp="${SETTINGS_JSON}.tmp.$$"
       if [[ "$PTU_STATE" == "stale" ]]; then
-        say "PostToolUse auto-reindex matcher is outdated — upgrading to include MultiEdit"
+        say "PostToolUse auto-reindex handler is outdated — upgrading in place"
+        # Repair the COMMAND as well as the matcher. Detection now keys on the
+        # marker, so a changed rendered path no longer appends a duplicate — but
+        # without rewriting the command it would stay pointing at the old path
+        # forever, which is how #176 left a handler aimed at a file that may not
+        # exist. Upgrade in place, never append.
         run "jq --slurpfile snip '${SNIPPET_PTU}' \
           '(\$snip[0].hooks.PostToolUse[0].hooks[0].command) as \$cmd \
            | (\$snip[0].hooks.PostToolUse[0].matcher) as \$want \
-           | .hooks.PostToolUse |= map(if (.hooks // [] | any(.command == \$cmd)) then .matcher = \$want else . end)' \
+           | .hooks.PostToolUse |= map(if (.hooks // [] | any((.command // \"\") | test(\"auto-reindex[.]sh\"))) \
+                                       then .matcher = \$want \
+                                            | .hooks |= map(if ((.command // \"\") | test(\"auto-reindex[.]sh\")) then .command = \$cmd else . end) \
+                                       else . end)' \
           '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
-        log_journal "UPGRADED PostToolUse auto-reindex matcher in ${SETTINGS_JSON}"
+        log_journal "UPGRADED PostToolUse auto-reindex handler in ${SETTINGS_JSON}"
       else
         run "jq --slurpfile snip '${SNIPPET_PTU}' \
           '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + \$snip[0].hooks.PostToolUse)' \

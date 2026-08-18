@@ -6,6 +6,36 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A failing rekol hook could lock you out of Claude Code entirely.** A hook that exits non-zero
+  can fail its *event*, and for `UserPromptSubmit` that means **prompts cannot be submitted at
+  all** — rekol making the editor unusable, the worst failure this tool has. It happened on a live
+  machine: `_hook time-context` shipped without a `|| true`, so any command-level failure (missing
+  binary, deleted venv, exit 127) blocked the session.
+  The contract was not missing — `cli_hooks.py` states it four times ("a hook must never break the
+  session injection") and every handler catches broadly to honour it. But that only guards
+  exceptions *inside* the handler: if the **command** fails, the shell returns non-zero and Python
+  never runs. **The contract was enforced on one side of the boundary only.** Every shipped snippet
+  now ends `2>/dev/null || true`, and `install.sh` migrates existing installs, so machines already
+  carrying the unguarded hook are repaired on upgrade rather than only new ones being safe.
+  The invariant is *"cannot fail its event"*, not *"ends with `|| true`"* — a command ending in `&`
+  is asynchronous and already returns 0, and appending a guard after the `&` would start a separate
+  command and corrupt the handler. An earlier revision of this fix did exactly that; the existing
+  #135 test asserting the detached form survives is what caught it.
+- **Reinstalling appended a second `auto-reindex` handler instead of upgrading in place.** #176
+  changed the rendered path from `$HOME/…` to the resolved `TOOLS_HOME` while the idempotency check
+  still compared against the *old exact string*, so a reinstall saw "absent" and appended — every
+  `Write`/`Edit` then re-indexed twice. Detection now keys on the `auto-reindex.sh` **marker** and
+  repairs the command in place, so a future path change upgrades rather than duplicates. This is
+  precisely the failure #159's migration exists to prevent, reintroduced by changing command text
+  without extending that migration — so the migration now also collapses any duplicate already
+  written to disk.
+- **The install/uninstall test suites could delete the real session index.** `REKOL_INDEX_DIR` and
+  `REKOL_ARCHIVE_DIR` (added by the #164 fix so config reaches hooks) are read at higher precedence
+  than the `XDG_CACHE_HOME` the sandbox redirects, so an inherited value from the developer's own
+  shell pointed the suite's cleanup at the **live** index — which is not hypothetical: it destroyed
+  a real 35,969-message index during development. Both suites now clear those variables, and an
+  `assert_sandboxed()` sentry refuses any purge whose target is not inside `$TESTROOT`, so a future
+  variable with the same power fails loudly instead of deleting data.
 - **`doctor` reported a permanent FTS desync that no rebuild could clear.** Found on a live
   machine: `✗ session FTS: keyword index out of sync: 0 orphaned postings, 1 unindexed messages`,
   every run since 2026-08-05, with `rekol session-index --full` printed as the remedy — and
