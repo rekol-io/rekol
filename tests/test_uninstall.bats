@@ -12,6 +12,20 @@
 # sandboxed file. The teardown rm -rf's the whole sandbox.
 
 setup() {
+
+    # HERMETIC ENV (incident 2026-08-17): these tests run `uninstall.sh
+    # --purge-index`, which rm -rf's the resolved index dir. The suite sandboxes
+    # XDG_CACHE_HOME/XDG_DATA_HOME — but REKOL_INDEX_DIR takes PRECEDENCE over
+    # them, and since #164 that variable is exported into every Claude Code
+    # session's environment, which bats inherits. A test therefore resolved the
+    # DEVELOPER'S REAL index and deleted it (~36k indexed messages).
+    #
+    # tests/conftest.py already clears these for pytest; bats never got the same
+    # treatment, and hardening one harness is what made the gap in the other
+    # dangerous. Clear every override so only the sandboxed XDG paths decide.
+    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
+    unset MEMORY_TOOLS_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+
     command -v jq >/dev/null 2>&1 || skip "jq required for uninstall tests"
     TESTROOT="$(mktemp -d)"
     COMPONENT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
@@ -34,6 +48,20 @@ setup() {
     # (the host CI may run bash; the bash path is covered in test_install.bats).
     SHELL="/bin/zsh"
     export COMPONENT_DIR TOOLS_HOME BIN_DIR REKOLH SBHOME TESTROOT SHELL
+}
+
+# Refuses to let a destructive test run against a path outside the sandbox.
+# The unset above prevents the KNOWN leak; this catches the next one, whatever
+# shape it takes. Call before anything that deletes.
+assert_sandboxed() {
+    local resolved="$1" label="$2"
+    [[ -n "$resolved" ]] || return 0
+    case "$resolved" in
+        "$TESTROOT"/*|/private"$TESTROOT"/*|/tmp/*|/private/tmp/*) : ;;
+        *) printf 'REFUSING: %s resolved OUTSIDE the sandbox: %s\n' "$label" "$resolved" >&2
+           printf '  TESTROOT=%s\n' "$TESTROOT" >&2
+           return 1 ;;
+    esac
 }
 
 teardown() {
@@ -299,6 +327,8 @@ manifest_index_dir() {
     [ -n "$cache" ]
     [ -f "${cache}/index.db" ]
 
+    # Never purge a path outside the sandbox (incident 2026-08-17).
+    assert_sandboxed "$(manifest_index_dir)" "index dir"
     run_uninstall --yes --purge-index
     [ "$status" -eq 0 ]
 
@@ -377,6 +407,8 @@ manifest_index_dir() {
     [ "$status" -eq 0 ]
 
     # Uninstall removes the relocated cache.
+    # Never purge a path outside the sandbox (incident 2026-08-17).
+    assert_sandboxed "$(manifest_index_dir)" "index dir"
     run_uninstall --yes --purge-index
     [ "$status" -eq 0 ]
     [ ! -d "${cache}" ]

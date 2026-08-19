@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -n \"${REKOL_HOME:-$MEMORY_HOME}\" ]; then echo '[rekol] session ended \u2014 if you learned something durable, run `rekol capture` (see the memory skill)'; fi"
+            "command": "if [ -n \"${REKOL_HOME:-$MEMORY_HOME}\" ]; then echo '[rekol] session ended \u2014 if you learned something durable, run `rekol capture` (see the memory skill)'; fi 2>/dev/null || true"
           },
           {
             "type": "command",
@@ -15,7 +15,7 @@
           },
           {
             "type": "command",
-            "command": "\"@REKOL@\" review --nudge"
+            "command": "\"@REKOL@\" review --nudge 2>/dev/null || true"
           }
         ]
       }

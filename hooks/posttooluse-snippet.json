@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "@TOOLS_HOME@/hooks/auto-reindex.sh"
+            "command": "@TOOLS_HOME@/hooks/auto-reindex.sh 2>/dev/null || true"
           }
         ]
       }
