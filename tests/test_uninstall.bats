@@ -564,6 +564,46 @@ manifest_index_dir() {
     [ -f "${REKOL_ARCHIVE_DIR}/projA/s.jsonl" ]
 }
 
+# The archive inside the tools home is the DEFAULT layout, not an edge case:
+# TOOLS_HOME defaults to ~/.local/share/rekol and the archive to
+# ${XDG_DATA_HOME:-~/.local/share}/rekol/archive. Step 3 used to `rm -rf` the
+# tools home wholesale, taking the archive with it — no --purge-archive, no
+# prompt, nothing in the summary, while --help promised it was preserved. That
+# destroyed 759 archive-only sessions on a real machine (2026-08-18).
+# The venv must still go; only the archive is spared.
+@test "default uninstall preserves an archive that lives INSIDE the tools home" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${TOOLS_HOME}/archive"
+    mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
+    printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
+    [ -d "${TOOLS_HOME}/.venv" ]
+
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes
+    [ "$status" -eq 0 ]
+
+    # The archive survives a default uninstall, as documented.
+    [ -f "${REKOL_ARCHIVE_DIR}/projA/s.jsonl" ]
+    # ...and the rest of the tools home is still removed.
+    [ ! -d "${TOOLS_HOME}/.venv" ]
+}
+
+# --purge-archive must still work when the archive is inside the tools home:
+# preserving it in Step 3 must not make it unreachable to the explicit request.
+@test "--purge-archive still removes an archive inside the tools home" {
+    do_full_install
+    export REKOL_ARCHIVE_DIR="${TOOLS_HOME}/archive"
+    mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
+    printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
+
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    [ "$status" -eq 0 ]
+    [ ! -d "${REKOL_ARCHIVE_DIR}" ]
+}
+
 @test "uninstall --purge-archive removes the archive" {
     do_full_install
     export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"

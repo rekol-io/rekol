@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`uninstall.sh` silently destroyed the transcript archive, in the default layout.** Step 3
+  removed the tools home with `rm -rf "${TOOLS_HOME}"` under a comment asserting it was
+  *"entirely rekol-owned and rebuildable — safe to remove wholesale."* That premise was false:
+  `TOOLS_HOME` defaults to `~/.local/share/rekol` and the archive to
+  `${XDG_DATA_HOME:-~/.local/share}/rekol/archive` — **a subdirectory of it**. So an ordinary
+  uninstall deleted the archive as collateral: no `--purge-archive`, no prompt, nothing in the
+  removal summary, while `--help` promised it was *"preserved by default, never silently
+  removed."* The code did the exact opposite of its documented contract.
+  This is not hypothetical. It destroyed **759 sessions that existed only in the archive**
+  (2026-08-18), unrecoverably — the archive is the durable source of truth a rebuild reads
+  *from*, not a cache that can be rebuilt. A guard already existed for the archive overlapping
+  `$REKOL_HOME`; nobody wrote one for `TOOLS_HOME`, and unlike that case this is not an exotic
+  misconfiguration — **it is the default install**.
+  The invariant is now explicit: **Step 3 never deletes the archive; Step 6c is the single
+  owner of that decision.** When the archive lives inside the tools home, Step 3 removes the
+  other entries and skips the archive *and any ancestor of it*, so a nested
+  `TOOLS_HOME/data/archive` survives too; when the archive *is* the tools home, it refuses
+  outright and reports it rather than doing something clever. `--purge-archive` still removes
+  it when explicitly asked. The `--help` removal list no longer overstates what goes.
+  Tests assert both directions — the archive survives a default uninstall and is still removed
+  by `--purge-archive` — and were confirmed to **fail against the old code**, so they encode
+  the bug rather than the fix.
 - **A failing rekol hook could lock you out of Claude Code entirely.** A hook that exits non-zero
   can fail its *event*, and for `UserPromptSubmit` that means **prompts cannot be submitted at
   all** — rekol making the editor unusable, the worst failure this tool has. It happened on a live

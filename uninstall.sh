@@ -97,7 +97,8 @@ Usage: ./uninstall.sh [--dry-run] [--purge-index] [--purge-archive] [--yes]
 What it removes:
   - the ~/bin/rekol shim (only if it points back into the rekol repo)
   - ~/.claude/skills/rekol and the ~/.claude/skills/memory shim
-  - ~/.local/share/rekol/ (the venv + tools home)
+  - ~/.local/share/rekol/ (the venv + tools home) — EXCEPT the transcript
+    archive, which by default lives inside it and is preserved (see below)
   - rekol hook handlers from ~/.claude/settings.json (SessionStart, PostToolUse,
     SessionEnd, UserPromptSubmit, Stop, StopFailure) and the rekol env keys
     (REKOL_HOME, REKOL_TOOLS_HOME)
@@ -422,14 +423,58 @@ done
 # =============================================================================
 # Step 3 — remove the tools home (venv + hooks symlinks)
 # =============================================================================
-# install.sh Steps 1/7B created ${TOOLS_HOME} (the .venv and hooks/). This is
-# entirely rekol-owned and rebuildable — safe to remove wholesale. We never
+# install.sh Steps 1/7B created ${TOOLS_HOME} (the .venv and hooks/). We never
 # touch $REKOL_HOME here; TOOLS_HOME is a separate directory.
+#
+# ⚠ "entirely rekol-owned and rebuildable — safe to remove wholesale" is what
+# this comment used to say, and it was FALSE in the DEFAULT layout. TOOLS_HOME
+# defaults to ~/.local/share/rekol; the archive defaults to
+# ${XDG_DATA_HOME:-~/.local/share}/rekol/archive — i.e. a SUBDIRECTORY of it.
+# So `rm -rf "${TOOLS_HOME}"` silently destroyed the transcript archive as
+# collateral, with no --purge-archive, no prompt, and no line in the summary,
+# while --help promised "preserved by default, never silently removed".
+#
+# This is not hypothetical: it destroyed 759 sessions that existed ONLY in the
+# archive (2026-08-18) — unrecoverable, since the archive is the durable source
+# of truth a rebuild reads FROM, not a cache it can rebuild.
+#
+# The rule now: **Step 3 never deletes the archive.** Step 6c is the single
+# owner of that decision and applies the documented policy. A guard existed for
+# the archive overlapping $REKOL_HOME but not for TOOLS_HOME — and unlike that
+# case, this one is not an exotic misconfiguration; it is the default install.
 
 if [[ -d "$TOOLS_HOME" ]]; then
-  say "removing tools home ${TOOLS_HOME} (venv + hook scripts)"
-  run "rm -rf '${TOOLS_HOME}'"
-  note_removed "tools home ${TOOLS_HOME}"
+  if [[ -n "$ARCHIVE_DIR" ]] && paths_overlap "$ARCHIVE_DIR" "$TOOLS_HOME"; then
+    archive_canon="$(canonical_path "$ARCHIVE_DIR")"
+    tools_canon="$(canonical_path "$TOOLS_HOME")"
+
+    if [[ "$archive_canon" == "$tools_canon" ]]; then
+      # Degenerate layout: the archive IS the tools home. Removing anything here
+      # would take the archive with it, so leave the whole directory to Step 6c.
+      say "NOT removing tools home ${TOOLS_HOME}: it is also the transcript archive"
+      note_preserved "tools home ${TOOLS_HOME} (it is the transcript archive; see the archive step)"
+      note_leftover "tools home: ${TOOLS_HOME} was kept because it is also the archive; remove it by hand once you have exported what you need"
+    else
+      say "removing tools home ${TOOLS_HOME} (venv + hook scripts), preserving the transcript archive inside it"
+      while IFS= read -r child; do
+        [[ -n "$child" ]] || continue
+        child_canon="$(canonical_path "$child")"
+        # Skip the archive itself and any ancestor of it, so a nested archive
+        # (TOOLS_HOME/data/archive) survives along with the directories above it.
+        if [[ -n "$child_canon" ]] \
+           && { [[ "$child_canon" == "$archive_canon" ]] || [[ "$archive_canon" == "$child_canon/"* ]]; }; then
+          continue
+        fi
+        run "rm -rf '${child}'"
+      done < <(find "$TOOLS_HOME" -mindepth 1 -maxdepth 1)
+      note_removed "tools home ${TOOLS_HOME} (transcript archive preserved)"
+      note_preserved "transcript archive ${ARCHIVE_DIR} (lives inside the tools home)"
+    fi
+  else
+    say "removing tools home ${TOOLS_HOME} (venv + hook scripts)"
+    run "rm -rf '${TOOLS_HOME}'"
+    note_removed "tools home ${TOOLS_HOME}"
+  fi
 elif [[ "$TOOLS_HOME_SOURCE" == "default" && "$MANIFEST_FOUND" == "0" ]]; then
   # We had no manifest and no flag, so we could only guess the built-in default —
   # and nothing is there. A custom install (--tools-home elsewhere) would leave a
