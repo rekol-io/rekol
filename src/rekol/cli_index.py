@@ -11,6 +11,7 @@ from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.index_lock import IndexBusyError, index_lock_path, index_write_lock
 from rekol.indexer import Indexer
+from rekol.safety import RealIndexClobberError, assert_not_clobbering_real_index
 from rekol.store import IndexModelMismatchError, IndexStore
 
 
@@ -27,6 +28,15 @@ def rebuild() -> None:
     suitable for recovery or after bulk changes to memory files.
     """
     cfg = load_config()
+    # Refuse BEFORE anything is built: the swap below replaces index.db wholesale
+    # without ever reading the old index's identity, so `check_model_identity`
+    # (which guards incremental writes) cannot see this path. That gap let a
+    # test-embedder rebuild silently replace a live user's index on 2026-08-18.
+    try:
+        assert_not_clobbering_real_index(cfg.index_db_path, cfg.embedding_model)
+    except RealIndexClobberError as error:
+        click.echo(f"error: {error}", err=True)
+        sys.exit(1)
     embedder = get_embedder(cfg.embedding_model)
     store = IndexStore(
         db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
