@@ -5,6 +5,37 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **The library now refuses to replace a real index with test-built data.** On 2026-08-18 a
+  `rekol index rebuild` running the **test embedder** replaced a live user's curated index;
+  search over curated memory returned nothing for two days and nothing surfaced it, because
+  the write *succeeded* — a test-built index is a perfectly valid index whose vectors simply
+  mean nothing.
+  The existing check could not catch it. `IndexStore.check_model_identity()` compares the
+  configured model against the one recorded in the index — but `rebuild` deliberately builds
+  into a temp DB and swaps it over `index.db` atomically (so a kill mid-rebuild cannot leave
+  an empty index), and **nothing on that path reads the old index's identity**. The guard was
+  where it was convenient to assert, not where the destructive act happens.
+  New `rekol.safety.assert_not_clobbering_real_index()` runs immediately before the rebuild:
+  if the incoming model is a test embedder (`test-hashing`) and the existing index records a
+  real one, it refuses and names both. `test-hashing` is a reliable signal precisely because
+  nothing legitimate uses it. Escape hatch:
+  `REKOL_ALLOW_TEST_EMBEDDER_TO_OVERWRITE_REAL_INDEX=1`.
+  **Deliberately not path-based.** Both August incidents involved isolation that was genuinely
+  attempted and silently outranked — the sandbox redirected `REKOL_HOME`/`XDG_CACHE_HOME`
+  while an inherited `REKOL_INDEX_DIR` (highest precedence, used verbatim) still pointed at
+  the real cache. A guard asking *"does this path look like a sandbox?"* would have been
+  fooled identically. Asking *"what built the thing I am about to destroy?"* cannot be.
+  It **fails open** on a missing, unstamped, or corrupt index: a guard that blocked the
+  rebuild which repairs a damaged index would be worse than the bug. Tests cover both
+  directions, including an end-to-end reproduction of the incident through the CLI —
+  confirmed to fail when the call site is removed while all unit tests still pass, which is
+  exactly the failure a unit test cannot see.
+  **Known gap, filed not fixed:** the *sessions* index guards on embedding **dimension**
+  only, and `test-hashing` is 384-dim like `bge-small-en-v1.5` — so the same mistake against
+  `sessions.db` would still pass silently. Closing it requires recording a model identity in
+  the sessions schema, which is a larger change than this fix.
+
 ### Fixed
 - **`uninstall.sh` silently destroyed the transcript archive, in the default layout.** Step 3
   removed the tools home with `rm -rf "${TOOLS_HOME}"` under a comment asserting it was
