@@ -655,8 +655,26 @@ if [[ "$DO_SKILL" == "1" ]]; then
     skill_dst_dir="${SKILL_BASE}/${skill_name}"
     run "mkdir -p '${skill_dst_dir}'"
 
-    local_skill_src="${COMPONENT_DIR}/skill/${skill_name}/skill.md"
-    local_skill_dst="${skill_dst_dir}/skill.md"
+    # SKILL.md, uppercase (#177). Claude Code's documentation specifies
+    # ~/.claude/skills/<name>/SKILL.md and never mentions a lowercase form; we
+    # previously wrote skill.md and it worked only because macOS is
+    # case-INSENSITIVE, so the two names collide into one file. On Linux they are
+    # different files, and relying on undocumented case-folding there is a bet we
+    # should not be taking with whether a skill loads at all.
+    local_skill_src="${COMPONENT_DIR}/skill/${skill_name}/SKILL.md"
+    local_skill_dst="${skill_dst_dir}/SKILL.md"
+
+    # Remove a lowercase copy left by an older install. On a case-INSENSITIVE
+    # filesystem this is the same file we are about to write, so the -ef guard
+    # stops us deleting our own destination; on a case-SENSITIVE one it is a
+    # genuine stale duplicate, and leaving it risks the loader picking the old
+    # content or listing the skill twice.
+    local_skill_legacy="${skill_dst_dir}/skill.md"
+    if [[ -f "$local_skill_legacy" ]] && ! [[ "$local_skill_legacy" -ef "$local_skill_dst" ]]; then
+      say "removing stale lowercase skill file ${local_skill_legacy}"
+      run "rm -f '${local_skill_legacy}'"
+      log_journal "REMOVED stale ${local_skill_legacy} (superseded by SKILL.md, #177)"
+    fi
 
     # Back up only when content differs — avoids churn on repeated installs
     if [[ -f "$local_skill_dst" ]] && ! cmp -s "${local_skill_src}" "${local_skill_dst}"; then

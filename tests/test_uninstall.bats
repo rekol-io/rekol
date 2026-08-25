@@ -145,10 +145,10 @@ manifest_index_dir() {
     do_full_install
     # Sanity: the install actually created the things we expect to remove.
     [ -L "${BIN_DIR}/rekol" ] || [ -e "${BIN_DIR}/rekol" ]
-    [ -f "${SBHOME}/.claude/skills/rekol/skill.md" ]
-    [ -f "${SBHOME}/.claude/skills/memory/skill.md" ]
-    [ -f "${SBHOME}/.claude/skills/rekol-init/skill.md" ]
-    [ -f "${SBHOME}/.claude/skills/rekol-bootstrap/skill.md" ]
+    [ -f "${SBHOME}/.claude/skills/rekol/SKILL.md" ]
+    [ -f "${SBHOME}/.claude/skills/memory/SKILL.md" ]
+    [ -f "${SBHOME}/.claude/skills/rekol-init/SKILL.md" ]
+    [ -f "${SBHOME}/.claude/skills/rekol-bootstrap/SKILL.md" ]
     [ -d "${TOOLS_HOME}/.venv" ]
 
     run_uninstall --yes

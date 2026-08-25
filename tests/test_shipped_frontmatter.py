@@ -6,7 +6,7 @@ inside a plain YAML scalar:
 1. ``feedback/rekol-frontmatter-style.md`` in a live store — the memory file whose
    entire subject was "don't get silently skipped by the indexer", silently
    skipped by the indexer for exactly this reason.
-2. ``skill/rekol-bootstrap/skill.md`` — shipped by us, copied to every install.
+2. ``skill/rekol-bootstrap/SKILL.md`` — shipped by us, copied to every install.
 3. (this test exists so there is no third recurrence in a file we control)
 
 Claude Code's own parser is more forgiving than ``yaml.safe_load``, so a
@@ -136,3 +136,46 @@ def test_shell_and_python_agree_on_the_claude_config_dir(
         f"CLAUDE_CONFIG_DIR={env_value!r}: shell={shell_answer!r} "
         f"python={resolve_claude_config_dir()!r}"
     )
+
+
+# --------------------------------- #177 --------------------------------------
+
+
+def test_shipped_skills_are_named_SKILL_md_exactly() -> None:
+    """Claude Code documents ``~/.claude/skills/<name>/SKILL.md`` — uppercase, 38
+    mentions, zero lowercase — and says nothing about case sensitivity.
+
+    rekol shipped ``skill.md`` for months and it worked only because macOS is
+    case-INSENSITIVE, so the two names collide into one file. On Linux they are
+    different files and we would be relying on undocumented case-folding for
+    whether a skill loads at all.
+
+    Asserted against **git's** recorded filename, not the filesystem's: on a
+    case-insensitive checkout ``Path.glob("SKILL.md")`` happily matches a file
+    recorded as ``skill.md``, so a filesystem-based check cannot fail here and
+    would be exactly the kind of test that passes for the wrong reason.
+    """
+    import subprocess
+
+    listed = subprocess.run(  # noqa: S603,S607 — fixed argv, no shell
+        ["git", "ls-files", "skill/"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    md = [p for p in listed if p.endswith(".md")]
+    assert md, "git lists no markdown under skill/ — the check would pass vacuously"
+    wrong = [p for p in md if Path(p).name != "SKILL.md"]
+    assert not wrong, (
+        f"skill files must be named SKILL.md exactly (Claude Code's documented "
+        f"name); git records these differently: {wrong}"
+    )
+
+
+def test_installer_writes_the_documented_skill_filename() -> None:
+    """install.sh must write SKILL.md too — renaming the repo files while the
+    installer still wrote skill.md would fix nothing on a case-sensitive host."""
+    install_sh = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "skill/${skill_name}/SKILL.md" in install_sh, "installer reads the wrong source name"
+    assert "${skill_dst_dir}/SKILL.md" in install_sh, "installer writes the wrong destination name"
