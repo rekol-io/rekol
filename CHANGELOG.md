@@ -5,6 +5,35 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The bats install suite could still destroy the real curated index — and this is how it
+  actually happened on 2026-08-18.** `setup_file()` writes `embedding_model: test-hashing` and
+  runs a REAL `install.sh`, which runs `rekol index rebuild`. `REKOL_INDEX_DIR` is resolution
+  order #1 and is used verbatim, so inherited from a developer shell it pointed that rebuild at
+  the **live** cache. **Running the install test suite was the thing that replaced a user's
+  curated index with test vectors.**
+  The v0.5.6 "hermetic bats" fix added the unsets to `setup()` only — but `setup_file()` runs
+  FIRST and is the function that performs the destructive work, so the fix protected everything
+  except the dangerous part. `setup_file()` is now hermetic too.
+  Found because the v0.5.8 library guard **refused the write in production** when the suite was
+  re-run — a harness-level guard could not have caught this, since the harness was the thing
+  doing it.
+
+- **rekol shipped `skill.md`; Claude Code documents `SKILL.md` (#177).** The docs specify
+  `~/.claude/skills/<name>/SKILL.md` — 38 mentions, zero lowercase — and say nothing about
+  case sensitivity. rekol wrote `skill.md`, which worked **only because macOS is
+  case-INSENSITIVE**, so the two names collide into one file. On Linux they are different
+  files, and whether a skill loads at all was resting on undocumented case-folding.
+  The four shipped skills are renamed, and `install.sh` now reads and writes `SKILL.md`.
+  Renaming the repo files while the installer still wrote the old name would have fixed
+  nothing on a case-sensitive host, so a test asserts the installer too. A stale lowercase
+  copy from an older install is removed, guarded with `-ef` so on a case-insensitive host we
+  do not delete our own destination.
+  **The guard asserts against git's recorded filename, not the filesystem's.** On a
+  case-insensitive checkout `Path.glob("SKILL.md")` happily matches a file git records as
+  `skill.md`, so a filesystem check literally cannot fail on the machine most likely to run
+  it — it would pass for the wrong reason. Verified to fail against `main`.
+
 ### Added
 - **The library now refuses to replace a real index with test-built data.** On 2026-08-18 a
   `rekol index rebuild` running the **test embedder** replaced a live user's curated index;

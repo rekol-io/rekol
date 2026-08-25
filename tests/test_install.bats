@@ -18,6 +18,18 @@
 # instead of reinstalling. Per-test HOME/REKOL_HOME/XDG_* stay isolated; only the
 # immutable venv is shared.
 setup_file() {
+    # HERMETIC, and it must be here as well as in setup(): setup_file runs FIRST,
+    # so the unset in setup() cannot protect it. This function performs a REAL
+    # install — including `rekol index rebuild` with `embedding_model:
+    # test-hashing` — and REKOL_INDEX_DIR is resolution order #1, used verbatim.
+    # Inherited from a developer shell it points at the LIVE cache, so this
+    # rebuilt the user's real curated index with test vectors. That is what
+    # happened on 2026-08-18: search over curated memory returned nothing for two
+    # days. The #183 fix added these unsets to setup() only and therefore missed
+    # the one function that does the destructive work.
+    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
+    unset MEMORY_TOOLS_HOME MEMORY_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+
     SHARED_TOOLS="${BATS_FILE_TMPDIR}/shared-tools"
     export SHARED_TOOLS
     local cdir seed
