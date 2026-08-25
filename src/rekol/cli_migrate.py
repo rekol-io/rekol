@@ -41,15 +41,24 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
         if not quiet or report.would_migrate:
             click.echo(
                 f"{label}: would migrate {report.would_migrate} "
-                f"(heuristic={report.by_heuristic}, llm={report.by_llm})"
+                f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
+                f"defaulted={report.by_defaulted})"
             )
     else:
         if not quiet or report.migrated:
             click.echo(
                 f"{label}: migrated {report.migrated} "
                 f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
-                f"archived={report.archived})"
+                f"defaulted={report.by_defaulted}, archived={report.archived})"
             )
+    if report.by_defaulted:
+        click.echo(
+            f"{label}: ⚠ {report.by_defaulted} file(s) could not be classified and were "
+            f"placed in knowledge/ with a stub description — they are searchable but "
+            f"poorly described. Re-run `rekol migrate auto --commit` with the LLM "
+            f"available to classify them properly.",
+            err=True,
+        )
     if report.skipped_retired:
         click.echo(f"{label}: skipped — already retired")
     if report.skipped_missing:
@@ -106,6 +115,11 @@ def _add_mode_flags(cmd):
 @click.option("--quiet", is_flag=True, default=False, help="Suppress per-file output.")
 def auto(dry_run: bool, no_llm: bool, quiet: bool) -> None:
     """Scan ~/.claude/projects/*/memory/ and migrate each unmigrated dir."""
+    # Exit non-zero when anything failed (#166). install.sh runs this inside
+    # `if ... ; then log_journal "MIGRATED legacy memory (auto)"`, so a silent
+    # zero exit made the durable install record claim success over a migration
+    # in which every single file failed.
+    any_errors = False
     memory_home = _memory_home()
     slug_dirs = discover_auto_memory_sources()
     if not slug_dirs:
@@ -122,6 +136,10 @@ def auto(dry_run: bool, no_llm: bool, quiet: bool) -> None:
             allow_llm=not no_llm,
         )
         _print_report(report, label, dry_run, quiet)
+        if report.errors:
+            any_errors = True
+    if any_errors:
+        sys.exit(1)
 
 
 @main.command()
@@ -159,3 +177,5 @@ def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool) -> None:
         allow_llm=not no_llm,
     )
     _print_report(report, target.name, dry_run, quiet)
+    if report.errors:
+        sys.exit(1)

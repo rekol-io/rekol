@@ -131,7 +131,7 @@ def test_classify_file_defaults_to_knowledge_when_llm_disabled(tmp_path: Path) -
     lf = _mk_file(tmp_path, "x.md", "# just body")
     c = classify_file(lf, index_context="", allow_llm=False)
     assert c.layer == "knowledge"
-    assert c.method == "heuristic"
+    assert c.method == "defaulted"
     assert c.frontmatter["type"] == "knowledge"
 
 
@@ -143,7 +143,7 @@ def test_classify_file_defaults_to_knowledge_when_llm_unavailable(tmp_path: Path
     ):
         c = classify_file(lf, index_context="", allow_llm=True)
     assert c.layer == "knowledge"
-    assert c.method == "heuristic"
+    assert c.method == "defaulted"
 
 
 def test_build_classifier_prompt_contains_required_keys() -> None:

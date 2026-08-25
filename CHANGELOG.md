@@ -6,6 +6,36 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`rekol migrate` could abandon legacy memory permanently and report success (#166).** Four
+  things conspired, and the install path hits all of them:
+  - **The LLM failure was swallowed.** `except LLMUnavailable: pass` — nothing recorded, nothing
+    printed. A run where the LLM was unavailable for *every* file produced a full set of stub
+    classifications in silence.
+  - **The fallback was tallied as a success.** The knowledge default carried `method="heuristic"`,
+    so a total classification failure printed as `migrated 87 (heuristic=87, llm=0)` —
+    indistinguishable from a real frontmatter-driven migration. It is now `method="defaulted"` and
+    counted separately: a stub is not a classification.
+  - **The tombstone was written even when everything failed.** `len(report.errors) > 0` counted as
+    progress, so a run in which every file failed still marked the source directory retired — and
+    a re-run then prints `skipped — already retired` and refuses to try. The files sit
+    un-migrated in their original directory and rekol never looks again. Retirement now requires
+    *genuine* progress. A repeated retry is visible and recoverable; an unnoticed tombstone is
+    neither.
+  - **The documented remedy could not work.** Both automated callers pass `--no-llm`, so the
+    advice to *"re-run `rekol migrate auto --commit`"* was a guaranteed no-op once the first pass
+    had written the tombstone.
+  Plus: the command now **exits non-zero when any file failed**. `install.sh` runs it inside
+  `if … ; then log_journal "MIGRATED legacy memory (auto)"`, so a silent zero exit made the
+  durable install record claim success over a migration in which nothing worked.
+  `DEFAULT_MODEL` is now overridable via `REKOL_MIGRATE_MODEL`. Hardcoding a model id is a time
+  bomb: the day it is retired, every file silently falls back to a stub classification, for
+  everyone, at once.
+  **No data was ever deleted** — `archive_file()` moves originals into `old-memory-archive/`
+  rather than removing them, and every failure path leaves the file on disk. This was silent
+  *abandonment* reported as success, not destruction.
+  An existing test asserted the buggy behaviour (`test_migrate_dir_marks_retired_even_when_all_files_fail`),
+  deliberately, to stop a broken corpus being retried forever. That trade was wrong and the test
+  is now inverted, with the reasoning recorded in it.
 - **CI went red on `main` with no code change, blocking every PR.** `pyproject.toml` pinned
   `mypy>=1.11` with **no upper bound**, so CI installed a newly-released mypy that added checks
   and flagged two pre-existing imprecisions — in files nobody had touched. `main` itself failed,

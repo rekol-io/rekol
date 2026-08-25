@@ -120,10 +120,18 @@ def test_migrate_dir_missing_source_is_empty_report(tmp_path: Path) -> None:
     assert report.skipped_missing == 1
 
 
-def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> None:
-    """Stuck-state regression: when every file in source_dir fails classification,
-    the migration marker must still be written so subsequent runs skip cleanly
-    instead of looping forever on the same broken corpus.
+def test_migrate_dir_does_NOT_retire_when_every_file_fails(tmp_path: Path) -> None:
+    """A totally-failed migration must NOT be marked retired (#166).
+
+    This test previously asserted the OPPOSITE — the marker was written even when
+    every file failed, to stop a broken corpus being retried on every install. That
+    trade was wrong: the tombstone makes a re-run print "skipped — already retired",
+    so the files sit un-migrated in their original directory and rekol never looks
+    at them again. **The user's legacy memory is abandoned, and the run reports
+    success.** The documented remedy (re-run `rekol migrate auto --commit`) is a
+    guaranteed no-op once the tombstone exists.
+
+    A repeated retry is visible and recoverable; an unnoticed tombstone is neither.
     """
     memory_home = tmp_path / "MEMORY_HOME"
     for layer in ("always", "when", "topics", "knowledge"):
@@ -161,8 +169,12 @@ def test_migrate_dir_marks_retired_even_when_all_files_fail(tmp_path: Path) -> N
 
     assert report.migrated == 0
     assert len(report.errors) == 2
-    # Marker must still be written so re-runs skip
-    assert (src / MIGRATION_MARKER_NAME).is_file()
+    # The dir must remain un-retired so a later run (with the LLM available, or
+    # after the corpus is fixed) can actually migrate it.
+    assert not (src / MIGRATION_MARKER_NAME).exists(), (
+        "a run in which every file failed must not tombstone the source dir — "
+        "that abandons the user's memory while reporting success"
+    )
 
 
 def test_migrate_dir_dedupes_byte_identical_bodies(tmp_path: Path) -> None:
@@ -198,3 +210,84 @@ def test_migrate_dir_dedupes_byte_identical_bodies(tmp_path: Path) -> None:
     # Both originals are archived (rescue path preserved)
     assert (src_a / "old-memory-archive" / "feedback_x.md").is_file()
     assert (src_b / "old-memory-archive" / "feedback_x.md").is_file()
+
+
+# --------------------------------- #166 --------------------------------------
+
+
+def test_llm_failure_is_recorded_not_swallowed(tmp_path: Path) -> None:
+    """An unavailable LLM must appear in the report, not vanish.
+
+    `except LLMUnavailable: pass` meant a run where the LLM was down for every
+    file produced a full set of stub classifications with NOTHING printed and
+    nothing in report.errors — printed as `migrated N (heuristic=N, llm=0)`,
+    indistinguishable from a real frontmatter-driven success.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "note.md").write_text("no frontmatter here, just a body\n")
+
+    from rekol.migrate import classify as classify_mod
+
+    def unavailable(*args: object, **kwargs: object) -> dict:
+        raise classify_mod.LLMUnavailable("claude CLI not on PATH")
+
+    original = classify_mod.call_claude_classifier
+    classify_mod.call_claude_classifier = unavailable  # type: ignore[assignment]
+    try:
+        report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=True)
+    finally:
+        classify_mod.call_claude_classifier = original  # type: ignore[assignment]
+
+    assert report.migrated == 1
+    # Counted as defaulted, NOT as a heuristic success.
+    assert report.by_defaulted == 1
+    assert report.by_heuristic == 0
+    # And the reason is recorded rather than swallowed.
+    assert any("LLM classification unavailable" in e for e in report.errors), report.errors
+
+
+def test_defaulted_files_do_not_count_as_heuristic(tmp_path: Path) -> None:
+    """`--no-llm` defaults are still defaults — the tally must say so.
+
+    install.sh and cli_init both pass --no-llm, so this is the DEFAULT install
+    path: every unclassifiable file lands in knowledge/ with a stub description.
+    Reporting those as `heuristic=N` hid how much of a migration was guesswork.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "a.md").write_text("plain body, nothing to classify on\n")
+
+    report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False)
+
+    assert report.migrated == 1
+    assert report.by_defaulted == 1
+    assert report.by_heuristic == 0
+
+
+def test_a_partially_successful_run_still_retires(tmp_path: Path) -> None:
+    """Dropping `len(errors) > 0` from `progressed` must not stop legitimate retirement.
+
+    The fix must narrow the tombstone to genuine progress, not remove it: a run
+    that migrated something has done real work and should not be repeated.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "ok.md").write_text("a body that migrates fine\n")
+
+    report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False)
+
+    assert report.migrated == 1
+    assert (src / MIGRATION_MARKER_NAME).is_file()

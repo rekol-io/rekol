@@ -51,8 +51,16 @@ class Classification:
     target_filename: str
     frontmatter: dict
     body: str
-    method: Literal["heuristic", "llm"]
+    # "defaulted" is NOT a synonym for "heuristic" (#166). A heuristic result means
+    # the file's own frontmatter told us where it goes; a defaulted one means we
+    # learned nothing and dumped it in knowledge/ with a stub description. Sharing
+    # one label made a total classification failure print as
+    # `migrated 87 (heuristic=87, llm=0)` — indistinguishable from success.
+    method: Literal["heuristic", "llm", "defaulted"]
     original_type: str | None = None
+    # Why we fell back, when we did. The caller records this in the migration
+    # report; swallowing it is what made the failure invisible.
+    fallback_reason: str | None = None
 
 
 def target_filename_for(lf: LegacyFile, *, layer: Layer) -> str:
@@ -143,6 +151,7 @@ def classify_file(
     allow_llm: bool,
 ) -> Classification:
     """Orchestrate: heuristic first, LLM fallback, knowledge default."""
+    fallback_reason: str | None = None
     heur = heuristic_classify(lf)
     if heur is not None:
         return heur
@@ -186,8 +195,11 @@ def classify_file(
                 body=stripped_body,
                 method="llm",
             )
-        except LLMUnavailable:
-            pass  # fall through to knowledge default
+        except LLMUnavailable as exc:
+            # Record WHY. This used to be a bare `pass`, so an LLM that was
+            # unavailable for every file produced a full run of stub
+            # classifications with nothing printed and nothing in the report.
+            fallback_reason = f"LLM classification unavailable: {exc}"
 
     # Default: knowledge layer, preserve body as-is.
     today = dt.date.today().isoformat()
@@ -205,7 +217,8 @@ def classify_file(
             "updated": today,
         },
         body=_strip_frontmatter(body),
-        method="heuristic",
+        method="defaulted",
+        fallback_reason=fallback_reason,
     )
 
 

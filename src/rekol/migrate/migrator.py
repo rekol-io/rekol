@@ -38,6 +38,10 @@ class MigrationReport:
     would_migrate: int = 0  # dry-run only
     by_heuristic: int = 0
     by_llm: int = 0
+    # Counted separately from by_heuristic (#166): a defaulted file is one we
+    # learned nothing about, not one we classified. Folding it into by_heuristic
+    # is what let a total failure print as a successful migration.
+    by_defaulted: int = 0
     archived: int = 0
     skipped_retired: int = 0
     skipped_missing: int = 0
@@ -175,6 +179,10 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             report.would_migrate += 1
             if c.method == "heuristic":
                 report.by_heuristic += 1
+            elif c.method == "defaulted":
+                report.by_defaulted += 1
+                if c.fallback_reason:
+                    report.errors.append(f"{lf.source_path}: {c.fallback_reason}")
             else:
                 report.by_llm += 1
             seen_hashes.add(body_hash)
@@ -189,6 +197,10 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             report.archived += 1
             if c.method == "heuristic":
                 report.by_heuristic += 1
+            elif c.method == "defaulted":
+                report.by_defaulted += 1
+                if c.fallback_reason:
+                    report.errors.append(f"{lf.source_path}: {c.fallback_reason}")
             else:
                 report.by_llm += 1
         except Exception as exc:  # noqa: BLE001
@@ -203,7 +215,17 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # surfaced in the install output.  The dir is NOT marked when zero files
     # were even attempted (handled by the earlier early-return when files == [])
     # or when dry-running.
-    progressed = report.migrated > 0 or report.skipped_duplicate > 0 or len(report.errors) > 0
+    # Tombstone ONLY on genuine progress (#166). `len(report.errors) > 0` used to
+    # count as progress, so a run where EVERY file failed still marked the source
+    # dir retired — and a re-run then prints "skipped — already retired" and
+    # refuses to try again. The files stay on disk, un-migrated, and rekol never
+    # looks at them, which is permanent abandonment reported as success.
+    #
+    # The original worry (a dir whose every file fails is retried on every install,
+    # accumulating identical errors forever) is real but strictly less bad than
+    # silently abandoning the user's memory: a repeated attempt is visible and
+    # recoverable, an unnoticed tombstone is neither.
+    progressed = report.migrated > 0 or report.skipped_duplicate > 0
     if not dry_run and progressed:
         write_retirement_pointer(source_dir, memory_home=memory_home)
 
