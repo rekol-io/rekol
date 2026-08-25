@@ -32,7 +32,14 @@ import click
 from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
-from rekol.indexer import _iter_memory_files, _skip_reason, is_non_memory, iter_all_markdown
+from rekol.indexer import (
+    NON_MEMORY_DIRS_DISPLAY,
+    NON_MEMORY_FILES,
+    _iter_memory_files,
+    _skip_reason,
+    is_non_memory,
+    iter_all_markdown,
+)
 from rekol.model import ValidationError, parse_file
 from rekol.onboarding.detect import default_cloud_sync_candidates
 from rekol.sessions.store import SessionStore
@@ -341,7 +348,11 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
 
     # Always state the excluded count. Silence about them is what let "52/52"
     # read as complete coverage when it was not.
-    suffix = f"; {len(excluded)} deliberately excluded (tasks/, MEMORY.md)" if excluded else ""
+    # Name the real list rather than a hardcoded prose copy of it: the previous
+    # literal said "(tasks/, MEMORY.md)" and silently went stale when REKOL.md was
+    # added, which is how a wrong exclusion list stayed invisible in the output.
+    excluded_names = ", ".join([*NON_MEMORY_DIRS_DISPLAY, *NON_MEMORY_FILES])
+    suffix = f"; {len(excluded)} deliberately excluded ({excluded_names})" if excluded else ""
     # The verdict must consider the NUMERATOR too. #158 fixed the denominator
     # (disk truth, not the indexer's walk) but left OK/PROBLEM keyed on `rejected`
     # alone — so `1/6 curated files indexed (none rejected)` printed a green tick

@@ -6,6 +6,35 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Every new user's first `doctor` reported `DEGRADED` and exited 1.** Found by QA on a
+  **pristine** v0.5.3 install: `curated coverage: 5/6 — 1 invisible to search: REKOL.md`, with
+  the remedy *"fix the frontmatter"* — for a file the user did not write, which would not help,
+  because `REKOL.md` is outside the indexer's scope **by design**.
+  rekol ships `REKOL.md`, seeds it from its own installer, and injects it verbatim into every
+  session via the SessionStart hook — so it is already maximally available and indexing it would
+  be redundant. It simply was not on the exclusion list: `NON_MEMORY_FILES = ("MEMORY.md",)`.
+  The cause was a **half-finished rename** — `MEMORY.md` → `REKOL.md` moved the template and the
+  hook and left the exclusion tuple behind. Same shape as #177, where the repo files were renamed
+  while the installer kept writing the old name.
+  This mattered more than a cosmetic red tick: #157/#158 had *just* made `doctor` trustworthy
+  after it audited the index against itself. A checker that is red out of the box for a
+  non-problem trains users to ignore it and buries a genuinely skipped file in permanent baseline
+  noise — undoing the fix rather than polishing it. It also broke anything gating on `doctor`'s
+  exit code (CI, QA's harness, our own post-install check).
+  `doctor`'s "deliberately excluded (…)" line is now **generated from the exclusion list** rather
+  than restating it in prose — the old hardcoded `(tasks/, MEMORY.md)` would have gone stale
+  silently, which is precisely what that line exists to prevent.
+
+### Changed
+- **The #170 hook-execution test now asserts its own precondition.** It runs every installed hook
+  with `rekol` off the PATH, but never checked that `rekol` was actually unreachable — so on a
+  host where it resolved anyway, the test would pass while proving nothing. Credit to QA, who hit
+  the mirror image: their probe used `bash -lc`, a **login** shell, which sources the rc files the
+  installer edits and re-adds `BIN_DIR` to PATH — testing the exact opposite of the #159 condition
+  and passing for the wrong reason. They caught it only because they asserted the precondition
+  explicitly; that habit is the general answer to this bug class, not a patch for one instance.
+
+### Fixed
 - **The bats install suite could still destroy the real curated index — and this is how it
   actually happened on 2026-08-18.** `setup_file()` writes `embedding_model: test-hashing` and
   runs a REAL `install.sh`, which runs `rekol index rebuild`. `REKOL_INDEX_DIR` is resolution
