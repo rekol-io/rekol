@@ -1703,10 +1703,18 @@ elif [[ "${DO_MIGRATE}" != "1" ]]; then
   say "skipping legacy migration (pass --migrate to import ~/.claude/projects/*/memory/ content)"
 else
   # Use the just-installed unified rekol CLI; idempotent, silent on no-op.
+  # `set -euo pipefail` is in effect (line 24), so this `if` sees REKOL's exit
+  # status and not sed's — which is what makes #166's new non-zero exit reach the
+  # journal below. Verified, not assumed: without pipefail the same construct
+  # takes the `then` branch on failure.
   if "${TOOLS_HOME}/.venv/bin/rekol" migrate auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
     log_journal "MIGRATED legacy memory (auto)"
   else
-    say "rekol migrate auto failed (non-fatal)"
+    say "rekol migrate auto reported failures (non-fatal) — some legacy files were not"
+    say "  classified; see the errors above. Your files are NOT deleted: originals stay in"
+    say "  place or move to old-memory-archive/, and the source dir is left un-retired so a"
+    say "  later 'rekol migrate auto --commit' can retry it."
+    log_journal "MIGRATE-FAILED legacy memory (auto) — see errors above"
   fi
 fi
 
