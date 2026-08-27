@@ -713,3 +713,48 @@ def test_doctor_flags_unindexed_transcripts_but_not_an_empty_source(tmp_path, mo
     assert idx.status is Status.PROBLEM, idx.detail
     assert "unsearchable" in idx.detail
     assert not report.is_healthy
+
+
+# --------------------------- fresh-install DEGRADED ---------------------------
+
+
+def test_shipped_index_files_are_excluded_from_coverage() -> None:
+    """rekol's own shipped pointer files must not count as 'invisible to search'.
+
+    QA found a **pristine** install reporting `index is DEGRADED` and exiting 1,
+    because `REKOL.md` — which rekol ships, seeds from its own installer, and
+    deliberately keeps outside the indexer's scope — was missing from the
+    exclusion list. Every new user's first `doctor` was red on day zero, with a
+    remedy ("fix the frontmatter") that could not work.
+
+    A checker that is red out of the box for a non-problem trains people to
+    ignore it, which buries the real signal it exists to surface.
+    """
+    from pathlib import Path
+
+    from rekol.indexer import NON_MEMORY_FILES, is_non_memory
+
+    root = Path("/tmp/does-not-need-to-exist")
+    assert "REKOL.md" in NON_MEMORY_FILES
+    assert is_non_memory(root / "REKOL.md", root)
+    assert is_non_memory(root / "MEMORY.md", root)
+    # ...and ordinary memory files are still counted.
+    assert not is_non_memory(root / "when" / "when-foo.md", root)
+
+
+def test_doctor_excluded_line_is_generated_from_the_real_list() -> None:
+    """The printed line must derive from the exclusion list, not restate it.
+
+    It previously hardcoded "(tasks/, MEMORY.md)". When REKOL.md was added the
+    prose would have gone stale silently — a wrong exclusion list is exactly the
+    thing this line exists to make visible.
+    """
+    import inspect
+
+    from rekol import cli_doctor
+
+    source = inspect.getsource(cli_doctor)
+    assert "deliberately excluded ({excluded_names})" in source, (
+        "doctor's excluded-files line must be generated from NON_MEMORY_*, "
+        "not hardcoded prose that can drift from the real list"
+    )

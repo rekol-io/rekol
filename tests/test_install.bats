@@ -1140,6 +1140,19 @@ JSON
   # A non-interactive PATH: no BIN_DIR, no venv bin. This is the #159 condition.
   HOOK_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
+  # ASSERT THE PRECONDITION (QA, 2026-08-24). This test is only meaningful if
+  # `rekol` is genuinely unreachable on HOOK_PATH — otherwise every hook resolves
+  # the bare name and the test passes while proving nothing. QA hit the same trap
+  # from the other side: their probe used `bash -lc`, a LOGIN shell, which sources
+  # the rc files the installer edits and re-adds BIN_DIR to PATH — testing the
+  # exact opposite of the #159 condition and passing for the wrong reason. They
+  # caught it only because they asserted the precondition explicitly.
+  if env -i PATH="$HOOK_PATH" /bin/bash -c 'command -v rekol' >/dev/null 2>&1; then
+    echo "PRECONDITION FAILED: rekol resolves on HOOK_PATH ($HOOK_PATH)"
+    echo "  this test would pass for the wrong reason — it must run with rekol OFF the PATH"
+    false
+  fi
+
   # The environment comes from settings.json's own `env` block — the only channel
   # that reaches a hook subshell (install.sh Step 7.5 documents this). Reading it
   # from the file the installer just wrote means a variable the installer FAILS to

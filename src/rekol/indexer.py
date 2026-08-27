@@ -48,7 +48,23 @@ PROJECTS_DIR = "projects"
 # indexing it would report a permanent rejection for a file that is working
 # exactly as intended.
 NON_MEMORY_DIRS = ("tasks",)
-NON_MEMORY_FILES = ("MEMORY.md",)
+# REKOL.md is here for the same reason MEMORY.md is: rekol SHIPS it
+# (src/rekol/template/REKOL.md), seeds it from its own installer, and the
+# SessionStart hook injects it verbatim into every session — so it is already
+# maximally available and indexing it would be redundant.
+#
+# It was missing, and the consequence was that **every new user's first `doctor`
+# reported DEGRADED and exited 1** over a file they did not write, with a remedy
+# ("fix the frontmatter") that could not work because the file is out of the
+# indexer's scope by design. Reported by QA on a pristine v0.5.3 install.
+#
+# The cause was a half-finished rename: MEMORY.md -> REKOL.md moved the template
+# and the hook, and left this tuple behind — the same shape as #177, where the
+# repo files were renamed while the installer kept writing the old name.
+NON_MEMORY_FILES = ("MEMORY.md", "REKOL.md")
+# Display form for `doctor`'s "deliberately excluded (...)" line, so that line is
+# generated FROM the exclusion list instead of restating it in prose that drifts.
+NON_MEMORY_DIRS_DISPLAY = tuple(f"{d}/" for d in NON_MEMORY_DIRS)
 
 
 def iter_all_markdown(root: Path) -> Iterable[Path]:
