@@ -54,15 +54,19 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
     if report.by_defaulted:
         click.echo(
             f"{label}: ⚠ {report.by_defaulted} file(s) could not be classified and were "
-            f"placed in knowledge/ with a stub description — they are searchable but "
-            f"poorly described. Re-run `rekol migrate auto --commit` with the LLM "
-            f"available to classify them properly.",
+            f"placed in knowledge/ with a stub description. The content is imported and "
+            f"searchable, but poorly described. NOTE: re-running `migrate auto` will NOT "
+            f"reclassify them — this directory is retired once import completes, by design. "
+            f"The originals are in old-memory-archive/; edit the frontmatter in "
+            f"knowledge/ directly to improve them.",
             err=True,
         )
     if report.skipped_retired:
         click.echo(f"{label}: skipped — already retired")
     if report.skipped_missing:
         click.echo(f"{label}: skipped — source dir missing")
+    for warn in report.warnings:
+        click.echo(f"{label}: note {warn}", err=True)
     for err in report.errors:
         click.echo(f"{label}: ERROR {err}", err=True)
 

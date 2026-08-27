@@ -1710,10 +1710,10 @@ else
   if "${TOOLS_HOME}/.venv/bin/rekol" migrate auto --commit --no-llm --quiet 2>&1 | sed 's/^/  /'; then
     log_journal "MIGRATED legacy memory (auto)"
   else
-    say "rekol migrate auto reported failures (non-fatal) — some legacy files were not"
-    say "  classified; see the errors above. Your files are NOT deleted: originals stay in"
-    say "  place or move to old-memory-archive/, and the source dir is left un-retired so a"
-    say "  later 'rekol migrate auto --commit' can retry it."
+    say "rekol migrate auto reported failures (non-fatal) — some legacy files could not be"
+    say "  imported; see the errors above. Your files are NOT deleted: originals stay in"
+    say "  place or move to old-memory-archive/. A directory containing an unimported file"
+    say "  is NOT retired, so 'rekol migrate auto --commit' will retry exactly those files."
     log_journal "MIGRATE-FAILED legacy memory (auto) — see errors above"
   fi
 fi

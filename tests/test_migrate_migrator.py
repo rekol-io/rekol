@@ -247,8 +247,12 @@ def test_llm_failure_is_recorded_not_swallowed(tmp_path: Path) -> None:
     # Counted as defaulted, NOT as a heuristic success.
     assert report.by_defaulted == 1
     assert report.by_heuristic == 0
-    # And the reason is recorded rather than swallowed.
-    assert any("LLM classification unavailable" in e for e in report.errors), report.errors
+    # The reason is recorded rather than swallowed — as a WARNING, not an error.
+    # `errors` means "not imported" and blocks retirement; a defaulted file WAS
+    # imported, so recording it as an error made this path disagree with --no-llm
+    # about whether the directory may be retired, for an identical on-disk result.
+    assert any("LLM classification unavailable" in w for w in report.warnings), report.warnings
+    assert not report.errors, "a defaulted file is imported, not failed"
 
 
 def test_defaulted_files_do_not_count_as_heuristic(tmp_path: Path) -> None:
@@ -273,11 +277,14 @@ def test_defaulted_files_do_not_count_as_heuristic(tmp_path: Path) -> None:
     assert report.by_heuristic == 0
 
 
-def test_a_partially_successful_run_still_retires(tmp_path: Path) -> None:
-    """Dropping `len(errors) > 0` from `progressed` must not stop legitimate retirement.
+def test_ordinary_success_retires(tmp_path: Path) -> None:
+    """Narrowing the tombstone must not remove it: a clean run still retires.
 
-    The fix must narrow the tombstone to genuine progress, not remove it: a run
-    that migrated something has done real work and should not be repeated.
+    Renamed from `test_a_partially_successful_run_still_retires`, which was a
+    VACUOUS test — it created one file, let it succeed, and asserted the marker.
+    There was no partial failure in it at all, so it proved ordinary success
+    retires while its name claimed it proved partial success was safe. Caught in
+    external review; it is the same shape as every bug this file guards against.
     """
     memory_home = tmp_path / "MEMORY_HOME"
     for layer in ("always", "when", "topics", "knowledge"):
@@ -290,4 +297,118 @@ def test_a_partially_successful_run_still_retires(tmp_path: Path) -> None:
     report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False)
 
     assert report.migrated == 1
+    assert not report.errors
     assert (src / MIGRATION_MARKER_NAME).is_file()
+
+
+def test_partial_success_does_NOT_retire(tmp_path: Path) -> None:
+    """ONE failed file must block retirement of the whole directory.
+
+    The real partial-success case, and the one the first fix missed. Removing
+    `len(errors) > 0` from the condition narrowed the bug from "every file
+    failed" to "at least one file succeeded" — with `migrated > 0` alone, one
+    good file tombstones the directory and every failed sibling is abandoned
+    permanently, because the next run prints "skipped — already retired".
+
+    Successful originals have already moved to old-memory-archive/, so leaving
+    the directory unretired means a re-run sees exactly the files that still
+    need work.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "good.md").write_text("this one imports fine\n")
+    (src / "bad.md").write_text("this one will blow up\n")
+
+    from rekol.migrate import classify as classify_mod
+    from rekol.migrate import migrator as migrator_mod
+
+    original = migrator_mod.classify_file
+
+    def selective(lf, **kwargs):  # type: ignore[no-untyped-def]
+        if lf.source_path.name == "bad.md":
+            raise RuntimeError("simulated classification failure")
+        return original(lf, **kwargs)
+
+    classify_mod.classify_file = selective  # type: ignore[assignment]
+    migrator_mod.classify_file = selective  # type: ignore[assignment]
+    try:
+        report = migrate_dir(
+            source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False
+        )
+    finally:
+        classify_mod.classify_file = original  # type: ignore[assignment]
+        migrator_mod.classify_file = original  # type: ignore[assignment]
+
+    assert report.migrated == 1, "the good file should still import"
+    assert len(report.errors) == 1, "the bad file should be recorded"
+    assert not (src / MIGRATION_MARKER_NAME).exists(), (
+        "one unimported file must block retirement of the whole directory — "
+        "otherwise the failed sibling is abandoned permanently"
+    )
+    # The failed original is still where a retry will find it.
+    assert (src / "bad.md").is_file()
+
+
+def test_defaulted_under_no_llm_still_retires_and_exits_zero(tmp_path: Path) -> None:
+    """Policy, asserted explicitly: a defaulted file is IMPORTED, not failed.
+
+    `--no-llm` is what install.sh and cli_init both pass, so this is the default
+    production path. A defaulted file has its body preserved and searchable; it is
+    merely poorly described. Blocking retirement on it would make every ordinary
+    install retry forever.
+
+    This test exists to make that a DECISION rather than an accident — the first
+    fix left the two paths disagreeing: LLM-unavailable recorded an error (exit 1)
+    while --no-llm did not (exit 0), for the same durable outcome.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "plain.md").write_text("nothing to classify on\n")
+
+    report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=False)
+
+    assert report.by_defaulted == 1
+    assert not report.errors, "a defaulted file is an import, not a failure"
+    assert (src / MIGRATION_MARKER_NAME).is_file()
+
+
+def test_llm_unavailable_records_the_reason_but_still_retires(tmp_path: Path) -> None:
+    """The two defaulting paths must reach the SAME durable state.
+
+    LLM-attempted-and-unavailable records why (useful diagnostics), but the file
+    is imported exactly as in the --no-llm case, so retirement must agree. The
+    first fix had these disagree, which is how the production path stayed broken
+    while the tested path looked fixed.
+    """
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "proj" / "memory"
+    src.mkdir(parents=True)
+    (src / "note.md").write_text("no frontmatter here\n")
+
+    from rekol.migrate import classify as classify_mod
+
+    def unavailable(*args: object, **kwargs: object) -> dict:
+        raise classify_mod.LLMUnavailable("claude CLI not on PATH")
+
+    original = classify_mod.call_claude_classifier
+    classify_mod.call_claude_classifier = unavailable  # type: ignore[assignment]
+    try:
+        report = migrate_dir(source_dir=src, memory_home=memory_home, dry_run=False, allow_llm=True)
+    finally:
+        classify_mod.call_claude_classifier = original  # type: ignore[assignment]
+
+    assert report.by_defaulted == 1
+    assert (src / MIGRATION_MARKER_NAME).is_file(), (
+        "must reach the same durable state as the --no-llm path"
+    )

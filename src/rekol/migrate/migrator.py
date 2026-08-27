@@ -47,6 +47,13 @@ class MigrationReport:
     skipped_missing: int = 0
     skipped_duplicate: int = 0  # body-hash matched an already-migrated file
     errors: list[str] = field(default_factory=list)
+    # Diagnostics that are NOT failures. `errors` now means "this file was not
+    # imported" and is what blocks retirement — so an LLM-unavailable note, which
+    # still produced an imported (if poorly described) file, must not live there.
+    # Keeping them in one list made the two defaulting paths disagree about the
+    # durable outcome: --no-llm retired the directory, LLM-unavailable did not,
+    # for identical results on disk.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _body_hash(body: str) -> str:
@@ -182,7 +189,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             elif c.method == "defaulted":
                 report.by_defaulted += 1
                 if c.fallback_reason:
-                    report.errors.append(f"{lf.source_path}: {c.fallback_reason}")
+                    report.warnings.append(f"{lf.source_path}: {c.fallback_reason}")
             else:
                 report.by_llm += 1
             seen_hashes.add(body_hash)
@@ -200,7 +207,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             elif c.method == "defaulted":
                 report.by_defaulted += 1
                 if c.fallback_reason:
-                    report.errors.append(f"{lf.source_path}: {c.fallback_reason}")
+                    report.warnings.append(f"{lf.source_path}: {c.fallback_reason}")
             else:
                 report.by_llm += 1
         except Exception as exc:  # noqa: BLE001
@@ -215,18 +222,36 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # surfaced in the install output.  The dir is NOT marked when zero files
     # were even attempted (handled by the earlier early-return when files == [])
     # or when dry-running.
-    # Tombstone ONLY on genuine progress (#166). `len(report.errors) > 0` used to
-    # count as progress, so a run where EVERY file failed still marked the source
-    # dir retired — and a re-run then prints "skipped — already retired" and
-    # refuses to try again. The files stay on disk, un-migrated, and rekol never
-    # looks at them, which is permanent abandonment reported as success.
+    # RETIREMENT INVARIANT (#166, tightened after external review):
     #
-    # The original worry (a dir whose every file fails is retried on every install,
-    # accumulating identical errors forever) is real but strictly less bad than
-    # silently abandoning the user's memory: a repeated attempt is visible and
-    # recoverable, an unnoticed tombstone is neither.
+    #   A directory may be retired only when EVERY discovered file reached a
+    #   terminal, safe state — imported (by any method) or skipped as a duplicate.
+    #   A single unimported file blocks retirement for the whole directory.
+    #
+    # The first attempt at this fix only removed `len(errors) > 0` from the
+    # condition, which narrowed the bug from "every file failed" to "at least one
+    # file succeeded" — it did not fix it. With `migrated > 0` alone, one good file
+    # tombstones the directory and every failed sibling is abandoned permanently,
+    # because the next run prints "skipped — already retired" and never retries.
+    #
+    # Successful originals have already been MOVED to old-memory-archive/, so
+    # leaving a mixed-outcome directory unretired means the next run naturally sees
+    # only the files that still need work. Re-running is cheap and visible; an
+    # unnoticed tombstone is neither.
+    #
+    # Defaulted files (no frontmatter to go on, and either no LLM or an unavailable
+    # one) are treated as IMPORTED, not failed: the body is preserved and
+    # searchable, it is merely poorly described. They do not block retirement —
+    # blocking on them would mean every `--no-llm` install (the default path)
+    # retries forever. What they must NOT do is carry a promise we cannot keep;
+    # see the CLI warning, which no longer advertises a reclassification that has
+    # no command behind it.
+    # `errors` means UNIMPORTED. Diagnostics about imported-but-poorly-described
+    # files live in `warnings` and deliberately do not block retirement.
+    unimported = len(report.errors) > 0
     progressed = report.migrated > 0 or report.skipped_duplicate > 0
-    if not dry_run and progressed:
+    retirable = progressed and not unimported
+    if not dry_run and retirable:
         write_retirement_pointer(source_dir, memory_home=memory_home)
 
     return report
