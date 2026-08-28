@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rekol"
-version = "0.5.10"
+version = "0.5.11"
 description = "Layered, cross-indexed memory system with local vector search for Claude Code"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -31,7 +31,11 @@ dev = [
     # code and failed `ruff format --check` on every PR. Bump deliberately in its
     # own PR when adopting a new formatting.
     "ruff>=0.15.15,<0.16",
-    "mypy>=1.11",
+    # Upper bound deliberately: `mypy>=1.11` unbounded meant a new mypy release
+    # turned main RED with no code change, blocking every PR. Type checkers add
+    # checks in minor releases; that is a toolchain upgrade we should take
+    # explicitly, not one that arrives while we sleep.
+    "mypy>=1.11,<2.2",
     "pre-commit>=3.8",
     "types-PyYAML",
     "pytest>=8",

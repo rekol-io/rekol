@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -37,7 +38,10 @@ def _state_path(session_id: str) -> Path:
 def _read_payload() -> dict:
     """Read and parse the hook JSON payload from stdin; return {} on any error."""
     try:
-        raw = click.get_text_stream("stdin").read()
+        # `sys.stdin` rather than `click.get_text_stream("stdin")`: newer mypy
+        # resolves click's lazy stream helper to `object`, which is not callable,
+        # and this is a hook — it must not be the thing that breaks a session.
+        raw = sys.stdin.read()
         return json.loads(raw) if raw.strip() else {}
     except (ValueError, OSError):
         return {}

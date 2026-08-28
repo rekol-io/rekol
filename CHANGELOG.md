@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **CI went red on `main` with no code change, blocking every PR.** `pyproject.toml` pinned
+  `mypy>=1.11` with **no upper bound**, so CI installed a newly-released mypy that added checks
+  and flagged two pre-existing imprecisions — in files nobody had touched. `main` itself failed,
+  and so did every open PR, for reasons unrelated to their contents.
+  Both flagged lines were real, if minor: `click.get_text_stream("stdin")` resolves to `object`
+  under the newer checker (not callable), and `click.Path` is typed `str | bytes | PathLike`
+  while `_invoke` builds an argv list — where a `bytes` element would fail at *runtime*, not just
+  type-check. Fixed properly rather than silenced with `# type: ignore`.
+  `mypy` is now upper-bounded (`>=1.11,<2.2`). Type checkers add checks in minor releases; that
+  is a toolchain upgrade to take deliberately, not one that arrives overnight and turns the tree
+  red. Verified the affected hook behaves identically before and after — same output with a
+  payload, with no stdin, and exit 0 in both.
+
+### Fixed
 - **Every new user's first `doctor` reported `DEGRADED` and exited 1.** Found by QA on a
   **pristine** v0.5.3 install: `curated coverage: 5/6 — 1 invisible to search: REKOL.md`, with
   the remedy *"fix the frontmatter"* — for a file the user did not write, which would not help,
