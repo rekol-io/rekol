@@ -198,3 +198,72 @@ def test_cli_repo_mixed_outcome_exits_one_and_stays_retryable(tmp_path: Path, mo
 
     assert not (src_parent / "memory" / MIGRATION_MARKER_NAME).exists()
     assert (src_parent / "memory" / "bad.md").is_file(), "failed original must remain retryable"
+
+
+def test_cli_auto_mixed_dirs_exits_one_and_keeps_failures_retryable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`auto` must carry an error ACROSS directories and exit 1 after processing all.
+
+    This is the command the installer actually runs
+    (`rekol migrate auto --commit --no-llm`), and it has aggregation logic that
+    `repo` does not:
+
+        any_errors = False
+        for slug_dir in slug_dirs: ...; if report.errors: any_errors = True
+        if any_errors: sys.exit(1)
+
+    The three `repo` tests cannot prove that. Testing the library while leaving
+    the shipped caller unproven is precisely the pattern that caused this whole
+    review cycle — the original defect was "report correct, installer journals
+    MIGRATED anyway".
+
+    Two discovered directories: one defaults cleanly (retirable), one raises
+    (must stay retryable). Asserts the run is not fail-fast and not
+    order-dependent — the good directory is still processed.
+    """
+    from rekol.migrate.archive import MIGRATION_MARKER_NAME
+
+    home = tmp_path / "home"
+    good = home / ".claude" / "projects" / "-Users-x-good" / "memory"
+    bad = home / ".claude" / "projects" / "-Users-x-bad" / "memory"
+    good.mkdir(parents=True)
+    bad.mkdir(parents=True)
+    (good / "ok.md").write_text("imports fine\n")
+    (bad / "boom.md").write_text("will blow up\n")
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+    # REKOL_HOME is primary and would silently outrank MEMORY_HOME — the exact
+    # precedence that sent a hand-run verification at the real memory home.
+    monkeypatch.delenv("REKOL_HOME", raising=False)
+
+    from rekol.migrate import migrator as migrator_mod
+
+    original = migrator_mod.classify_file
+
+    def selective(lf, **kwargs):  # type: ignore[no-untyped-def]
+        if lf.source_path.name == "boom.md":
+            raise RuntimeError("simulated classification failure")
+        return original(lf, **kwargs)
+
+    monkeypatch.setattr(migrator_mod, "classify_file", selective)
+
+    result = CliRunner().invoke(main, ["auto", "--commit", "--no-llm"])
+
+    assert result.exit_code == 1, result.output
+
+    # The failing directory stays retryable...
+    assert not (bad / MIGRATION_MARKER_NAME).exists(), (
+        "a directory with an unimported file must not be retired"
+    )
+    assert (bad / "boom.md").is_file(), "the failed original must remain for a retry"
+
+    # ...and the healthy one was still processed, so aggregation is not fail-fast.
+    assert (good / MIGRATION_MARKER_NAME).is_file(), (
+        "auto must keep processing after a failure in another directory"
+    )
