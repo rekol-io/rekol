@@ -13,13 +13,17 @@ We use Sonnet by default (good cost/quality tradeoff for classification).  The w
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 from typing import Any
 
 CLAUDE_BIN = "claude"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Overridable (#166). Hardcoding a model id is a time bomb: the day it is retired,
+# `claude -p --model <retired>` exits non-zero -> LLMUnavailable -> every file
+# silently falls back to a stub classification, for everyone, at once.
+DEFAULT_MODEL = os.environ.get("REKOL_MIGRATE_MODEL", "").strip() or "claude-sonnet-4-6"
 DEFAULT_TIMEOUT_SEC = 60
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)

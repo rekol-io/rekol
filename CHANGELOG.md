@@ -6,6 +6,84 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The migration marker told users to delete the only byte-complete copy of their originals.**
+  It said *"archived originals in old-memory-archive/ — safe to delete after 1 week"*, while the
+  same release documents that migration strips unrecognised legacy frontmatter which then exists
+  **only** in that archive. Those two statements cannot ship together: it was a live, destructive
+  instruction the release itself proves false. The marker now says to KEEP the archive unless the
+  migrated copies have been checked, and states plainly that unrecognised keys survive only there.
+  No time-based deletion promise remains, and the module docstring records why one must not be
+  reintroduced without a metadata-preservation contract.
+- **The `--no-llm` exit-code test never invoked the CLI.** It was named `..._exits_zero`, called
+  `migrate_dir` directly, and could not observe an exit code at all — claiming a
+  production-boundary behaviour it did not exercise. That is the same structural failure this
+  release describes elsewhere, committed in the act of fixing it. Renamed to what it actually
+  asserts, and the boundary is now covered by real Click-invoking tests: defaulted `--no-llm`
+  → exit 0 with the marker written; a hard failure → exit 1 with no marker; a mixed run → exit 1,
+  no marker, failed original still retryable. Confirmed to fail against the earlier revision.
+- **Dry-run claimed committed-state facts.** It printed that files "were placed in knowledge/",
+  originals "are in old-memory-archive/", and the directory "is retired" — while writing,
+  archiving and retiring nothing. The wording now branches on dry-run.
+
+- **The first #166 fix narrowed the bug instead of fixing it — caught in external review.**
+  Removing `len(errors) > 0` from the retirement condition left `migrated > 0`, so **one**
+  successful file tombstoned the whole directory and every failed sibling was abandoned
+  permanently. Worse, the `--no-llm` path — which is what `install.sh` and `cli_init` both use,
+  i.e. the actual production path — recorded no error at all, exited **0**, journaled `MIGRATED`,
+  and retired the directory. The tested path was fixed while the shipped one was not.
+  The invariant is now explicit: **a directory may be retired only when every discovered file
+  reached a terminal safe state** — imported (by any method) or skipped as a duplicate. One
+  unimported file blocks retirement for the whole directory, and since successful originals have
+  already moved to `old-memory-archive/`, a re-run naturally sees exactly the files that still
+  need work.
+  `report.errors` now means *unimported*; diagnostics about imported-but-poorly-described files
+  live in `report.warnings` and deliberately do not block retirement. Keeping both in one list is
+  what made the two defaulting paths disagree about the durable outcome for identical results on
+  disk.
+  The CLI no longer advertises a reclassification that has no command behind it (the module
+  docstring documents `redo <file>`; only `auto` and `repo` are implemented — tracked separately).
+  The regression test that was supposed to cover this was **vacuous**: it created one file, let it
+  succeed, and asserted the marker, while its name claimed it proved partial success was safe. It
+  is replaced by a real mixed-outcome test, confirmed to fail against the previous fix.
+
+- **`rekol migrate` could abandon legacy memory permanently and report success (#166).** Four
+  things conspired, and the install path hits all of them:
+  - **The LLM failure was swallowed.** `except LLMUnavailable: pass` — nothing recorded, nothing
+    printed. A run where the LLM was unavailable for *every* file produced a full set of stub
+    classifications in silence.
+  - **The fallback was tallied as a success.** The knowledge default carried `method="heuristic"`,
+    so a total classification failure printed as `migrated 87 (heuristic=87, llm=0)` —
+    indistinguishable from a real frontmatter-driven migration. It is now `method="defaulted"` and
+    counted separately: a stub is not a classification.
+  - **The tombstone was written even when everything failed.** `len(report.errors) > 0` counted as
+    progress, so a run in which every file failed still marked the source directory retired — and
+    a re-run then prints `skipped — already retired` and refuses to try. The files sit
+    un-migrated in their original directory and rekol never looks again. Retirement now requires
+    *genuine* progress. A repeated retry is visible and recoverable; an unnoticed tombstone is
+    neither.
+  - **The documented remedy could not work.** Both automated callers pass `--no-llm`, so the
+    advice to *"re-run `rekol migrate auto --commit`"* was a guaranteed no-op once the first pass
+    had written the tombstone.
+  Plus: the command now **exits non-zero when any file failed**. `install.sh` runs it inside
+  `if … ; then log_journal "MIGRATED legacy memory (auto)"`, so a silent zero exit made the
+  durable install record claim success over a migration in which nothing worked.
+  `DEFAULT_MODEL` is now overridable via `REKOL_MIGRATE_MODEL`. Hardcoding a model id is a time
+  bomb: the day it is retired, every file silently falls back to a stub classification, for
+  everyone, at once.
+  **The message body is never destroyed by migration** — `archive_file()` moves originals into
+  `old-memory-archive/` rather than removing them, and every failure path leaves the file on
+  disk. This was silent *abandonment* reported as success, not destruction of content.
+  **That claim was originally written as the stronger "no data was ever deleted", and external
+  review was right to reject it.** Migration synthesises a new frontmatter whitelist and
+  `_strip_frontmatter` discards the original YAML, so any unrecognised legacy key survives
+  *only* in the archived original — which the migration marker tells the user is "safe to delete
+  after 1 week". Follow that instruction and those fields are gone. The transformation policy may
+  be fine, but the archive is not safely deletable without an explicit metadata-loss contract,
+  and the unconditional claim should not have been used to categorically distinguish this from
+  data loss. Tracked separately.
+  An existing test asserted the buggy behaviour (`test_migrate_dir_marks_retired_even_when_all_files_fail`),
+  deliberately, to stop a broken corpus being retried forever. That trade was wrong and the test
+  is now inverted, with the reasoning recorded in it.
 - **CI went red on `main` with no code change, blocking every PR.** `pyproject.toml` pinned
   `mypy>=1.11` with **no upper bound**, so CI installed a newly-released mypy that added checks
   and flagged two pre-existing imprecisions — in files nobody had touched. `main` itself failed,

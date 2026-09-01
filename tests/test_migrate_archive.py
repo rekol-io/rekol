@@ -96,3 +96,24 @@ def test_legacy_memory_md_retirement_string_still_recognized(tmp_path: Path) -> 
     )
     assert is_retirement_pointer(memory_dir / "MEMORY.md") is True
     assert has_migration_marker(memory_dir) is True
+
+
+def test_marker_never_promises_time_based_deletion(tmp_path: Path) -> None:
+    """Lock the product text that caused the defect.
+
+    The marker used to say "safe to delete after 1 week" while migration strips
+    unrecognised legacy frontmatter that then exists ONLY in that archive —
+    a live instruction to destroy the only complete copy. Cheap to lock, and
+    this is exactly the string that must not drift back.
+    """
+    from rekol.migrate.archive import MIGRATION_MARKER_NAME, write_retirement_pointer
+
+    memory_dir = tmp_path / "legacy" / "memory"
+    memory_dir.mkdir(parents=True)
+    write_retirement_pointer(memory_dir, memory_home=tmp_path / "HOME")
+
+    text = (memory_dir / MIGRATION_MARKER_NAME).read_text()
+    assert "safe to delete" not in text.lower(), "no calendar-based deletion promise"
+    assert "1 week" not in text
+    assert "KEEP" in text, "must tell the user to retain the originals"
+    assert "UNRECOGNISED" in text, "must say why: dropped keys survive only here"
