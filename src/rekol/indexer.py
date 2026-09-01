@@ -13,6 +13,7 @@ from .chunker import chunk_body
 from .config import SKIP_MANIFEST_NAME
 from .embeddings import BaseEmbedder
 from .model import ValidationError, parse_file
+from .safety import assert_not_clobbering_real_index
 from .store import IndexStore
 
 
@@ -302,6 +303,16 @@ class Indexer:
             # holds an open handle/sidecar across the replace, then atomically
             # move the complete temp DB over the live one.
             tmp_store.close()
+            # THE destructive act. The guard lives here, immediately above the
+            # replace, and NOT in the `rekol index rebuild` CLI wrapper where it
+            # started — external review found `cli_search` reaches this same
+            # os.replace through `ensure_curated_schema_current(auto_rebuild=True)`
+            # with no guard at all, so an ordinary `rekol search` against a
+            # legacy index could still replace a real index with test vectors.
+            # Placing it at the wrapper was the same mistake as the bug it fixes:
+            # asserting the invariant where it was convenient rather than where
+            # the destruction happens. Every caller of rebuild() is now covered.
+            assert_not_clobbering_real_index(live_db, self.store.embedding_model)
             self.store.conn.close()
             os.replace(tmp_db, live_db)
             # A concurrent reader (e.g. `rekol search`) holding index.db-wal open

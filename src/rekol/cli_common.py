@@ -8,6 +8,7 @@ from rekol.config import Config
 from rekol.embeddings import BaseEmbedder
 from rekol.index_lock import IndexBusyError, index_lock_path, index_write_lock
 from rekol.indexer import Indexer, IndexStats
+from rekol.safety import RealIndexClobberError
 from rekol.store import IndexModelMismatchError, IndexStore
 
 # The actionable message every read/write path falls back to when it can't
@@ -125,6 +126,14 @@ def ensure_curated_schema_current(
                 err=True,
             )
             indexer.rebuild()
+    except RealIndexClobberError as exc:
+        # The guard fired on the auto-rebuild path. Refusing is correct — but a
+        # SEARCH must not die with a traceback because of it. Report why and
+        # leave the index untouched; the user's data is intact and the message
+        # names the cause (a leaked REKOL_INDEX_DIR, almost always).
+        store.close()
+        click.echo(f"error: {exc}", err=True)
+        raise SystemExit(1) from exc
     except IndexBusyError:
         store.close()
         click.echo(
