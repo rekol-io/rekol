@@ -102,3 +102,99 @@ def test_cli_requires_memory_home(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(main, ["auto", "--commit"])
     assert result.exit_code != 0
     assert "MEMORY_HOME" in result.output
+
+
+# ------------------------------- #166 exit codes ------------------------------
+# These test the CLI BOUNDARY, not the report object. The original defect was
+# "exit 0 -> install.sh journals MIGRATED over a failed migration", so asserting
+# only on `MigrationReport` leaves the thing that actually broke unguarded.
+#
+# The first attempt at this coverage was a test named `..._exits_zero` that
+# called `migrate_dir` directly and never invoked Click — it could not observe an
+# exit code at all, while its name claimed it did. Caught in external review.
+
+
+def _plain_source(tmp_path: Path) -> tuple[Path, Path]:
+    """A source dir whose single file has no frontmatter → defaults to knowledge/."""
+    src_parent = tmp_path / "proj"
+    (src_parent / "memory").mkdir(parents=True)
+    (src_parent / "memory" / "plain.md").write_text("nothing to classify on\n")
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+    return src_parent, memory_home
+
+
+def test_cli_repo_defaulted_no_llm_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """A defaulted file is an IMPORT: exit 0, marker written, warning shown.
+
+    `--no-llm` is what install.sh and cli_init both pass, so this is the default
+    production path. Exit 0 here is deliberate policy, asserted at the boundary
+    the installer actually reads.
+    """
+    src_parent, memory_home = _plain_source(tmp_path)
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+    result = CliRunner().invoke(main, ["repo", str(src_parent / "memory"), "--commit", "--no-llm"])
+    assert result.exit_code == 0, result.output
+    assert "defaulted=1" in result.output
+    assert "could not be classified" in result.output
+    # ...and it must NOT promise a rerun that cannot work.
+    assert "will NOT reclassify" in result.output
+    from rekol.migrate.archive import MIGRATION_MARKER_NAME
+
+    assert (src_parent / "memory" / MIGRATION_MARKER_NAME).is_file()
+
+
+def test_cli_repo_hard_failure_exits_one(tmp_path: Path, monkeypatch) -> None:
+    """An unimported file must make the CLI exit non-zero.
+
+    This is the boundary install.sh reads: `if rekol migrate ... ; then
+    log_journal "MIGRATED"`. A zero exit here is what let the durable install
+    record claim success over a migration in which nothing worked.
+    """
+    src_parent, memory_home = _plain_source(tmp_path)
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+
+    from rekol.migrate import migrator as migrator_mod
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("simulated classification failure")
+
+    monkeypatch.setattr(migrator_mod, "classify_file", boom)
+    result = CliRunner().invoke(main, ["repo", str(src_parent / "memory"), "--commit", "--no-llm"])
+    assert result.exit_code == 1, result.output
+    assert "ERROR" in result.output
+    from rekol.migrate.archive import MIGRATION_MARKER_NAME
+
+    assert not (src_parent / "memory" / MIGRATION_MARKER_NAME).exists(), (
+        "an unimported file must leave the directory retryable"
+    )
+
+
+def test_cli_repo_mixed_outcome_exits_one_and_stays_retryable(tmp_path: Path, monkeypatch) -> None:
+    """Partial success: exit 1, no marker, and the failed original still present."""
+    src_parent = tmp_path / "proj"
+    (src_parent / "memory").mkdir(parents=True)
+    (src_parent / "memory" / "good.md").write_text("imports fine\n")
+    (src_parent / "memory" / "bad.md").write_text("will blow up\n")
+    memory_home = tmp_path / "MEMORY_HOME"
+    for layer in ("always", "when", "topics", "knowledge"):
+        (memory_home / layer).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MEMORY_HOME", str(memory_home))
+
+    from rekol.migrate import migrator as migrator_mod
+
+    original = migrator_mod.classify_file
+
+    def selective(lf, **kwargs):  # type: ignore[no-untyped-def]
+        if lf.source_path.name == "bad.md":
+            raise RuntimeError("simulated classification failure")
+        return original(lf, **kwargs)
+
+    monkeypatch.setattr(migrator_mod, "classify_file", selective)
+    result = CliRunner().invoke(main, ["repo", str(src_parent / "memory"), "--commit", "--no-llm"])
+    assert result.exit_code == 1, result.output
+    from rekol.migrate.archive import MIGRATION_MARKER_NAME
+
+    assert not (src_parent / "memory" / MIGRATION_MARKER_NAME).exists()
+    assert (src_parent / "memory" / "bad.md").is_file(), "failed original must remain retryable"

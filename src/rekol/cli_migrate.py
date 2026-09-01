@@ -51,7 +51,17 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
                 f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
                 f"defaulted={report.by_defaulted}, archived={report.archived})"
             )
-    if report.by_defaulted:
+    if report.by_defaulted and dry_run:
+        # Dry-run writes, archives and retires NOTHING — claiming otherwise is a
+        # user-facing falsehood, and this function is where the original bug
+        # (a stub reported as a successful classification) was visible.
+        click.echo(
+            f"{label}: ⚠ {report.by_defaulted} file(s) could not be classified and WOULD be "
+            f"placed in knowledge/ with a stub description. Nothing was written — this is a "
+            f"dry run; pass --commit to apply.",
+            err=True,
+        )
+    elif report.by_defaulted:
         click.echo(
             f"{label}: ⚠ {report.by_defaulted} file(s) could not be classified and were "
             f"placed in knowledge/ with a stub description. The content is imported and "

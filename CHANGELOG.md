@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The migration marker told users to delete the only byte-complete copy of their originals.**
+  It said *"archived originals in old-memory-archive/ — safe to delete after 1 week"*, while the
+  same release documents that migration strips unrecognised legacy frontmatter which then exists
+  **only** in that archive. Those two statements cannot ship together: it was a live, destructive
+  instruction the release itself proves false. The marker now says to KEEP the archive unless the
+  migrated copies have been checked, and states plainly that unrecognised keys survive only there.
+  No time-based deletion promise remains, and the module docstring records why one must not be
+  reintroduced without a metadata-preservation contract.
+- **The `--no-llm` exit-code test never invoked the CLI.** It was named `..._exits_zero`, called
+  `migrate_dir` directly, and could not observe an exit code at all — claiming a
+  production-boundary behaviour it did not exercise. That is the same structural failure this
+  release describes elsewhere, committed in the act of fixing it. Renamed to what it actually
+  asserts, and the boundary is now covered by real Click-invoking tests: defaulted `--no-llm`
+  → exit 0 with the marker written; a hard failure → exit 1 with no marker; a mixed run → exit 1,
+  no marker, failed original still retryable. Confirmed to fail against the earlier revision.
+- **Dry-run claimed committed-state facts.** It printed that files "were placed in knowledge/",
+  originals "are in old-memory-archive/", and the directory "is retired" — while writing,
+  archiving and retiring nothing. The wording now branches on dry-run.
+
 - **The first #166 fix narrowed the bug instead of fixing it — caught in external review.**
   Removing `len(errors) > 0` from the retirement condition left `migrated > 0`, so **one**
   successful file tombstoned the whole directory and every failed sibling was abandoned

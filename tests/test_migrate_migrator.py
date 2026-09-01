@@ -353,8 +353,13 @@ def test_partial_success_does_NOT_retire(tmp_path: Path) -> None:
     assert (src / "bad.md").is_file()
 
 
-def test_defaulted_under_no_llm_still_retires_and_exits_zero(tmp_path: Path) -> None:
+def test_defaulted_under_no_llm_is_imported_and_retires(tmp_path: Path) -> None:
     """Policy, asserted explicitly: a defaulted file is IMPORTED, not failed.
+
+    RENAMED: this was `..._and_exits_zero`, but it calls `migrate_dir` directly
+    and never invokes Click — it cannot observe an exit code, so its name claimed
+    a production-boundary behaviour it did not exercise. The exit code is now
+    tested where it actually happens, in tests/test_migrate_cli.py.
 
     `--no-llm` is what install.sh and cli_init both pass, so this is the default
     production path. A defaulted file has its body preserved and searchable; it is

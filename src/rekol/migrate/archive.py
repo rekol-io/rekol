@@ -1,8 +1,15 @@
 """Archive legacy memory files and leave a migration marker.
 
-The archive lives under ``<memory_dir>/old-memory-archive/`` so the user can
-recover originals for one week (policy: delete after 1 week from migration
-date; the marker records the date).
+The archive lives under ``<memory_dir>/old-memory-archive/`` and holds the only
+byte-complete copy of each original.
+
+NO TIME-BASED DELETION PROMISE (#166). The marker used to say "safe to delete
+after 1 week", and the prose here used to describe a one-week retention policy.
+Both were false: migration synthesises a new frontmatter whitelist and
+`_strip_frontmatter` discards the original YAML, so any UNRECOGNISED legacy key
+survives only in the archived original. A user following that instruction
+destroyed those values. Do not reintroduce a deletion deadline without a
+metadata-preservation contract to back it.
 
 We deliberately DO NOT write a ``MEMORY.md`` retirement pointer.  Claude Code's
 built-in autoMemory feature auto-injects ``~/.claude/projects/<slug>/memory/MEMORY.md``
@@ -64,7 +71,10 @@ def write_retirement_pointer(memory_dir: Path, *, memory_home: Path) -> None:
         today = dt.date.today().isoformat()
         marker.write_text(
             f"migrated to {memory_home} on {today}\n"
-            f"archived originals in {ARCHIVE_DIR_NAME}/ — safe to delete after 1 week\n"
+            f"original files are in {ARCHIVE_DIR_NAME}/ — KEEP them unless you have\n"
+            f"checked the migrated copies contain everything you need.\n"
+            f"Migration rewrites frontmatter: recognised fields are regenerated and\n"
+            f"any UNRECOGNISED key is dropped, so such values survive ONLY here.\n"
         )
 
     legacy_pointer = memory_dir / "MEMORY.md"
