@@ -300,7 +300,10 @@ def _offer_notes_import(*, yes: bool) -> None:
         default=False,
     ):
         return
-    corpus = click.prompt("Path to the folder", type=click.Path(exists=True))
+    # `click.Path` is typed as str | bytes | PathLike, so pass an explicit str:
+    # `_invoke` builds an argv list and a bytes element there would fail at
+    # runtime, not just under mypy.
+    corpus = str(click.prompt("Path to the folder", type=click.Path(exists=True)))
     _invoke(["import", corpus])
 
 
