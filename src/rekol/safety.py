@@ -135,7 +135,11 @@ def _stored_embedding_model(db_path: Path) -> str | None:
             "SELECT value FROM metadata WHERE key = 'embedding_model'"
         ).fetchone()
     except sqlite3.Error:
-        # No `metadata` table (pre-C4 index) — provenance unknown, so allow.
+        # No `metadata` table (pre-C4 index). Provenance UNKNOWN — and the caller
+        # now REFUSES on unknown, disambiguating a legacy index from a freshly
+        # created one by content. This comment previously ended "so allow",
+        # describing the old fail-open policy; contradictory safety commentary
+        # sitting beside the code it contradicts is how a regression returns.
         return None
     finally:
         connection.close()
