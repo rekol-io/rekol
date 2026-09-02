@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The real-index guard was bypassed by `rekol search` (release-review blocker).** #185 claimed
+  the guard lived "where the destructive act happens". It did not — it was called only from the
+  `rekol index rebuild` CLI wrapper, while the destructive act is `Indexer.rebuild()`'s
+  `os.replace(tmp_db, live_db)`. `cli_search` reaches that same replace through
+  `ensure_curated_schema_current(auto_rebuild=True)` with **no guard at all**, and a legacy
+  (pre-identity) index has no metadata table — so `check_model_identity` passes it through as
+  "unknown" rather than raising.
+  A throwaway process configured with `test-hashing` that inherited the real `REKOL_INDEX_DIR`
+  could therefore replace a user's legacy curated index with test vectors by running an ordinary
+  **interactive search**. Same outcome #185 claims to refuse, through a different door — and
+  placing the guard at the wrapper was the same mistake as the bug it fixes: asserting the
+  invariant where it was convenient rather than where the destruction happens.
+  The guard now sits immediately above the `os.replace`, so every caller of `rebuild()` is
+  covered, and the refusal is reported by `search` rather than escaping as an uncaught traceback.
+- **The guard failed OPEN on any existing index whose provenance it could not read.** A
+  pre-identity schema, a missing metadata row, and an unreadable/corrupt DB were all treated like
+  "no file at all", and all permitted. Only the absent-file case actually proves there is nothing
+  to destroy.
+  The stated justification — that a guard blocking the repair of a damaged index is worse than the
+  bug — was on the wrong axis. This guard only ever refuses when the **incoming** model is a test
+  embedder; a legitimate repair uses a real model and never reaches the decision. So failing
+  closed blocks no repair, while failing open left the original destructive scenario open for
+  exactly the oldest and least replaceable indexes. Two tests asserted the unsafe property by
+  name; both are inverted, and a new test pins that a real-model repair of a corrupt index is
+  still unimpeded.
+
+### Fixed
 - **The migration marker told users to delete the only byte-complete copy of their originals.**
   It said *"archived originals in old-memory-archive/ — safe to delete after 1 week"*, while the
   same release documents that migration strips unrecognised legacy frontmatter which then exists

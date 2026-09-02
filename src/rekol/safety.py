@@ -76,14 +76,53 @@ def is_test_embedder(embedding_model: str | None) -> bool:
     return embedding_model is not None and embedding_model.lower() in TEST_EMBEDDER_NAMES
 
 
+def _index_holds_data(db_path: Path) -> bool | None:
+    """True if the index contains indexed content; None if that cannot be read.
+
+    The discriminator between the two states that both present as "no recorded
+    identity": a freshly-created index the caller is about to populate (empty —
+    nothing to destroy) versus a LEGACY index full of a user's real data written
+    before identity stamping existed (precious, and exactly what must be refused).
+
+    Without this, refusing on unknown provenance also refuses every ordinary
+    first build, because `init_schema()` creates the file before anything stamps
+    it — a guard that fires on the healthy path is worse than none, since it
+    trains people to set the override reflexively.
+    """
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        # Probe readability FIRST. Without this, a corrupt file reports "no data"
+        # rather than "cannot tell": sqlite3.connect is lazy, so the corruption
+        # only surfaces on a query, and swallowing that per-table error made an
+        # unreadable DB look empty — i.e. safe to replace. Exactly the
+        # can't-tell-treated-as-nothing-to-lose mistake this guard exists for.
+        try:
+            connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return None  # unreadable/corrupt — provenance and content both unknown
+
+        for table in ("chunks", "files"):
+            try:
+                row = connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            except sqlite3.Error:
+                continue  # table genuinely absent in this schema generation
+            if row is not None:
+                return True
+        return False
+    finally:
+        connection.close()
+
+
 def _stored_embedding_model(db_path: Path) -> str | None:
     """The model recorded in an existing index, or None if unknown/absent.
 
-    Fail-OPEN on every read problem: a missing DB, a pre-identity schema, or an
-    unreadable file all return None, which permits the write. This guard exists
-    to stop one specific destructive mistake, and it must never become a reason
-    a legitimate rebuild cannot run — a false refusal on a corrupt index would
-    block the very repair that fixes it.
+    Returns None when the identity cannot be read for ANY reason — absent file,
+    pre-identity schema, missing row, unreadable DB. The caller treats None as
+    "provenance unproven" and refuses, because only a test-embedder write ever
+    reaches that decision; a real-model repair is unaffected.
     """
     if not db_path.exists():
         return None
@@ -96,7 +135,11 @@ def _stored_embedding_model(db_path: Path) -> str | None:
             "SELECT value FROM metadata WHERE key = 'embedding_model'"
         ).fetchone()
     except sqlite3.Error:
-        # No `metadata` table (pre-C4 index) — provenance unknown, so allow.
+        # No `metadata` table (pre-C4 index). Provenance UNKNOWN — and the caller
+        # now REFUSES on unknown, disambiguating a legacy index from a freshly
+        # created one by content. This comment previously ended "so allow",
+        # describing the old fail-open policy; contradictory safety commentary
+        # sitting beside the code it contradicts is how a regression returns.
         return None
     finally:
         connection.close()
@@ -125,10 +168,39 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
     if os.environ.get(OVERRIDE_ENV_VAR, "").strip() not in ("", "0", "false", "no"):
         return
 
-    stored_model = _stored_embedding_model(Path(db_path))
-    if stored_model is None or is_test_embedder(stored_model):
-        # Nothing there, unknown provenance, or already test-built — all fine to
-        # replace. Only real data is protected.
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return  # nothing to destroy
+
+    stored_model = _stored_embedding_model(db_path)
+    if stored_model is not None:
+        if is_test_embedder(stored_model):
+            return  # already test-built — a suite replacing its own sandbox index
+        # Explicitly recorded a REAL model. That is a positive statement of
+        # provenance and is refused regardless of how much data it currently
+        # holds — an empty real index is still not ours to replace with test data.
+        raise RealIndexClobberError(db_path, stored_model, str(incoming_model))
+
+    # From here the identity is UNKNOWN, and the two states that look identical
+    # are distinguished only by content.
+    holds_data = _index_holds_data(db_path)
+    if holds_data is False:
+        # Exists but empty: a just-created index about to be populated. Nothing
+        # to destroy, and refusing here would break every ordinary first build.
         return
 
-    raise RealIndexClobberError(Path(db_path), stored_model, str(incoming_model))
+    # An existing DB that HOLDS DATA whose provenance cannot be PROVEN test-built
+    # is refused (as is one we cannot read at all — `holds_data is None`).
+    #
+    # This used to fail OPEN here — a pre-identity index, a missing metadata row,
+    # or an unreadable file were all treated like "no file at all". The stated
+    # reasoning was that a guard which blocks the repair of a damaged index is
+    # worse than the bug. That reasoning was on the wrong axis, and external
+    # review caught it: this function only ever refuses when the INCOMING model
+    # is a test embedder. A legitimate repair uses a REAL model and never reaches
+    # this branch, so failing closed here blocks no repair at all — while failing
+    # open left the original destructive scenario wide open for exactly the
+    # indexes most likely to be old and precious.
+    raise RealIndexClobberError(
+        db_path, stored_model or "unknown (no recorded identity)", str(incoming_model)
+    )
