@@ -107,6 +107,11 @@ die() {
   exit 1
 }
 
+COEXISTENCE_LIB="$COMPONENT_DIR/plugin/hooks/coexistence.sh"
+[[ -r "$COEXISTENCE_LIB" ]] || die "missing coexistence detector: $COEXISTENCE_LIB"
+# shellcheck source=plugin/hooks/coexistence.sh
+source "$COEXISTENCE_LIB"
+
 usage() {
   cat <<'EOF'
 rekol install — idempotent installer; safe to rerun on an already-set-up machine.
@@ -247,6 +252,25 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Do not create a second hook backend when the Claude plugin is enabled. The
+# non-hook portions of install.sh remain useful, so stand down only hook wiring.
+if [[ "$DO_HOOK" == "1" ]]; then
+  set +e
+  settings_has_enabled_rekol_plugin "$SETTINGS_JSON"
+  plugin_coexist_rc=$?
+  set -e
+  if [[ "$plugin_coexist_rc" == "0" ]]; then
+    plugin_keys="$(enabled_rekol_plugin_keys "$SETTINGS_JSON" | paste -sd, -)"
+    say "[rekol] hook wiring skipped — enabled Claude plugin backend detected (${plugin_keys})."
+    say "[rekol] Existing settings hooks were left untouched; choose one backend explicitly before migrating."
+    DO_HOOK=0
+  elif [[ "$plugin_coexist_rc" == "2" ]]; then
+    say "[rekol] hook wiring skipped — cannot safely inspect $SETTINGS_JSON (invalid JSON or jq unavailable)."
+    say "[rekol] Fix the settings file or install jq, then rerun install.sh to wire hooks."
+    DO_HOOK=0
+  fi
+fi
 
 # --- Pre-flight: REKOL_HOME (or MEMORY_HOME fallback) must be set ---
 # When neither is set we prompt for a folder IF stdin is a TTY (interactive

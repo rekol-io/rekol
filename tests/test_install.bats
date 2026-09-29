@@ -111,6 +111,70 @@ teardown() {
     rm -rf "${TESTROOT}"
 }
 
+# ---------------- plugin/install backend coexistence (#167) -----------------
+
+@test "coexistence detector recognizes owned hook forms without false positives" {
+  detector="$COMPONENT_DIR/plugin/hooks/coexistence.sh"
+  fixtures="$TESTROOT/coexistence"
+  mkdir -p "$fixtures"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":"\"$(command -v rekol || echo '\''/custom/bin/rekol'\'')\" _hook session-tasks"}]}]}}' > "$fixtures/current.json"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"command":"rekol _hook record-stop"}]}]}}' > "$fixtures/bare.json"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":": rekol:backend=install.sh:v1; anything"}]}]}}' > "$fixtures/marker.json"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":"other-tool _hook session-tasks"}]}]}}' > "$fixtures/unrelated.json"
+  printf '%s\n' '{"hooks":' > "$fixtures/malformed.json"
+  for owned in current bare marker; do
+    run bash -c 'source "$1"; settings_has_rekol_install_hooks "$2"' _ "$detector" "$fixtures/$owned.json"
+    [ "$status" -eq 0 ] || { echo "$owned fixture was not detected"; false; }
+  done
+  run bash -c 'source "$1"; settings_has_rekol_install_hooks "$2"' _ "$detector" "$fixtures/unrelated.json"
+  [ "$status" -eq 1 ]
+  run bash -c 'source "$1"; settings_has_rekol_install_hooks "$2"' _ "$detector" "$fixtures/malformed.json"
+  [ "$status" -eq 2 ]
+}
+
+@test "plugin activation detector ignores disabled cached installs" {
+  detector="$COMPONENT_DIR/plugin/hooks/coexistence.sh"
+  printf '%s\n' '{"enabledPlugins":{"rekol@local":true}}' > "$TESTROOT/enabled.json"
+  printf '%s\n' '{"enabledPlugins":{"rekol@local":false},"plugins":{"rekol@local":[{}]}}' > "$TESTROOT/disabled.json"
+  run bash -c 'source "$1"; settings_has_enabled_rekol_plugin "$2"' _ "$detector" "$TESTROOT/enabled.json"
+  [ "$status" -eq 0 ]
+  run bash -c 'source "$1"; settings_has_enabled_rekol_plugin "$2"' _ "$detector" "$TESTROOT/disabled.json"
+  [ "$status" -eq 1 ]
+}
+
+@test "plugin bootstrap stands down for installer hooks and runs when clean" {
+  state="$TESTROOT/plugin-state"
+  mkdir -p "$state/venv/bin"
+  printf '#!/usr/bin/env bash\nprintf "called\\n" >> "%s"\n' "$TESTROOT/plugin-calls" > "$state/venv/bin/rekol"
+  chmod +x "$state/venv/bin/rekol"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":"\"/custom/bin/rekol\" _hook session-confidence"}]}]}}' > "$TESTROOT/legacy.json"
+  printf '%s\n' '{}' > "$TESTROOT/clean.json"
+  run env CLAUDE_PLUGIN_DATA="$state" CLAUDE_SETTINGS_PATH="$TESTROOT/legacy.json" "$COMPONENT_DIR/plugin/hooks/bootstrap" inject
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"standing down"* ]]
+  [ ! -f "$TESTROOT/plugin-calls" ]
+  run env CLAUDE_PLUGIN_DATA="$state" CLAUDE_SETTINGS_PATH="$TESTROOT/clean.json" "$COMPONENT_DIR/plugin/hooks/bootstrap" inject
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$TESTROOT/plugin-calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "install skips hook wiring when the rekol plugin is enabled" {
+  sandhome="$TESTROOT/plugin-enabled-home"
+  rekolhome="$TESTROOT/plugin-enabled-memory"
+  mkdir -p "$sandhome/.claude" "$rekolhome"
+  printf '%s\n' '{"enabledPlugins":{"rekol@local":true},"env":{"KEEP_ME":"yes"}}' > "$sandhome/.claude/settings.json"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' > "$rekolhome/rekol.config.yaml"
+
+  run env -u MEMORY_HOME -u TEST_MODE REKOL_HOME="$rekolhome" HOME="$sandhome" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hook wiring skipped"* ]]
+  run jq -e '.enabledPlugins["rekol@local"] == true and .env.KEEP_ME == "yes" and ((.hooks // {}) == {})' \
+    "$sandhome/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
 # Reads the local-only INDEX_DIR install recorded in the manifest under the given
 # REKOL_HOME. The index lives in a cache OUTSIDE $REKOL_HOME, so tests resolve it
 # from the same path install wrote rather than hard-coding the hash. $1 = the
