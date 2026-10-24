@@ -158,6 +158,42 @@ teardown() {
   [ "$(wc -l < "$TESTROOT/plugin-calls" | tr -d ' ')" -eq 3 ]
 }
 
+# #201: the stand-down must stay visible. The original test ran bootstrap ONCE,
+# so it could not distinguish "announces every session" from "announces once and
+# then goes silent forever" — the latter being the actual behaviour, and the
+# reason an inert plugin was indistinguishable from a working one.
+@test "plugin says it is standing down on EVERY session, not just the first" {
+  state="$TESTROOT/plugin-state-201"
+  mkdir -p "$state/venv/bin"
+  printf '#!/usr/bin/env bash\nprintf "called\\n" >> "%s"\n' "$TESTROOT/calls-201" > "$state/venv/bin/rekol"
+  chmod +x "$state/venv/bin/rekol"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"command":"\"/custom/bin/rekol\" _hook session-confidence"}]}]}}' \
+    > "$TESTROOT/legacy-201.json"
+
+  # First run: the full explanation.
+  run env CLAUDE_PLUGIN_DATA="$state" CLAUDE_SETTINGS_PATH="$TESTROOT/legacy-201.json" \
+    "$COMPONENT_DIR/plugin/hooks/bootstrap" inject
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"standing down"* ]]
+
+  # SECOND run: must still say something. This is the assertion the old test
+  # lacked, and the one that fails against the once-only gate.
+  run env CLAUDE_PLUGIN_DATA="$state" CLAUDE_SETTINGS_PATH="$TESTROOT/legacy-201.json" \
+    "$COMPONENT_DIR/plugin/hooks/bootstrap" inject
+  [ "$status" -eq 0 ]
+  [ -n "$output" ] || { echo "second run was SILENT — an inert plugin with no signal"; false; }
+  [[ "$output" == *"plugin inactive"* ]]
+  [[ "$output" == *"install.sh backend owns the hooks"* ]]
+
+  # And it still never runs the binary while stood down.
+  [ ! -f "$TESTROOT/calls-201" ]
+
+  # Third run, to prove it is recurring rather than twice.
+  run env CLAUDE_PLUGIN_DATA="$state" CLAUDE_SETTINGS_PATH="$TESTROOT/legacy-201.json" \
+    "$COMPONENT_DIR/plugin/hooks/bootstrap" inject
+  [[ "$output" == *"plugin inactive"* ]]
+}
+
 @test "install skips hook wiring when the rekol plugin is enabled" {
   sandhome="$TESTROOT/plugin-enabled-home"
   rekolhome="$TESTROOT/plugin-enabled-memory"

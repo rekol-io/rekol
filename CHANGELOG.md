@@ -38,6 +38,24 @@ follow [Semantic Versioning](https://semver.org/).
   formatter.
 
 ### Fixed
+- **A stood-down plugin went silent after one session, so an inert plugin looked like a working
+  one (#201).** The coexistence stand-down printed its explanation once, gated on a state file,
+  and exited silently every session after. A user who installs the plugin on a machine that
+  already ran `install.sh` sees a single message they may scroll past — and `doctor` has no
+  backend awareness to contradict them afterwards, so nothing they can run reveals that the
+  plugin is doing nothing. Same reports-healthy-while-dead shape as #143 B2 (auto-resume
+  reporting ENABLED while inert) and #159 (hooks failing silently behind `|| true`).
+  The verbose explanation still prints once — repeating four lines every session would blow the
+  session-start context budget the design sets out (acceptance criterion 13) — but every
+  subsequent session now carries one line: `plugin inactive — the install.sh backend owns the
+  hooks (rekol doctor)`. The noise is self-limiting: it appears only while two backends are
+  installed, and stops when the user picks one.
+  The original test ran bootstrap **once**, so it could not distinguish "announces every session"
+  from "announces once then goes silent" — which is why this shipped. The test now runs it three
+  times and asserts the later runs are not silent; confirmed to fail against the once-only gate
+  with `second run was SILENT`.
+
+### Fixed
 - **Plugin and script installs no longer activate duplicate hook backends (#167).** The Claude
   plugin now stands down when it detects an existing `install.sh` deployment, including legacy
   installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol
