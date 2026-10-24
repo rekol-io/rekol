@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`<env-time>` reported every gap in minutes, so long pauses were unreadable.** The formatter
+  only ever did `divmod(seconds, 60)`: a 17-hour pause rendered as `1071m 0s` and an 8-day one as
+  `12217m 54s`. Both correct, neither legible — and it is part of why `mac_setup` kept a duplicate
+  of this whole hook rather than defer to rekol's (shipwright, 2026-10-08).
+  Durations now use at most two units, largest first — `45s`, `5m 3s`, `17h 51m`, `8d 11h`. Two is
+  the cap because a third never changes a decision, and each tier drops the smallest unit rather
+  than accumulating, so the string stays short as the gap grows. A missing timestamp still reads
+  `unknown` rather than `0s`: absence of data is not a zero-length gap, and collapsing them would
+  let "never recorded" read as "just happened".
+  The formatter moved to module scope so it is testable directly. The only existing assertion was
+  `"<env-time>" in output`, which holds for every possible duration — a test that cannot tell
+  `17h 51m` from `1071m 0s` is why this shipped. Thirteen cases now pin the boundaries (59/60s,
+  3599/3600s, 86399/86400s, negative clamp, `None`), and were confirmed to fail against the old
+  formatter.
+
+### Fixed
 - **Plugin and script installs no longer activate duplicate hook backends (#167).** The Claude
   plugin now stands down when it detects an existing `install.sh` deployment, including legacy
   installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol

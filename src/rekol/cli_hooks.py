@@ -58,19 +58,13 @@ def _emit_env_time(since_user: int | None, since_assistant: int | None) -> None:
     now_local = dt.datetime.now().astimezone()
     now_utc = dt.datetime.now(dt.UTC)
 
-    def _fmt(seconds: int | None) -> str:
-        if seconds is None:
-            return "unknown"
-        minutes, secs = divmod(max(0, seconds), 60)
-        return f"{minutes}m {secs}s"
-
     click.echo(
         "<env-time>\n"
         f"  local_time: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
         f"(offset {now_local.strftime('%z')})\n"
         f"  utc: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
-        f"  time_since_last_user_message: {_fmt(since_user)}\n"
-        f"  time_since_last_assistant_message: {_fmt(since_assistant)}\n"
+        f"  time_since_last_user_message: {_format_duration(since_user)}\n"
+        f"  time_since_last_assistant_message: {_format_duration(since_assistant)}\n"
         "</env-time>"
     )
 
@@ -78,6 +72,39 @@ def _emit_env_time(since_user: int | None, since_assistant: int | None) -> None:
 @click.group(name="_hook", hidden=True)
 def hook_group() -> None:
     """Internal Claude Code hook entrypoints (not for direct use)."""
+
+
+def _format_duration(seconds: int | None) -> str:
+    """Render an elapsed-time gap with at most two units, largest first.
+
+    The previous version only ever did `divmod(seconds, 60)`, so every gap was
+    expressed in minutes: a 17-hour pause read `1071m 0s` and an 8-day one
+    `12217m 54s`. Both are technically correct and practically unreadable, and
+    mac_setup kept a duplicate of this whole hook rather than defer to rekol's
+    partly because of it (shipwright, 2026-10-08).
+
+    Two units is the cap because the third never changes a decision: knowing a
+    gap was `8d 11h` rather than `8d 11h 24m 18s` is the same knowledge. Each
+    tier drops the smallest unit instead of accumulating them, so the string
+    stays short as the gap grows.
+
+    ``None`` stays ``"unknown"`` rather than becoming ``0s`` — a missing
+    timestamp is absence of data, not a zero-length gap, and collapsing the two
+    would let "we never recorded this" read as "it just happened".
+    """
+    if seconds is None:
+        return "unknown"
+    total = max(0, seconds)
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, mins = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {mins}m"
+    days, hrs = divmod(hours, 24)
+    return f"{days}d {hrs}h"
 
 
 @hook_group.command(name="time-context")
