@@ -6,6 +6,43 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`install.sh` accepted any Python >=3.11, so it chose one the dependencies have no wheels
+  for and the install died inside pip (#207).** The suitability probe was bounded only from
+  below. When Homebrew's `python3` became **3.15** (2026-10-09) and torch still published
+  nothing past `cp314`, every install that fell through to it — no 3.11–3.14 present, no `uv` —
+  began failing with `ERROR: ResolutionImpossible` naming `sentence-transformers` and `torch`,
+  which pointed at the dependency set rather than at the interpreter choice that caused it.
+  This is what had the required `macos-latest` gate red across four consecutive merges, and it
+  broke **real first-time installs** on any up-to-date Mac in that shape, not just CI.
+  No commit caused it: the trigger was a new Python release, which is why the four red runs
+  bisect "cleanly" to an unrelated change — the last green macOS run was seven weeks earlier,
+  so a moving environment and a moving tree are indistinguishable across that gap.
+  The accepted range is now bounded at **both** ends (`>=3.11`, `<3.15`), 3.13 and 3.14 were
+  added to the probed candidates since torch supports them, and a too-new interpreter is
+  refused up front with the same kind of guidance a too-old one already got. The hard-fail now
+  lists every interpreter considered and why each was passed over — previously the installer
+  announced which python it picked and said nothing about what it had rejected, so there was no
+  way to tell a missing interpreter from a disqualified one.
+  Raise the ceiling when torch ships the next `cpXXX` wheels; a test asserts the ceiling and
+  the candidate list cannot drift apart in either direction.
+- **A failing `setup_file` in the install tests reported no reason, which is why a red
+  `macos-latest` gate went four merges undiagnosed (#207).** The one command that does the real
+  work there — a full `install.sh` run — sent its output to `/dev/null`, so on failure bats could
+  print only `not ok 1 setup_file failed` and the offending line. **The cause was discarded before
+  the job log was ever written**, so re-reading that log could not have helped; `macos-latest` is a
+  required gate, so `main` was unmergeable with nothing on record saying why.
+  The output is now captured and printed in full on either failure path — a non-zero exit, or an
+  exit-0 install that somehow left no `rekol` in the venv — and the real exit status is recorded at
+  the call rather than read from `$?` inside an `if ! …` branch, where `!` has already turned it
+  into 0. (That detail matters here: a wrong exit code in the very message meant to explain one.)
+  `install.sh` had the identical shape at the index-dir resolution step — the interpreter's stderr
+  to `/dev/null`, then `could not resolve the local index dir from the venv`: the symptom, with the
+  traceback that explains it thrown away. Diagnosing one instance by hand cost four full installs,
+  because a broken editable install, an import error, and a source tree being rewritten mid-install
+  all produce that one sentence. The traceback is now part of the error.
+  Diagnostics only — this does **not** fix the macOS failure, it makes the next run state it. This
+  is the project's recurring defect shape (a report that reads the same whether or not the thing
+  under test held) sitting in the diagnostics themselves.
 - **The sessions index validated vector WIDTH only, so a test embedder could silently poison a
   real transcript corpus (#193).** `test-hashing` produces 384-dim vectors exactly like the
   default `BAAI/bge-small-en-v1.5`, and the store compared only dimension — so a test-configured

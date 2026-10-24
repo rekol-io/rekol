@@ -39,12 +39,35 @@ setup_file() {
     printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
         > "${seed}/mem/rekol.config.yaml"
     # Real install (no --skip-deps): builds the venv + pip installs rekol once.
+    #
+    # The output goes to a LOG rather than /dev/null. This single command is the
+    # point of failure for the entire file — when it fails bats reports only
+    # "not ok 1 setup_file failed" plus the offending line, and with the output
+    # discarded the REASON is gone for good. A macOS-only CI failure stayed
+    # undiagnosable for exactly that reason: the log could never have contained
+    # the cause, so re-reading it was never going to help.
+    #
+    # Captured rather than streamed so a passing run stays quiet (this install
+    # prints a full pip transcript), and printed in full on either failure path.
+    local install_log="${BATS_FILE_TMPDIR}/install.log"
+    local install_rc=0
+    # `|| install_rc=$?` keeps this safe under bats' errexit AND records the real
+    # status. Testing `$?` inside an `if ! cmd` branch would report 0, since `!`
+    # inverted it — a wrong exit code in the very message meant to explain one.
     REKOL_HOME="${seed}/mem" HOME="${seed}/home" \
         XDG_CACHE_HOME="${seed}/cache" XDG_DATA_HOME="${seed}/data" \
         "${cdir}/install.sh" --test-mode \
-        --tools-home "${SHARED_TOOLS}" --bin-dir "${seed}/bin" >/dev/null 2>&1
+        --tools-home "${SHARED_TOOLS}" --bin-dir "${seed}/bin" \
+        > "${install_log}" 2>&1 || install_rc=$?
+    if [ "${install_rc}" -ne 0 ]; then
+        echo "setup_file: install.sh exited ${install_rc}; its output follows:" >&2
+        cat "${install_log}" >&2
+        return 1
+    fi
     if [ ! -x "${SHARED_TOOLS}/.venv/bin/rekol" ]; then
         echo "setup_file: shared venv build failed (no rekol in ${SHARED_TOOLS}/.venv)" >&2
+        echo "setup_file: install.sh exited 0, so its output is the only evidence:" >&2
+        cat "${install_log}" >&2
         return 1
     fi
 }
