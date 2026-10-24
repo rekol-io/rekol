@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Documentation
+- **README now covers a Python that is too NEW (#207).** The install troubleshooting list
+  explained a too-old `python3` but not a too-new one, which became the live failure the moment
+  Homebrew's `python3` reached 3.15 — so the newly-added refusal would have sent people to a
+  list that did not mention their case. Documents the supported `>=3.11, <3.15` range and why
+  the ceiling exists (torch publishes no wheels past `cp314`), and corrects the set of
+  `python@3.x` opt-prefixes the installer probes, which now includes 3.13 and 3.14.
+
 ### Fixed
 - **`install.sh` accepted any Python >=3.11, so it chose one the dependencies have no wheels
   for and the install died inside pip (#207).** The suitability probe was bounded only from
