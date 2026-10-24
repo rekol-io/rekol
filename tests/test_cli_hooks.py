@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from rekol.cli_hooks import hook_group
@@ -193,3 +194,43 @@ def test_no_snippet_mentions_a_migrated_phrase_as_prose():
         "phrase(s) the migration rewrites appear outside an invocation — it would "
         "corrupt this text on the next install:\n  " + "\n  ".join(offenders)
     )
+
+
+# ----------------------------- <env-time> durations -----------------------------
+# The formatter capped at minutes, so an 8-day gap rendered as `12217m 54s` and a
+# 17-hour one as `1071m 0s` — measured in a live session, and the reason mac_setup
+# kept its own duplicate hook rather than deferring to rekol's.
+#
+# The only existing assertion was `"<env-time>" in res.output`, which is true for
+# every possible duration. A test that cannot distinguish `17h 51m` from
+# `1071m 0s` is why this shipped.
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (None, "unknown"),
+        (0, "0s"),
+        (1, "1s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (61, "1m 1s"),
+        (3599, "59m 59s"),
+        (3600, "1h 0m"),
+        (64260, "17h 51m"),  # shipwright's measured case: was `1071m 0s`
+        (86399, "23h 59m"),
+        (86400, "1d 0h"),
+        (733074, "8d 11h"),  # this session's own gap: was `12217m 54s`
+        (-5, "0s"),  # clamped, never negative
+    ],
+)
+def test_env_time_duration_formatting(seconds: int | None, expected: str) -> None:
+    """Two units at most, largest first — legible at every scale.
+
+    Each tier drops the smallest unit rather than accumulating them, so the
+    string stays short as the gap grows. `unknown` is preserved for a missing
+    timestamp: absence of data is not a zero duration.
+    """
+    from rekol.cli_hooks import _format_duration
+
+    assert _format_duration(seconds) == expected
