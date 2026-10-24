@@ -154,6 +154,11 @@ def _seed_memory_home(root: Path) -> None:
 def _seed_sessions(db_path: Path, embedder: HashingEmbedder) -> None:
     store = SessionStore(db_path=db_path, dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     messages = [
         dict(
             session_id="sess-rekol",
@@ -274,6 +279,11 @@ def test_every_recalled_candidate_carries_full_provenance(tmp_path: Path) -> Non
     embedder = HashingEmbedder(dim=384)
     store = SessionStore(db_path=tmp_path / "sessions.db", dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     for i, content in enumerate(
         [
             "We always deploy via docker compose pull on the Dell box.",
@@ -321,6 +331,11 @@ def test_recall_honors_exclude_paths_dropping_excluded_cwd(tmp_path: Path) -> No
     embedder = HashingEmbedder(dim=384)
     store = SessionStore(db_path=tmp_path / "sessions.db", dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     rows = [
         # Kept: an ordinary project cwd.
         ("/home/leon/github/rekol", "sess-keep", "u-keep"),

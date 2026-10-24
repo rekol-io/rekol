@@ -130,7 +130,7 @@ def _recall_and_dedupe(cfg: Config):
         session_store.init_schema()
 
         try:
-            session_store.reconcile_embedding_dim(embedder.dim)
+            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
         except SessionStoreDimMismatchError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(2) from exc

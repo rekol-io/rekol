@@ -29,6 +29,11 @@ def _seed_memory_home(root: Path) -> None:
 def _seed_sessions(db_path: Path, embedder: HashingEmbedder) -> None:
     store = SessionStore(db_path=db_path, dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     messages = [
         dict(
             session_id="sess-rekol",
@@ -252,6 +257,11 @@ def _seed_many_in_one_project(db_path: Path, embedder: HashingEmbedder, *, n: in
     """
     store = SessionStore(db_path=db_path, dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     rules = [
         "We always run ruff before committing.",
         "Never force-push the main branch.",
