@@ -14,6 +14,24 @@ follow [Semantic Versioning](https://semver.org/).
   `python@3.x` opt-prefixes the installer probes, which now includes 3.13 and 3.14.
 
 ### Fixed
+- **Two `doctor` tests were named for behaviour they never executed (#194).** Found in the
+  v0.5.12 external review; the production fix (#188) was correct, the evidence for it was not.
+  `test_shipped_index_files_are_excluded_from_coverage` never ran `doctor` and never built an
+  install — it asserted only that two constants classify `REKOL.md` as non-memory, which cannot
+  support its docstring's claim that a pristine install is healthy and exits 0.
+  `test_doctor_excluded_line_is_generated_from_the_real_list` was worse: it searched
+  `cli_doctor`'s **source** for the literal `deliberately excluded ({excluded_names})`, so it
+  would have passed just as happily with `excluded_names` assigned a hardcoded stale string —
+  a check whose result is identical whether or not the promised property holds, which is the
+  exact bug class the line exists to prevent, sitting in the test written to prove it closed.
+  Replaced with behaviour-level regressions: a `REKOL_HOME` seeded from the **real shipped
+  template** (the way `install.sh` seeds one, so the shipped `REKOL.md` is genuinely on disk
+  and genuinely considered), its index built, the real Click `doctor` command invoked, asserting
+  exit 0 and healthy; plus an assertion that `doctor`'s **rendered** exclusion line contains
+  every name in the exclusion constants. The constants-only check is kept under an honest name.
+  Both were confirmed to fail against the defects they describe: hardcoding a stale
+  `excluded_names` fails the rendered-line test, and removing `REKOL.md` from the exclusion list
+  reproduces the original day-zero `index is DEGRADED` exit 1.
 - **`install.sh` accepted any Python >=3.11, so it chose one the dependencies have no wheels
   for and the install died inside pip (#207).** The suitability probe was bounded only from
   below. When Homebrew's `python3` became **3.15** (2026-10-09) and torch still published

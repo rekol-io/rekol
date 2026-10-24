@@ -718,20 +718,16 @@ def test_doctor_flags_unindexed_transcripts_but_not_an_empty_source(tmp_path, mo
 # --------------------------- fresh-install DEGRADED ---------------------------
 
 
-def test_shipped_index_files_are_excluded_from_coverage() -> None:
-    """rekol's own shipped pointer files must not count as 'invisible to search'.
+def test_shipped_index_files_are_classified_non_memory() -> None:
+    """Unit check on the classifier only — named for exactly what it executes.
 
-    QA found a **pristine** install reporting `index is DEGRADED` and exiting 1,
-    because `REKOL.md` — which rekol ships, seeds from its own installer, and
-    deliberately keeps outside the indexer's scope — was missing from the
-    exclusion list. Every new user's first `doctor` was red on day zero, with a
-    remedy ("fix the frontmatter") that could not work.
-
-    A checker that is red out of the box for a non-problem trains people to
-    ignore it, which buries the real signal it exists to surface.
+    It was previously called ``..._are_excluded_from_coverage`` and its docstring
+    claimed a pristine install is healthy and exits 0. It never ran `doctor` and
+    never built an install, so it could not support that claim (#194, found in
+    external review). The behavioural claim now lives in
+    :func:`test_pristine_shipped_install_is_healthy_and_exits_zero`, and this one
+    keeps the cheap constant-level assertion under an honest name.
     """
-    from pathlib import Path
-
     from rekol.indexer import NON_MEMORY_FILES, is_non_memory
 
     root = Path("/tmp/does-not-need-to-exist")
@@ -742,22 +738,106 @@ def test_shipped_index_files_are_excluded_from_coverage() -> None:
     assert not is_non_memory(root / "when" / "when-foo.md", root)
 
 
-def test_doctor_excluded_line_is_generated_from_the_real_list() -> None:
-    """The printed line must derive from the exclusion list, not restate it.
+def _write_pristine_shipped_home(tmp_path: Path, monkeypatch) -> Path:
+    """A REKOL_HOME seeded the way `install.sh` seeds one, from the REAL template.
 
-    It previously hardcoded "(tasks/, MEMORY.md)". When REKOL.md was added the
-    prose would have gone stale silently — a wrong exclusion list is exactly the
-    thing this line exists to make visible.
+    install.sh does `cp -R src/rekol/template/* "$REKOL_HOME"/`, so copying that
+    same directory is what makes this a pristine *install* rather than a
+    hand-built fixture that happens to contain a file called REKOL.md. A fixture
+    assembled by hand is exactly how the original defect survived its test: the
+    shipped file was never present on the path under test.
     """
-    import inspect
+    import shutil
 
-    from rekol import cli_doctor
+    import rekol
 
-    source = inspect.getsource(cli_doctor)
-    assert "deliberately excluded ({excluded_names})" in source, (
-        "doctor's excluded-files line must be generated from NON_MEMORY_*, "
-        "not hardcoded prose that can drift from the real list"
+    home = tmp_path / "pristine"
+    home.mkdir()
+    template = Path(rekol.__file__).resolve().parent / "template"
+    assert (template / "REKOL.md").is_file(), "the shipped template lost REKOL.md"
+    shutil.copytree(template, home, dirs_exist_ok=True)
+
+    # One real memory file: a brand-new store with nothing in it is a different
+    # condition (empty index), and conflating the two would let this test pass for
+    # the wrong reason.
+    (home / "topics").mkdir(exist_ok=True)
+    (home / "topics" / "prometheus.md").write_text(
+        "---\nname: Prometheus\ndescription: metrics\ntype: topic\n"
+        "tags: ['prometheus']\naliases: ['prom']\n---\n\n# Prometheus\n\nURL in IaC repo.\n"
     )
+    # A real install has Claude Code's projects tree; without it `doctor` reports a
+    # transcript-source PROBLEM and exits 1 for a reason that has nothing to do with
+    # exclusions, which would make this test fail (or pass) on the wrong condition.
+    projects = tmp_path / "projects" / "proj"
+    projects.mkdir(parents=True, exist_ok=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {projects.parent}\n"
+    )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    return home
+
+
+def test_pristine_shipped_install_is_healthy_and_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """The regression #188 actually promised: day-zero `doctor` is green.
+
+    QA found a pristine install reporting `index is DEGRADED` and exiting 1,
+    because `REKOL.md` — which rekol ships, seeds from its own installer, and
+    keeps outside the indexer's scope on purpose — was missing from the exclusion
+    list. Every new user's first `doctor` was red, with a remedy ("fix the
+    frontmatter") that could not work. A checker that is red out of the box for a
+    non-problem trains people to ignore it, burying the signal it exists to give.
+
+    This drives the real Click command over a home seeded from the shipped
+    template, so the shipped `REKOL.md` is genuinely on disk and genuinely
+    considered — the thing the old constants-only test could not do.
+    """
+    home = _write_pristine_shipped_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+
+    result = CliRunner().invoke(doctor_main, [])
+
+    assert result.exit_code == 0, result.output
+    assert "index is healthy." in result.output
+    assert "DEGRADED" not in result.output
+    # And specifically: the shipped file is accounted for as excluded, never as a
+    # curated file that search cannot reach.
+    coverage = [line for line in result.output.splitlines() if "curated files indexed" in line]
+    assert coverage, result.output
+    assert "deliberately excluded" in coverage[0], coverage[0]
+
+
+def test_doctor_excluded_line_renders_every_real_exclusion(tmp_path: Path, monkeypatch) -> None:
+    """The RENDERED line must match the exclusion constants, not merely be an f-string.
+
+    The previous version of this test read `cli_doctor`'s source for the literal
+    ``deliberately excluded ({excluded_names})`` — so it would have passed just as
+    happily if ``excluded_names`` were assigned a hardcoded, stale string. That is
+    a check whose result is identical whether or not the promised property holds,
+    which is the very bug class the line exists to prevent (#194).
+
+    Asserting on `doctor`'s actual output instead means hardcoding a stale list
+    fails here: the name that went missing (`REKOL.md`, when it was added) would
+    be absent from the rendered text.
+    """
+    from rekol.indexer import NON_MEMORY_DIRS_DISPLAY, NON_MEMORY_FILES
+
+    home = _write_pristine_shipped_home(tmp_path, monkeypatch)
+    # `tasks/` must exist for the dirs half of the list to be exercised too.
+    (home / "tasks").mkdir(exist_ok=True)
+    (home / "tasks" / "a-task.md").write_text("---\nname: T\ndescription: d\n---\n\nbody\n")
+    _build_curated_index(home)
+
+    result = CliRunner().invoke(doctor_main, [])
+    assert result.exit_code == 0, result.output
+
+    coverage = [line for line in result.output.splitlines() if "deliberately excluded" in line]
+    assert coverage, f"no excluded-files line rendered:\n{result.output}"
+    rendered = coverage[0]
+    for name in (*NON_MEMORY_DIRS_DISPLAY, *NON_MEMORY_FILES):
+        assert name in rendered, (
+            f"{name!r} is in the exclusion constants but missing from doctor's "
+            f"rendered line {rendered!r} — the line has drifted from the real list"
+        )
 
 
 # ------------------------ two indexes in one store -------------------------
