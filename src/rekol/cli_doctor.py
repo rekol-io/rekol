@@ -296,6 +296,77 @@ def _classify_unindexed(
     return rejected
 
 
+def _check_index_file_migration(memory_home: Path) -> list[Finding]:
+    """Report a store holding BOTH ``REKOL.md`` and ``MEMORY.md`` (only one is read).
+
+    `MEMORY.md` -> `REKOL.md` was a rename that shipped without a migration. The
+    SessionStart hook resolves `REKOL.md` and falls back to `MEMORY.md`, so the
+    fallback *is* the entire migration strategy — and it only fires when REKOL.md
+    is absent. Where both exist, MEMORY.md is never read and anything living only
+    there is silently unreachable, exactly like the rejected-frontmatter files
+    #123 exists to surface.
+
+    Found on a live machine (shipwright, 2026-10-08): both files present, content
+    diverged, neither a superset — MEMORY.md held the infra/topic pointers while
+    REKOL.md held the always-on rules. A session read one of them and got a
+    partial picture with nothing saying so.
+
+    Deliberately NOT flagged:
+      - only `MEMORY.md` — the un-migrated state, which the fallback handles
+        correctly. Flagging it would fire on every store that has simply not been
+        renamed, and a check that fires on the healthy path gets ignored.
+      - neither file — reported by the coverage/seeding checks; duplicating it
+        here would double one problem into two findings.
+
+    Byte-identical copies are still reported, because one file being silently
+    ignored is a state to resolve — but the remedy says "identical", since
+    telling someone to merge two identical files wastes their time.
+    """
+    rekol_md = memory_home / "REKOL.md"
+    memory_md = memory_home / "MEMORY.md"
+    if not (rekol_md.is_file() and memory_md.is_file()):
+        return []
+
+    try:
+        rekol_bytes = rekol_md.read_bytes()
+        memory_bytes = memory_md.read_bytes()
+    except OSError as error:
+        # Unreadable is still two files, so still worth reporting — just without
+        # the divergence detail. Never swallow it into a clean bill of health.
+        return [
+            Finding(
+                label="index file migration",
+                status=Status.PROBLEM,
+                detail=(
+                    f"both REKOL.md and MEMORY.md exist in {memory_home}; only REKOL.md is "
+                    f"read at session start, and they could not be compared ({error})"
+                ),
+                remedy="compare them by hand, fold anything needed into REKOL.md, remove MEMORY.md",
+            )
+        ]
+
+    identical = rekol_bytes == memory_bytes
+    if identical:
+        detail = (
+            f"both REKOL.md and MEMORY.md exist in {memory_home} and are byte-identical; "
+            f"only REKOL.md is read at session start"
+        )
+        remedy = "the files are identical, so MEMORY.md is redundant — remove it"
+    else:
+        detail = (
+            f"both REKOL.md and MEMORY.md exist in {memory_home} and their contents DIFFER "
+            f"({len(rekol_bytes)} vs {len(memory_bytes)} bytes); only REKOL.md is read at "
+            f"session start, so anything living only in MEMORY.md is invisible"
+        )
+        remedy = (
+            "diff them, fold anything you still need from MEMORY.md into REKOL.md, "
+            "then remove MEMORY.md"
+        )
+    return [
+        Finding(label="index file migration", status=Status.PROBLEM, detail=detail, remedy=remedy)
+    ]
+
+
 def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Disk-vs-index coverage for the curated store (#123).
 
@@ -1017,6 +1088,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
             detail=str(cfg.index_dir),
         )
     ]
+    findings.extend(_check_index_file_migration(cfg.memory_home))
     findings.extend(_check_curated_index(cfg, embedder))
     findings.extend(_check_curated_coverage(cfg, embedder))
     findings.extend(_check_session_index(cfg, embedder))
