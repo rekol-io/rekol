@@ -5,6 +5,21 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
+  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
+  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
+  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
+  despite being the second most common non-resumable code, and the existing `server_error` test
+  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
+  key), so a regression depending on that prose would have slipped past it. The new test uses
+  the real payload shape and was confirmed to fail when `authentication_failed` is added to
+  `LIMIT_ERROR_TYPES`.
+  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
+  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
+  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
+  recorded on the issue rather than changed here, since what to do about it is a design call.
+
 ### Documentation
 - **README now covers a Python that is too NEW (#207).** The install troubleshooting list
   explained a too-old `python3` but not a too-new one, which became the live failure the moment
