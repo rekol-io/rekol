@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A failing `setup_file` in the install tests reported no reason, which is why a red
+  `macos-latest` gate went four merges undiagnosed (#207).** The one command that does the real
+  work there — a full `install.sh` run — sent its output to `/dev/null`, so on failure bats could
+  print only `not ok 1 setup_file failed` and the offending line. **The cause was discarded before
+  the job log was ever written**, so re-reading that log could not have helped; `macos-latest` is a
+  required gate, so `main` was unmergeable with nothing on record saying why.
+  The output is now captured and printed in full on either failure path — a non-zero exit, or an
+  exit-0 install that somehow left no `rekol` in the venv — and the real exit status is recorded at
+  the call rather than read from `$?` inside an `if ! …` branch, where `!` has already turned it
+  into 0. (That detail matters here: a wrong exit code in the very message meant to explain one.)
+  `install.sh` had the identical shape at the index-dir resolution step — the interpreter's stderr
+  to `/dev/null`, then `could not resolve the local index dir from the venv`: the symptom, with the
+  traceback that explains it thrown away. Diagnosing one instance by hand cost four full installs,
+  because a broken editable install, an import error, and a source tree being rewritten mid-install
+  all produce that one sentence. The traceback is now part of the error.
+  Diagnostics only — this does **not** fix the macOS failure, it makes the next run state it. This
+  is the project's recurring defect shape (a report that reads the same whether or not the thing
+  under test held) sitting in the diagnostics themselves.
 - **The sessions index validated vector WIDTH only, so a test embedder could silently poison a
   real transcript corpus (#193).** `test-hashing` produces 384-dim vectors exactly like the
   default `BAAI/bge-small-en-v1.5`, and the store compared only dimension — so a test-configured

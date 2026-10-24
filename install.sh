@@ -422,15 +422,30 @@ INDEX_DIR=""
 if [[ "$DRY_RUN" == "1" ]]; then
   say "DRY-RUN: resolve local index dir via '${TOOLS_HOME}/.venv/bin/python'"
 else
+  # The interpreter's stderr is KEPT. It used to go to /dev/null, so when this
+  # step failed the install died with a message that named the symptom and
+  # withheld the only thing that explains it — the Python error. Diagnosing one
+  # such failure by hand took four full installs, because every run reported the
+  # same sentence no matter what had actually gone wrong (a broken editable
+  # install, an import error, a source tree mid-rewrite all look identical).
+  index_dir_err="$(mktemp)"
   INDEX_DIR="$(
     REKOL_HOME="${RESOLVED_HOME}" "${TOOLS_HOME}/.venv/bin/python" -c \
       'from rekol.config import resolve_index_dir, resolve_memory_home; from pathlib import Path; import os; print(resolve_index_dir(Path(os.path.expanduser(resolve_memory_home()))))' \
-      2>/dev/null || true
+      2>"$index_dir_err" || true
   )"
   if [[ -z "$INDEX_DIR" ]]; then
     say "ERROR: could not resolve the local index dir from the venv" >&2
+    if [[ -s "$index_dir_err" ]]; then
+      say "       the interpreter at ${TOOLS_HOME}/.venv/bin/python said:" >&2
+      sed 's/^/         /' "$index_dir_err" >&2
+    else
+      say "       (the interpreter printed nothing to stderr)" >&2
+    fi
+    rm -f "$index_dir_err"
     exit 1
   fi
+  rm -f "$index_dir_err"
   say "local index/cache dir: ${INDEX_DIR}"
 fi
 readonly INDEX_DIR
