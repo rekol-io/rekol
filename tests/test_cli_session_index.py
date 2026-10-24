@@ -184,6 +184,10 @@ def test_session_index_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypa
     # Pre-build the index at a deliberately different dimension (8).
     store = SessionStore(db_path=db_path, dim=8)
     store.init_schema()
+    # Stamp as production does on first touch (#193), so the DIM check is what
+    # fires below. Left unstamped this is a corpus with vectors and no recorded
+    # model, which reconcile_embedder refuses before it ever compares widths.
+    store.reconcile_embedder("test-hashing", 8)
     rid = store.insert_message(
         dict(
             session_id="s-1",
@@ -245,6 +249,10 @@ def test_search_errors_on_embedding_dim_mismatch(tmp_path: Path, monkeypatch) ->
     # A populated index at a different width than the configured model.
     store = SessionStore(db_path=db_path, dim=8)
     store.init_schema()
+    # Stamp as production does on first touch (#193), so the DIM check is what
+    # fires below. Left unstamped this is a corpus with vectors and no recorded
+    # model, which reconcile_embedder refuses before it ever compares widths.
+    store.reconcile_embedder("test-hashing", 8)
     rid = store.insert_message(
         dict(
             session_id="s-1",

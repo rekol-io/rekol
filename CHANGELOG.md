@@ -5,6 +5,31 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The sessions index validated vector WIDTH only, so a test embedder could silently poison a
+  real transcript corpus (#193).** `test-hashing` produces 384-dim vectors exactly like the
+  default `BAAI/bge-small-en-v1.5`, and the store compared only dimension — so a test-configured
+  run that inherited a real `REKOL_INDEX_DIR` wrote hash vectors into a real corpus with **no
+  mismatch raised at all**. An incremental run mixed two semantic spaces; a full run replaced the
+  useful population. Both stay structurally healthy and are searched as though they were real
+  vectors. Two genuinely different *real* models at the same width collide identically, with no
+  test embedder involved: equal dimension is not equal semantics.
+  The sessions store now records the model that built it, in a `metadata` table mirroring the
+  curated store's, and `reconcile_embedder()` owns both halves of the question for every reader
+  and writer — the same chokepoint `reconcile_embedding_dim()` already used for width. Identity
+  is checked first, because a model mismatch is wrong whether or not the widths agree, and
+  "wrong model" is more actionable than "wrong width".
+  **Existing stores keep working.** A populated-but-unstamped store — which is every `sessions.db`
+  created before this change — adopts the configured model once and stamps it, *unless* that
+  model is a test embedder **and the store already holds embeddings**, which is refused. The
+  refusal is keyed on embeddings rather than messages because the harm is a mixed vector space:
+  messages and the FTS index are model-independent, so a store with rows but no vectors has
+  nothing a test embedder could semantically corrupt.
+  Verified against a **copy of a real 137 MB, 34,189-message store**: the migration is additive
+  (`CREATE TABLE IF NOT EXISTS` plus a stamp, no row rewrite), every message and FTS posting count
+  was preserved, identity adopted correctly, and a subsequent test-embedder run was refused. The
+  seven new tests were confirmed to fail against the dim-only behaviour.
+
 ### Added
 - **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
   `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves

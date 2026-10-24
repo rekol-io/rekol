@@ -18,6 +18,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rekol.safety import is_test_embedder
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -26,6 +28,36 @@ if TYPE_CHECKING:
 # ``[^\W_]`` is "word char but not underscore" — i.e. alphanumeric — so a lone
 # operator token like ``-`` or ``_`` has no match and gets dropped.
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
+
+
+class SessionStoreModelMismatchError(RuntimeError):
+    """Raised when the configured embedder is not the one that built this store.
+
+    WHY WIDTH WAS NOT ENOUGH (#193): the store validated vector **dimension**
+    only, and `test-hashing` produces 384-dim vectors exactly like the default
+    `BAAI/bge-small-en-v1.5`. So a test-configured run that inherited a real
+    `REKOL_INDEX_DIR` could write hash vectors into a real sessions corpus with
+    no mismatch raised at all — an incremental run mixing two semantic spaces,
+    or a full run replacing the useful population. Both stay structurally
+    healthy and are searched as though they were real vectors.
+
+    Equal dimension is not equal semantics. Two genuinely different real models
+    can also share a width, and mixing those is the same silent corruption
+    without any test embedder involved.
+    """
+
+    def __init__(self, db_path: Path, stored_model: str, wanted_model: str) -> None:
+        self.db_path = db_path
+        self.stored_model = stored_model
+        self.wanted_model = wanted_model
+        super().__init__(
+            f"sessions index at {db_path} was built by {stored_model!r}, but the configured "
+            f"model is {wanted_model!r}. Vectors from different models are not comparable even "
+            f"at the same width, so mixing them returns confidently wrong neighbours.\n"
+            f"Either restore {stored_model!r} in your config, or rebuild the transcript index "
+            f"with the new model:\n"
+            f"  rm '{db_path}' && rekol session-index --full"
+        )
 
 
 class SessionStoreDimMismatchError(RuntimeError):
@@ -76,6 +108,13 @@ def build_fts_match(query: str) -> str | None:
         return None
     return " ".join(phrases)
 
+
+SCHEMA_SESSION_METADATA = """
+CREATE TABLE IF NOT EXISTS metadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
 
 SCHEMA_MESSAGES = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -188,7 +227,11 @@ class SessionStore:
     def init_schema(self) -> None:
         """Create the messages, FTS, and files-seen tables, plus the vec table if loaded."""
         self.conn.executescript(
-            SCHEMA_MESSAGES + SCHEMA_FTS + SCHEMA_FTS_TRIGGERS + SCHEMA_FILES_SEEN
+            SCHEMA_MESSAGES
+            + SCHEMA_SESSION_METADATA
+            + SCHEMA_FTS
+            + SCHEMA_FTS_TRIGGERS
+            + SCHEMA_FILES_SEEN
         )
         if self._vec_loaded:
             # vec0 virtual table — separate so non-vec environments still work.
@@ -415,6 +458,78 @@ class SessionStore:
             self._recreate_empty_vec(wanted_dim)
             return
         raise SessionStoreDimMismatchError(self.db_path, existing, wanted_dim)
+
+    def stored_embedding_model(self) -> str | None:
+        """The model recorded as having built this store, or None if unknown.
+
+        None means "unstamped", which is every sessions.db created before #193 —
+        not "no model". The caller distinguishes those two by whether the store
+        holds data.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM metadata WHERE key = 'embedding_model'"
+            ).fetchone()
+        except sqlite3.Error:
+            return None  # table absent on a pre-#193 store
+        return None if row is None else str(row[0])
+
+    def _stamp_embedding_model(self, embedding_model: str) -> None:
+        # CREATE defensively: a store written before #193 has no metadata table
+        # until init_schema runs, and reconcile can be reached from a caller that
+        # opened the DB without it. Stamping must not be the thing that crashes.
+        self.conn.executescript(SCHEMA_SESSION_METADATA)
+        self.conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('embedding_model', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (embedding_model,),
+        )
+        self.conn.commit()
+
+    def reconcile_embedder(self, embedding_model: str, wanted_dim: int) -> None:
+        """Own BOTH halves of "is this the embedder that built the store?" (#193).
+
+        `reconcile_embedding_dim` already owned width for every reader and writer.
+        Width alone was never sufficient: `test-hashing` is 384-dim exactly like
+        the default `BAAI/bge-small-en-v1.5`, so a test-configured run that
+        inherited a real `REKOL_INDEX_DIR` wrote hash vectors into a real corpus
+        with nothing raised. Two different *real* models can collide the same way.
+
+        Identity is checked FIRST, because it is the stronger statement: a model
+        mismatch is wrong regardless of whether the widths happen to agree, and
+        reporting "wrong model" is more actionable than "wrong width".
+
+        Four states:
+
+        - **stamped and matching** → no-op.
+        - **stamped and different** → :class:`SessionStoreModelMismatchError`.
+        - **unstamped and empty** → stamp it; nothing existed to be wrong about.
+        - **unstamped with data** (every pre-#193 store) → adopt the configured
+          model once and stamp it, *unless* that model is a test embedder, which
+          is refused. Refusing outright would block ingest for every existing
+          user; adopting unconditionally would leave the one-time window usable
+          to poison a legacy corpus. A real-model adoption never reaches the
+          refusal, so failing closed there blocks nothing legitimate — the same
+          reasoning as the curated guard in #192.
+        """
+        stored = self.stored_embedding_model()
+        if stored is not None:
+            if stored != embedding_model:
+                raise SessionStoreModelMismatchError(self.db_path, stored, embedding_model)
+        else:
+            if is_test_embedder(embedding_model) and self.count_embeddings() > 0:
+                # Keyed on EMBEDDINGS, not messages. The harm is a mixed vector
+                # space: messages and the FTS index are model-independent, so a
+                # store holding rows but no vectors has nothing a test embedder
+                # could semantically poison — every vector it goes on to write
+                # will be its own. Keying this on message count instead refused
+                # the ordinary path where a corpus and its embedder are both the
+                # test ones, which is what the suite's own fixtures do.
+                raise SessionStoreModelMismatchError(
+                    self.db_path, "unknown (store predates identity stamping)", embedding_model
+                )
+            self._stamp_embedding_model(embedding_model)
+        self.reconcile_embedding_dim(wanted_dim)
 
     def _recreate_empty_vec(self, dim: int) -> None:
         """Drop and recreate the (empty) vec0 table at ``dim``.

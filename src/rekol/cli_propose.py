@@ -177,7 +177,7 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
         # the same actionable message the ingest/search paths use rather than
         # letting sqlite-vec raise a cryptic width error mid-query.
         try:
-            session_store.reconcile_embedding_dim(embedder.dim)
+            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
         except SessionStoreDimMismatchError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(2) from exc
