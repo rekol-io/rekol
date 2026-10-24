@@ -101,13 +101,21 @@ Two incidental finds worth tracking:
   context-budget work.
 - `claude plugin tag` creates `{name}--v{version}` git tags — overlaps #28.
 
-### 4. Coexistence with an existing `install.sh` install — ✅ PASS
+### 4. Coexistence with an existing `install.sh` install — ❌ fixture failed; fixed in #167
 A user who ran `install.sh` and then installs the plugin would be double-wired:
 two SessionStart injections, duplicate memory blocks, duplicate capture-nudge.
-The plugin **cannot** edit `settings.json` (that is the point of it), so it
-**defers**: detects the installer's hooks, stands down, and says once how to pick
-one. Verified in both directions — stands down when installer hooks are present,
-proceeds normally on a clean machine.
+The plugin **cannot** edit `settings.json` (that is the point of it), so it must
+**defer** when installer's hooks are present. The original spike checked only a
+bare `rekol _hook` fixture. Real installs use a PATH-independent command such as
+`"$(command -v rekol || echo '/path/to/rekol')" _hook`, so the old guard matched
+none of the live hooks and the PASS claim was wrong.
+
+#167 replaces that rendered-string grep with a shared semantic detector, adds an
+explicit ownership marker to newly written installer hooks, and makes
+`install.sh` stand down in the reverse direction when an enabled `rekol@...`
+plugin is declared. Fixture coverage now includes both old and current command
+forms. This is still **not** a live double-injection proof; that remains part of
+the live plugin acceptance run.
 
 ### 5. Differentiators preserved — ⏳ needs a live install
 Ambient/auto-triggered retrieval is carried by the same `_hook` commands the

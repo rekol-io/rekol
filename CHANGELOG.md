@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Plugin and script installs no longer activate duplicate hook backends (#167).** The Claude
+  plugin now stands down when it detects an existing `install.sh` deployment, including legacy
+  installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol
+  plugin and skips its own hook wiring. Detection failures are handled conservatively so an
+  unreadable settings file or unavailable parser cannot silently enable both backends.
 - **The real-index guard was bypassed by `rekol search` (release-review blocker).** #185 claimed
   the guard lived "where the destructive act happens". It did not — it was called only from the
   `rekol index rebuild` CLI wrapper, while the destructive act is `Indexer.rebuild()`'s

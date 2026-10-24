@@ -20,6 +20,15 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+if [ -r "$SCRIPT_DIR/coexistence.sh" ]; then
+    # shellcheck source=plugin/hooks/coexistence.sh
+    . "$SCRIPT_DIR/coexistence.sh"
+else
+    echo "[rekol] plugin is standing down — coexistence detector is missing: $SCRIPT_DIR/coexistence.sh"
+    exit 0
+fi
+
 MODE="${1:-inject}"
 STATE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/rekol/plugin}"
 VENV="$STATE_DIR/venv"
@@ -154,21 +163,22 @@ bootstrap() {
 # capture-nudge. The plugin cannot edit settings.json (that is the whole point of
 # it), so it must DEFER rather than compete: detect the installer's hooks and go
 # silent, telling the user once how to pick one.
-settings_has_rekol_hooks() {
-    local settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
-    [ -f "$settings" ] || return 1
-    grep -q '"rekol _hook\|rekol _hook ' "$settings" 2>/dev/null
-}
-
-if settings_has_rekol_hooks && [ "$MODE" != "doctor" ]; then
+settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
+settings_has_rekol_install_hooks "$settings"
+coexist_rc=$?
+if [ "$MODE" != "doctor" ] && [ "$coexist_rc" -eq 0 ]; then
     if [ ! -f "$STATE_DIR/.coexist-warned" ]; then
         : > "$STATE_DIR/.coexist-warned"
         echo ""
         echo "[rekol] plugin is standing down — an install.sh installation is already wired"
         echo "  in ~/.claude/settings.json, and running both would double every injection."
-        echo "  Keep one: either uninstall the plugin, or run rekol's uninstall to drop the"
-        echo "  settings.json hooks and let the plugin take over."
+        echo "  Keep the existing install for now, or explicitly remove its owned hooks before"
+        echo "  enabling this plugin backend. No automatic retirement was attempted."
     fi
+    exit 0
+fi
+if [ "$MODE" != "doctor" ] && [ "$coexist_rc" -eq 2 ]; then
+    echo "[rekol] plugin is standing down — cannot safely inspect $settings (invalid JSON or jq unavailable)."
     exit 0
 fi
 
