@@ -758,3 +758,88 @@ def test_doctor_excluded_line_is_generated_from_the_real_list() -> None:
         "doctor's excluded-files line must be generated from NON_MEMORY_*, "
         "not hardcoded prose that can drift from the real list"
     )
+
+
+# ------------------------ two indexes in one store -------------------------
+# `MEMORY.md` -> `REKOL.md` was a rename with no migration. The SessionStart hook
+# prefers REKOL.md and falls back to MEMORY.md — so the fallback IS the whole
+# migration strategy, and it only fires when REKOL.md is absent. On a store where
+# both exist, MEMORY.md is never read and whatever lives only there is silently
+# unreachable. Found on a live machine by shipwright, 2026-10-08: the two files had
+# diverged and neither was a superset.
+#
+# Fourth instance of this same half-finished rename, after #177 (skill.md), #188
+# (NON_MEMORY_FILES) and the doctor exclusion prose.
+
+
+def _store(tmp_path, *, rekol_md: str | None, memory_md: str | None):
+    """A curated store with either, both, or neither index file present."""
+    for layer in ("always", "when", "topics", "knowledge"):
+        (tmp_path / layer).mkdir(parents=True, exist_ok=True)
+    if rekol_md is not None:
+        (tmp_path / "REKOL.md").write_text(rekol_md)
+    if memory_md is not None:
+        (tmp_path / "MEMORY.md").write_text(memory_md)
+    return tmp_path
+
+
+def test_both_index_files_present_is_a_problem(tmp_path) -> None:
+    """Only REKOL.md is read, so MEMORY.md's content is silently unreachable."""
+    from rekol.cli_doctor import Status, _check_index_file_migration
+
+    root = _store(tmp_path, rekol_md="# always-on rules\n", memory_md="# infra pointers\n")
+    findings = _check_index_file_migration(root)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.status is Status.PROBLEM
+    # Must name BOTH files and say which one is actually read — a finding that
+    # says only "two indexes" leaves the user guessing which to edit.
+    assert "REKOL.md" in f.detail and "MEMORY.md" in f.detail
+    assert f.remedy is not None
+
+
+def test_only_rekol_md_is_healthy(tmp_path) -> None:
+    """The migrated steady state reports nothing."""
+    from rekol.cli_doctor import _check_index_file_migration
+
+    root = _store(tmp_path, rekol_md="# rules\n", memory_md=None)
+    assert _check_index_file_migration(root) == []
+
+
+def test_only_memory_md_is_healthy(tmp_path) -> None:
+    """An un-migrated store is fine: the hook's fallback reads MEMORY.md correctly.
+
+    Flagging this would cry wolf on every store that simply has not been renamed
+    yet, which is the healthy pre-migration state, not a fault.
+    """
+    from rekol.cli_doctor import _check_index_file_migration
+
+    root = _store(tmp_path, rekol_md=None, memory_md="# rules\n")
+    assert _check_index_file_migration(root) == []
+
+
+def test_neither_index_file_is_not_this_check_s_business(tmp_path) -> None:
+    """A store with no index at all is reported elsewhere, not duplicated here."""
+    from rekol.cli_doctor import _check_index_file_migration
+
+    root = _store(tmp_path, rekol_md=None, memory_md=None)
+    assert _check_index_file_migration(root) == []
+
+
+def test_identical_content_still_flagged_but_said_to_be_identical(tmp_path) -> None:
+    """Byte-identical copies are safe to delete, and the remedy should say so.
+
+    Still a finding — two files where one is ignored is a state the user should
+    resolve — but the advice differs sharply from the diverged case, and telling
+    someone to "merge" identical files wastes their time.
+    """
+    from rekol.cli_doctor import Status, _check_index_file_migration
+
+    same = "# identical\n"
+    root = _store(tmp_path, rekol_md=same, memory_md=same)
+    findings = _check_index_file_migration(root)
+
+    assert len(findings) == 1
+    assert findings[0].status is Status.PROBLEM
+    assert "identical" in (findings[0].detail + (findings[0].remedy or "")).lower()

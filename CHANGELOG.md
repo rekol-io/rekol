@@ -5,6 +5,22 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
+  `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
+  `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
+  — and it only fires when `REKOL.md` is absent. Where both exist, `MEMORY.md` is never read and
+  anything living only there is silently unreachable.
+  Found on a live machine (shipwright, 2026-10-08): both files present, contents diverged, neither
+  a superset — `MEMORY.md` held the infra/topic pointers while `REKOL.md` held the always-on
+  rules. A session read one and got a partial picture with nothing saying so. This is the fourth
+  instance of the same half-finished rename, after #177 (`skill.md`), #188 (`NON_MEMORY_FILES`)
+  and doctor's own exclusion prose.
+  The check reports the byte sizes, names which file is actually read, and gives a different
+  remedy for identical copies (remove the redundant one) than for diverged ones (diff, fold, then
+  remove). Deliberately silent when only `MEMORY.md` exists — that is the un-migrated state the
+  fallback handles correctly, and a check that fires on the healthy path gets ignored.
+
 ### Fixed
 - **`<env-time>` reported every gap in minutes, so long pauses were unreadable.** The formatter
   only ever did `divmod(seconds, 60)`: a 17-hour pause rendered as `1071m 0s` and an 8-day one as
