@@ -348,10 +348,79 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
   # with guidance if none qualify — a clear early error beats a too-old python failing
   # later at pip, a no-extension python silently degrading search, or a venv-less
   # python dying halfway through `-m venv`.
+  #
+  # The range is BOUNDED AT BOTH ENDS. The floor is rekol's own `requires-python`.
+  # The ceiling tracks wheel availability for the dependency stack, which torch
+  # gates: torch 2.14 publishes cp310–cp314 and nothing for 3.15. Without a
+  # ceiling this probe accepted "the newest python on the machine" and then handed
+  # pip an unsolvable problem — when Homebrew's `python3` became 3.15 (2026-10-09),
+  # every install that fell through to it (no 3.11–3.14, no uv) began dying with
+  # `ResolutionImpossible: ... torch`, naming sentence-transformers rather than the
+  # interpreter choice that actually caused it. A too-new python is now refused up
+  # front, with the same kind of guidance a too-old one already got.
+  # RAISE PY_MAX_EXCLUSIVE when torch publishes the next cpXXX wheels.
+  PY_MIN="3.11"
+  PY_MAX_EXCLUSIVE="3.15"
+  # Prints a short reason on stdout when the candidate is NOT usable; silent and
+  # exit 0 when it is. A reason per candidate matters because every rejection path
+  # here is otherwise invisible: the installer picked an interpreter and the
+  # failure surfaced thousands of lines later inside pip's resolver.
+  _py_reason() {
+    local path="$1"
+    if [[ -z "$path" || ! -x "$path" ]]; then
+      printf 'not present\n'
+      return 1
+    fi
+    REKOL_PY_MIN="$PY_MIN" REKOL_PY_MAX="$PY_MAX_EXCLUSIVE" "$path" -c '
+import os, sys
+lo = tuple(int(p) for p in os.environ["REKOL_PY_MIN"].split("."))
+hi = tuple(int(p) for p in os.environ["REKOL_PY_MAX"].split("."))
+got = sys.version_info[:2]
+shown = "%d.%d" % got
+if got < lo:
+    print("Python %s is too old" % shown); sys.exit(1)
+if got >= hi:
+    print("Python %s is too new — no dependency wheels (torch) for it yet" % shown); sys.exit(1)
+try:
+    import sqlite3
+except Exception:
+    print("Python %s has no sqlite3" % shown); sys.exit(1)
+if not hasattr(sqlite3.connect(":memory:"), "enable_load_extension"):
+    print("Python %s has sqlite3 without enable_load_extension" % shown); sys.exit(1)
+try:
+    import ensurepip  # noqa: F401
+except Exception:
+    print("Python %s has no ensurepip, so it cannot create a venv" % shown); sys.exit(1)
+sys.exit(0)
+' 2>/dev/null
+  }
   _py_suitable() {
-    [[ -n "$1" && -x "$1" ]] && "$1" -c 'import sys,sqlite3,ensurepip;sys.exit(0 if sys.version_info>=(3,11) and hasattr(sqlite3.connect(":memory:"),"enable_load_extension") else 1)' >/dev/null 2>&1
+    _py_reason "$1" >/dev/null 2>&1
   }
   PY3=""
+  # Why each candidate was passed over, in order, for the hard-fail message below.
+  py_rejected=""
+  py_seen=$'\n'
+  _py_note_rejected() {
+    local path="$1" reason="$2" resolved dir
+    # Only interpreters that EXIST but cannot be used are worth listing. A
+    # candidate path that is simply absent on this machine is noise, and feeding
+    # it through the resolver below renders it as a bogus "/python3.11".
+    [[ -n "$path" && -x "$path" ]] || return 0
+    dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || dir=""
+    resolved="${dir:-$(dirname "$path")}/$(basename "$path")"
+    # Several candidates can be one binary (`/opt/homebrew/bin/python3` and a bare
+    # `python3`), and listing it twice reads like two separate problems. The match
+    # is delimiter-anchored and exact: a substring test treats `python3` as already
+    # listed once `python3.14` is there, dropping the interpreter that is usually
+    # the actual culprit — which is exactly what the first version of this did.
+    case "$py_seen" in
+      *$'\n'"${resolved}"$'\n'*) return 0 ;;
+    esac
+    py_seen="${py_seen}${resolved}"$'\n'
+    py_rejected="${py_rejected}         ${resolved}: ${reason}
+"
+  }
   # 1. uv-managed Python (python-build-standalone — always has extensions).
   if [[ -z "$PY3" ]] && command -v uv >/dev/null 2>&1; then
     uv_py="$(uv python find 2>/dev/null || true)"
@@ -363,27 +432,43 @@ if [[ ! -d "${TOOLS_HOME}/.venv" ]]; then
     for candidate in \
         "$(command -v python3.12 2>/dev/null || true)" \
         "$(command -v python3.11 2>/dev/null || true)" \
+        "$(command -v python3.13 2>/dev/null || true)" \
+        "$(command -v python3.14 2>/dev/null || true)" \
         /opt/homebrew/opt/python@3.12/bin/python3.12 \
         /opt/homebrew/opt/python@3.11/bin/python3.11 \
+        /opt/homebrew/opt/python@3.13/bin/python3.13 \
+        /opt/homebrew/opt/python@3.14/bin/python3.14 \
         /usr/local/opt/python@3.12/bin/python3.12 \
         /usr/local/opt/python@3.11/bin/python3.11 \
+        /usr/local/opt/python@3.13/bin/python3.13 \
+        /usr/local/opt/python@3.14/bin/python3.14 \
         /opt/homebrew/bin/python3 \
         /usr/local/opt/python@3/bin/python3 \
         "$(command -v python3 2>/dev/null || true)"; do
-      if _py_suitable "$candidate"; then
+      [[ -n "$candidate" ]] || continue
+      if py_reason_out="$(_py_reason "$candidate")"; then
         PY3="$candidate"
         break
       fi
+      _py_note_rejected "$candidate" "${py_reason_out:-unusable}"
     done
   fi
   if [[ -z "$PY3" ]]; then
     {
-      printf 'error: no suitable Python found. rekol needs Python >=3.11 that (a) has\n'
+      printf 'error: no suitable Python found. rekol needs Python >=%s and <%s that (a) has\n' \
+        "$PY_MIN" "$PY_MAX_EXCLUSIVE"
       printf '       sqlite3.enable_load_extension (for sqlite-vec vector search) and (b) can\n'
       printf '       create a venv. macOS system python and the python.org installer ship (a)\n'
-      printf '       disabled; Debian/Ubuntu split venv into a separate package. Fixes:\n'
+      printf '       disabled; Debian/Ubuntu split venv into a separate package. The upper\n'
+      printf '       bound is not arbitrary: the dependency stack (torch) has no wheels for\n'
+      printf '       newer versions yet, so installing on one fails inside pip instead.\n'
+      if [[ -n "$py_rejected" ]]; then
+        printf '\n       Interpreters considered, and why each was passed over:\n'
+        printf '%s' "$py_rejected"
+      fi
+      printf '\n       Fixes:\n'
       printf '         macOS:         brew install uv && uv python install 3.12   # auto-detected\n'
-      printf '                        or: brew install python\n'
+      printf '                        or: brew install python@3.12\n'
       printf '         Debian/Ubuntu: sudo apt install python3-venv   # (or python3.12-venv)\n'
     } >&2
     exit 2

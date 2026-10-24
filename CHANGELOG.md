@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`install.sh` accepted any Python >=3.11, so it chose one the dependencies have no wheels
+  for and the install died inside pip (#207).** The suitability probe was bounded only from
+  below. When Homebrew's `python3` became **3.15** (2026-10-09) and torch still published
+  nothing past `cp314`, every install that fell through to it — no 3.11–3.14 present, no `uv` —
+  began failing with `ERROR: ResolutionImpossible` naming `sentence-transformers` and `torch`,
+  which pointed at the dependency set rather than at the interpreter choice that caused it.
+  This is what had the required `macos-latest` gate red across four consecutive merges, and it
+  broke **real first-time installs** on any up-to-date Mac in that shape, not just CI.
+  No commit caused it: the trigger was a new Python release, which is why the four red runs
+  bisect "cleanly" to an unrelated change — the last green macOS run was seven weeks earlier,
+  so a moving environment and a moving tree are indistinguishable across that gap.
+  The accepted range is now bounded at **both** ends (`>=3.11`, `<3.15`), 3.13 and 3.14 were
+  added to the probed candidates since torch supports them, and a too-new interpreter is
+  refused up front with the same kind of guidance a too-old one already got. The hard-fail now
+  lists every interpreter considered and why each was passed over — previously the installer
+  announced which python it picked and said nothing about what it had rejected, so there was no
+  way to tell a missing interpreter from a disqualified one.
+  Raise the ceiling when torch ships the next `cpXXX` wheels; a test asserts the ceiling and
+  the candidate list cannot drift apart in either direction.
 - **A failing `setup_file` in the install tests reported no reason, which is why a red
   `macos-latest` gate went four merges undiagnosed (#207).** The one command that does the real
   work there — a full `install.sh` run — sent its output to `/dev/null`, so on failure bats could

@@ -75,6 +75,18 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
         run: pytest -q
+      - name: Provide a supported Python for install.sh (macOS)
+        # install.sh builds its OWN venv and chooses the interpreter itself, from what
+        # the machine has — it does not inherit setup-python's. That choice is why the
+        # macOS gate went red: Homebrew's `python3` became 3.15 on 2026-10-09, torch
+        # publishes no cp315 wheels, and nothing in the supported 3.11–3.14 range
+        # qualified on the runner, so the install died inside pip's resolver with
+        # `ResolutionImpossible`. (install.sh now refuses a too-new interpreter up
+        # front and lists what it rejected and why, so a recurrence says so directly.)
+        # Install a supported interpreter explicitly rather than depending on whatever
+        # the runner image happens to ship — the image is free to move again.
+        if: steps.filter.outputs.shell == 'true' && runner.os == 'macOS'
+        run: brew install python@3.12
       - name: Install bats
         # OS-conditional: brew on macOS, apt on Linux (brew isn't the right installer on
         # Ubuntu). Only when shell scripts changed (see the gate above).
