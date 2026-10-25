@@ -202,11 +202,20 @@ out of the synced tree means a pasted secret can never leak through sync.
   ./install.sh
   ```
 - **`brew install python@3.12` "didn't take":** it's keg-only (no `python3` on
-  PATH). `install.sh` now probes `python@3.12`/`@3.11` opt-prefixes directly, so
-  re-running it should find it; otherwise use the uv path above, or
-  `export PATH="$(brew --prefix python@3.12)/libexec/bin:$PATH"` before installing.
+  PATH). `install.sh` probes the `python@3.12`/`@3.11`/`@3.13`/`@3.14`
+  opt-prefixes directly, so re-running it should find it; otherwise use the uv
+  path above, or `export PATH="$(brew --prefix python@3.12)/libexec/bin:$PATH"`
+  before installing.
 - **Install fails at `pip install` with `requires-python >=3.11`:** your
   `python3` is too old (e.g. macOS's 3.9). Use the uv path above.
+- **`install.sh` says your Python is "too new":** rekol needs **>=3.11 and
+  <3.15**. The ceiling tracks torch, which publishes no wheels past `cp314` —
+  installing on a newer interpreter fails inside pip's resolver instead, with a
+  `ResolutionImpossible` that blames `sentence-transformers` rather than the
+  interpreter. Homebrew's `python3` became 3.15 in October 2026, so a Mac with
+  only that and nothing in range hits this. Install a supported one
+  (`brew install python@3.12`, or the uv path above) and re-run; the installer
+  lists every interpreter it considered and why each was passed over.
 - **Intel (x86_64) Mac — `_ARRAY_API not found` / "Numpy is not available" on the
   first search:** the installable torch wheel there is built against NumPy 1.x.
   Fresh installs pin `numpy<2` automatically; an already-broken venv is fixed with

@@ -7,13 +7,16 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from rekol.cli_resume import main as resume_cli
 from rekol.resume import (
+    _entry_fields,
     enabled_marker_path,
     freeze_journal_path,
     is_enabled,
+    is_limit_shaped,
     ledger_path,
     parse_reset_time,
     record_stop_failure,
@@ -176,6 +179,48 @@ def test_tick_fires_on_the_real_payload_shape(tmp_path: Path) -> None:
     actions = tick(index, home, now=NOW, launcher=lambda sid, log, cwd=None: True)
     assert len(actions) == 1
     assert actions[0].session_id == "sess-1"
+
+
+# Every `error` code a real freeze journal was observed to carry, measured on a
+# live machine on 2026-10-24: 64 entries — `rate_limit` x30, `server_error` x26,
+# `authentication_failed` x5, `invalid_request` x3.
+#
+# Only `rate_limit` is a usage limit that clears on a clock. The others need
+# something else to change (a server to recover, credentials to be fixed, a
+# malformed request not to be re-sent), so resuming one spends a headless launch
+# that cannot succeed. `authentication_failed` is the notable gap this closes: it
+# is the second most common *non*-resumable code in real data and nothing covered
+# it, while the existing `server_error` test supplies prose that real payloads do
+# not carry.
+OBSERVED_FREEZE_CODES = {
+    "rate_limit": True,
+    "server_error": False,
+    "authentication_failed": False,
+    "invalid_request": False,
+}
+
+
+@pytest.mark.parametrize(("code", "resumable"), sorted(OBSERVED_FREEZE_CODES.items()))
+def test_real_freeze_codes_classify_as_measured(code: str, resumable: bool) -> None:
+    """Pin the classifier against the codes real freezes actually produce.
+
+    Deliberately uses the REAL payload shape: an `error` code and no `message`
+    key at all. The pre-existing non-limit test passes a prose message alongside
+    the code, which is a shape no captured payload has — so a regression that
+    relied on the message being present would slip past it.
+
+    Hermetic by construction: the codes are the measurement, recorded here rather
+    than read from the developer's journal, so this asserts the same thing on a
+    machine that has never frozen.
+    """
+    session_id, error_type, message = _entry_fields(
+        {"payload": {"session_id": "sess-1", "error": code}}
+    )
+    assert session_id == "sess-1", "the real payload key is `session_id`"
+    assert is_limit_shaped(error_type, message) is resumable, (
+        f"error={code!r} classified resumable={not resumable}; only a clock-based "
+        "usage limit may be auto-resumed"
+    )
 
 
 def test_ledger_records_a_failed_launch_distinctly(tmp_path: Path) -> None:

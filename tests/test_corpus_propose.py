@@ -29,6 +29,11 @@ def _seed_session_store(db_path: Path, embedder: HashingEmbedder) -> SessionStor
     """Build a SessionStore with a few instruction-signal-bearing messages."""
     store = SessionStore(db_path=db_path, dim=embedder.dim)
     store.init_schema()
+    # Stamp the embedder identity, as production does on first touch (#193).
+    # Without it the store is an unstamped corpus WITH test-built vectors, which
+    # reconcile_embedder refuses because it cannot tell that case apart from a
+    # real corpus about to be poisoned by a test embedder.
+    store.reconcile_embedder("test-hashing", embedder.dim)
     messages = [
         # A clear durable convention — should be recalled.
         dict(

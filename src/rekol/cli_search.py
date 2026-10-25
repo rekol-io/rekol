@@ -299,7 +299,7 @@ def main(
         # actionable message the ingest path uses rather than letting sqlite-vec
         # raise a cryptic width error mid-query.
         try:
-            session_store.reconcile_embedding_dim(embedder.dim)
+            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
         except SessionStoreDimMismatchError as exc:
             session_store.close()
             click.echo(str(exc), err=True)

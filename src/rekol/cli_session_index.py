@@ -292,7 +292,7 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
             # Only when embedding: --no-embed writes no vectors and must not be
             # blocked by an existing index's width.
             if embedder is not None:
-                store.reconcile_embedding_dim(embedder.dim)
+                store.reconcile_embedder(cfg.embedding_model, embedder.dim)
             # Auto-once backfill: if the archive is on and we have never
             # backfilled, reconstruct any indexed-but-unarchived sessions so
             # nothing predating the archive is lost. Marker guards re-runs. Only

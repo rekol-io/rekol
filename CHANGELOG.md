@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
+- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
+  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
+  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
+  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
+  despite being the second most common non-resumable code, and the existing `server_error` test
+  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
+  key), so a regression depending on that prose would have slipped past it. The new test uses
+  the real payload shape and was confirmed to fail when `authentication_failed` is added to
+  `LIMIT_ERROR_TYPES`.
+  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
+  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
+  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
+  recorded on the issue rather than changed here, since what to do about it is a design call.
+
 - **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
   `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
   `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
@@ -22,6 +36,85 @@ follow [Semantic Versioning](https://semver.org/).
   fallback handles correctly, and a check that fires on the healthy path gets ignored.
 
 ### Fixed
+- **Two `doctor` tests were named for behaviour they never executed (#194).** Found in the
+  v0.5.12 external review; the production fix (#188) was correct, the evidence for it was not.
+  `test_shipped_index_files_are_excluded_from_coverage` never ran `doctor` and never built an
+  install — it asserted only that two constants classify `REKOL.md` as non-memory, which cannot
+  support its docstring's claim that a pristine install is healthy and exits 0.
+  `test_doctor_excluded_line_is_generated_from_the_real_list` was worse: it searched
+  `cli_doctor`'s **source** for the literal `deliberately excluded ({excluded_names})`, so it
+  would have passed just as happily with `excluded_names` assigned a hardcoded stale string —
+  a check whose result is identical whether or not the promised property holds, which is the
+  exact bug class the line exists to prevent, sitting in the test written to prove it closed.
+  Replaced with behaviour-level regressions: a `REKOL_HOME` seeded from the **real shipped
+  template** (the way `install.sh` seeds one, so the shipped `REKOL.md` is genuinely on disk
+  and genuinely considered), its index built, the real Click `doctor` command invoked, asserting
+  exit 0 and healthy; plus an assertion that `doctor`'s **rendered** exclusion line contains
+  every name in the exclusion constants. The constants-only check is kept under an honest name.
+  Both were confirmed to fail against the defects they describe: hardcoding a stale
+  `excluded_names` fails the rendered-line test, and removing `REKOL.md` from the exclusion list
+  reproduces the original day-zero `index is DEGRADED` exit 1.
+- **`install.sh` accepted any Python >=3.11, so it chose one the dependencies have no wheels
+  for and the install died inside pip (#207).** The suitability probe was bounded only from
+  below. When Homebrew's `python3` became **3.15** (2026-10-09) and torch still published
+  nothing past `cp314`, every install that fell through to it — no 3.11–3.14 present, no `uv` —
+  began failing with `ERROR: ResolutionImpossible` naming `sentence-transformers` and `torch`,
+  which pointed at the dependency set rather than at the interpreter choice that caused it.
+  This is what had the required `macos-latest` gate red across four consecutive merges, and it
+  broke **real first-time installs** on any up-to-date Mac in that shape, not just CI.
+  No commit caused it: the trigger was a new Python release, which is why the four red runs
+  bisect "cleanly" to an unrelated change — the last green macOS run was seven weeks earlier,
+  so a moving environment and a moving tree are indistinguishable across that gap.
+  The accepted range is now bounded at **both** ends (`>=3.11`, `<3.15`), 3.13 and 3.14 were
+  added to the probed candidates since torch supports them, and a too-new interpreter is
+  refused up front with the same kind of guidance a too-old one already got. The hard-fail now
+  lists every interpreter considered and why each was passed over — previously the installer
+  announced which python it picked and said nothing about what it had rejected, so there was no
+  way to tell a missing interpreter from a disqualified one.
+  Raise the ceiling when torch ships the next `cpXXX` wheels; a test asserts the ceiling and
+  the candidate list cannot drift apart in either direction.
+- **A failing `setup_file` in the install tests reported no reason, which is why a red
+  `macos-latest` gate went four merges undiagnosed (#207).** The one command that does the real
+  work there — a full `install.sh` run — sent its output to `/dev/null`, so on failure bats could
+  print only `not ok 1 setup_file failed` and the offending line. **The cause was discarded before
+  the job log was ever written**, so re-reading that log could not have helped; `macos-latest` is a
+  required gate, so `main` was unmergeable with nothing on record saying why.
+  The output is now captured and printed in full on either failure path — a non-zero exit, or an
+  exit-0 install that somehow left no `rekol` in the venv — and the real exit status is recorded at
+  the call rather than read from `$?` inside an `if ! …` branch, where `!` has already turned it
+  into 0. (That detail matters here: a wrong exit code in the very message meant to explain one.)
+  `install.sh` had the identical shape at the index-dir resolution step — the interpreter's stderr
+  to `/dev/null`, then `could not resolve the local index dir from the venv`: the symptom, with the
+  traceback that explains it thrown away. Diagnosing one instance by hand cost four full installs,
+  because a broken editable install, an import error, and a source tree being rewritten mid-install
+  all produce that one sentence. The traceback is now part of the error.
+  Diagnostics only — this does **not** fix the macOS failure, it makes the next run state it. This
+  is the project's recurring defect shape (a report that reads the same whether or not the thing
+  under test held) sitting in the diagnostics themselves.
+- **The sessions index validated vector WIDTH only, so a test embedder could silently poison a
+  real transcript corpus (#193).** `test-hashing` produces 384-dim vectors exactly like the
+  default `BAAI/bge-small-en-v1.5`, and the store compared only dimension — so a test-configured
+  run that inherited a real `REKOL_INDEX_DIR` wrote hash vectors into a real corpus with **no
+  mismatch raised at all**. An incremental run mixed two semantic spaces; a full run replaced the
+  useful population. Both stay structurally healthy and are searched as though they were real
+  vectors. Two genuinely different *real* models at the same width collide identically, with no
+  test embedder involved: equal dimension is not equal semantics.
+  The sessions store now records the model that built it, in a `metadata` table mirroring the
+  curated store's, and `reconcile_embedder()` owns both halves of the question for every reader
+  and writer — the same chokepoint `reconcile_embedding_dim()` already used for width. Identity
+  is checked first, because a model mismatch is wrong whether or not the widths agree, and
+  "wrong model" is more actionable than "wrong width".
+  **Existing stores keep working.** A populated-but-unstamped store — which is every `sessions.db`
+  created before this change — adopts the configured model once and stamps it, *unless* that
+  model is a test embedder **and the store already holds embeddings**, which is refused. The
+  refusal is keyed on embeddings rather than messages because the harm is a mixed vector space:
+  messages and the FTS index are model-independent, so a store with rows but no vectors has
+  nothing a test embedder could semantically corrupt.
+  Verified against a **copy of a real 137 MB, 34,189-message store**: the migration is additive
+  (`CREATE TABLE IF NOT EXISTS` plus a stamp, no row rewrite), every message and FTS posting count
+  was preserved, identity adopted correctly, and a subsequent test-embedder run was refused. The
+  seven new tests were confirmed to fail against the dim-only behaviour.
+
 - **`<env-time>` reported every gap in minutes, so long pauses were unreadable.** The formatter
   only ever did `divmod(seconds, 60)`: a 17-hour pause rendered as `1071m 0s` and an 8-day one as
   `12217m 54s`. Both correct, neither legible — and it is part of why `mac_setup` kept a duplicate
@@ -37,7 +130,6 @@ follow [Semantic Versioning](https://semver.org/).
   3599/3600s, 86399/86400s, negative clamp, `None`), and were confirmed to fail against the old
   formatter.
 
-### Fixed
 - **A stood-down plugin went silent after one session, so an inert plugin looked like a working
   one (#201).** The coexistence stand-down printed its explanation once, gated on a state file,
   and exited silently every session after. A user who installs the plugin on a machine that
@@ -54,13 +146,62 @@ follow [Semantic Versioning](https://semver.org/).
   from "announces once then goes silent" — which is why this shipped. The test now runs it three
   times and asserts the later runs are not silent; confirmed to fail against the once-only gate
   with `second run was SILENT`.
-
-### Fixed
 - **Plugin and script installs no longer activate duplicate hook backends (#167).** The Claude
   plugin now stands down when it detects an existing `install.sh` deployment, including legacy
   installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol
   plugin and skips its own hook wiring. Detection failures are handled conservatively so an
   unreadable settings file or unavailable parser cannot silently enable both backends.
+
+### Documentation
+- **README now covers a Python that is too NEW (#207).** The install troubleshooting list
+  explained a too-old `python3` but not a too-new one, which became the live failure the moment
+  Homebrew's `python3` reached 3.15 — so the newly-added refusal would have sent people to a
+  list that did not mention their case. Documents the supported `>=3.11, <3.15` range and why
+  the ceiling exists (torch publishes no wheels past `cp314`), and corrects the set of
+  `python@3.x` opt-prefixes the installer probes, which now includes 3.13 and 3.14.
+
+## [0.5.13] - 2026-09-02
+### Added
+- **The library now refuses to replace a real index with test-built data.** On 2026-08-18 a
+  `rekol index rebuild` running the **test embedder** replaced a live user's curated index;
+  search over curated memory returned nothing for two days and nothing surfaced it, because
+  the write *succeeded* — a test-built index is a perfectly valid index whose vectors simply
+  mean nothing.
+  The existing check could not catch it. `IndexStore.check_model_identity()` compares the
+  configured model against the one recorded in the index — but `rebuild` deliberately builds
+  into a temp DB and swaps it over `index.db` atomically (so a kill mid-rebuild cannot leave
+  an empty index), and **nothing on that path reads the old index's identity**. The guard was
+  where it was convenient to assert, not where the destructive act happens.
+  New `rekol.safety.assert_not_clobbering_real_index()` runs immediately before the rebuild:
+  if the incoming model is a test embedder (`test-hashing`) and the existing index records a
+  real one, it refuses and names both. `test-hashing` is a reliable signal precisely because
+  nothing legitimate uses it. Escape hatch:
+  `REKOL_ALLOW_TEST_EMBEDDER_TO_OVERWRITE_REAL_INDEX=1`.
+  **Deliberately not path-based.** Both August incidents involved isolation that was genuinely
+  attempted and silently outranked — the sandbox redirected `REKOL_HOME`/`XDG_CACHE_HOME`
+  while an inherited `REKOL_INDEX_DIR` (highest precedence, used verbatim) still pointed at
+  the real cache. A guard asking *"does this path look like a sandbox?"* would have been
+  fooled identically. Asking *"what built the thing I am about to destroy?"* cannot be.
+  It **fails open** on a missing, unstamped, or corrupt index: a guard that blocked the
+  rebuild which repairs a damaged index would be worse than the bug. Tests cover both
+  directions, including an end-to-end reproduction of the incident through the CLI —
+  confirmed to fail when the call site is removed while all unit tests still pass, which is
+  exactly the failure a unit test cannot see.
+  **Known gap, filed not fixed:** the *sessions* index guards on embedding **dimension**
+  only, and `test-hashing` is 384-dim like `bge-small-en-v1.5` — so the same mistake against
+  `sessions.db` would still pass silently. Closing it requires recording a model identity in
+  the sessions schema, which is a larger change than this fix.
+
+### Changed
+- **The #170 hook-execution test now asserts its own precondition.** It runs every installed hook
+  with `rekol` off the PATH, but never checked that `rekol` was actually unreachable — so on a
+  host where it resolved anyway, the test would pass while proving nothing. Credit to QA, who hit
+  the mirror image: their probe used `bash -lc`, a **login** shell, which sources the rc files the
+  installer edits and re-adds `BIN_DIR` to PATH — testing the exact opposite of the #159 condition
+  and passing for the wrong reason. They caught it only because they asserted the precondition
+  explicitly; that habit is the general answer to this bug class, not a patch for one instance.
+
+### Fixed
 - **The real-index guard was bypassed by `rekol search` (release-review blocker).** #185 claimed
   the guard lived "where the destructive act happens". It did not — it was called only from the
   `rekol index rebuild` CLI wrapper, while the destructive act is `Indexer.rebuild()`'s
@@ -87,7 +228,6 @@ follow [Semantic Versioning](https://semver.org/).
   name; both are inverted, and a new test pins that a real-model repair of a corrupt index is
   still unimpeded.
 
-### Fixed
 - **The migration marker told users to delete the only byte-complete copy of their originals.**
   It said *"archived originals in old-memory-archive/ — safe to delete after 1 week"*, while the
   same release documents that migration strips unrecognised legacy frontmatter which then exists
@@ -179,7 +319,6 @@ follow [Semantic Versioning](https://semver.org/).
   red. Verified the affected hook behaves identically before and after — same output with a
   payload, with no stdin, and exit 0 in both.
 
-### Fixed
 - **Every new user's first `doctor` reported `DEGRADED` and exited 1.** Found by QA on a
   **pristine** v0.5.3 install: `curated coverage: 5/6 — 1 invisible to search: REKOL.md`, with
   the remedy *"fix the frontmatter"* — for a file the user did not write, which would not help,
@@ -199,16 +338,6 @@ follow [Semantic Versioning](https://semver.org/).
   than restating it in prose — the old hardcoded `(tasks/, MEMORY.md)` would have gone stale
   silently, which is precisely what that line exists to prevent.
 
-### Changed
-- **The #170 hook-execution test now asserts its own precondition.** It runs every installed hook
-  with `rekol` off the PATH, but never checked that `rekol` was actually unreachable — so on a
-  host where it resolved anyway, the test would pass while proving nothing. Credit to QA, who hit
-  the mirror image: their probe used `bash -lc`, a **login** shell, which sources the rc files the
-  installer edits and re-adds `BIN_DIR` to PATH — testing the exact opposite of the #159 condition
-  and passing for the wrong reason. They caught it only because they asserted the precondition
-  explicitly; that habit is the general answer to this bug class, not a patch for one instance.
-
-### Fixed
 - **The bats install suite could still destroy the real curated index — and this is how it
   actually happened on 2026-08-18.** `setup_file()` writes `embedding_model: test-hashing` and
   runs a REAL `install.sh`, which runs `rekol index rebuild`. `REKOL_INDEX_DIR` is resolution
@@ -237,37 +366,7 @@ follow [Semantic Versioning](https://semver.org/).
   `skill.md`, so a filesystem check literally cannot fail on the machine most likely to run
   it — it would pass for the wrong reason. Verified to fail against `main`.
 
-### Added
-- **The library now refuses to replace a real index with test-built data.** On 2026-08-18 a
-  `rekol index rebuild` running the **test embedder** replaced a live user's curated index;
-  search over curated memory returned nothing for two days and nothing surfaced it, because
-  the write *succeeded* — a test-built index is a perfectly valid index whose vectors simply
-  mean nothing.
-  The existing check could not catch it. `IndexStore.check_model_identity()` compares the
-  configured model against the one recorded in the index — but `rebuild` deliberately builds
-  into a temp DB and swaps it over `index.db` atomically (so a kill mid-rebuild cannot leave
-  an empty index), and **nothing on that path reads the old index's identity**. The guard was
-  where it was convenient to assert, not where the destructive act happens.
-  New `rekol.safety.assert_not_clobbering_real_index()` runs immediately before the rebuild:
-  if the incoming model is a test embedder (`test-hashing`) and the existing index records a
-  real one, it refuses and names both. `test-hashing` is a reliable signal precisely because
-  nothing legitimate uses it. Escape hatch:
-  `REKOL_ALLOW_TEST_EMBEDDER_TO_OVERWRITE_REAL_INDEX=1`.
-  **Deliberately not path-based.** Both August incidents involved isolation that was genuinely
-  attempted and silently outranked — the sandbox redirected `REKOL_HOME`/`XDG_CACHE_HOME`
-  while an inherited `REKOL_INDEX_DIR` (highest precedence, used verbatim) still pointed at
-  the real cache. A guard asking *"does this path look like a sandbox?"* would have been
-  fooled identically. Asking *"what built the thing I am about to destroy?"* cannot be.
-  It **fails open** on a missing, unstamped, or corrupt index: a guard that blocked the
-  rebuild which repairs a damaged index would be worse than the bug. Tests cover both
-  directions, including an end-to-end reproduction of the incident through the CLI —
-  confirmed to fail when the call site is removed while all unit tests still pass, which is
-  exactly the failure a unit test cannot see.
-  **Known gap, filed not fixed:** the *sessions* index guards on embedding **dimension**
-  only, and `test-hashing` is 384-dim like `bge-small-en-v1.5` — so the same mistake against
-  `sessions.db` would still pass silently. Closing it requires recording a model identity in
-  the sessions schema, which is a larger change than this fix.
-
+## [0.5.7] - 2026-08-25
 ### Fixed
 - **`uninstall.sh` silently destroyed the transcript archive, in the default layout.** Step 3
   removed the tools home with `rm -rf "${TOOLS_HOME}"` under a comment asserting it was
@@ -291,6 +390,9 @@ follow [Semantic Versioning](https://semver.org/).
   Tests assert both directions — the archive survives a default uninstall and is still removed
   by `--purge-archive` — and were confirmed to **fail against the old code**, so they encode
   the bug rather than the fix.
+
+## [0.5.6] - 2026-08-25
+### Fixed
 - **A failing rekol hook could lock you out of Claude Code entirely.** A hook that exits non-zero
   can fail its *event*, and for `UserPromptSubmit` that means **prompts cannot be submitted at
   all** — rekol making the editor unusable, the worst failure this tool has. It happened on a live
@@ -321,6 +423,9 @@ follow [Semantic Versioning](https://semver.org/).
   a real 35,969-message index during development. Both suites now clear those variables, and an
   `assert_sandboxed()` sentry refuses any purge whose target is not inside `$TESTROOT`, so a future
   variable with the same power fails loudly instead of deleting data.
+
+## [0.5.5] - 2026-08-25
+### Fixed
 - **`doctor` reported a permanent FTS desync that no rebuild could clear.** Found on a live
   machine: `✗ session FTS: keyword index out of sync: 0 orphaned postings, 1 unindexed messages`,
   every run since 2026-08-05, with `rekol session-index --full` printed as the remedy — and
@@ -339,28 +444,7 @@ follow [Semantic Versioning](https://semver.org/).
   all-clear. That mattered more than the fix — a health check that is always red is one people
   learn to ignore, which then hides the checks that matter.
 
-### Fixed
-- **`install.sh` and `uninstall.sh` hardcoded `$HOME/.claude`, ignoring `CLAUDE_CONFIG_DIR`
-  (#176).** Last surviving members of the family fixed in v0.5.2 — missed because the sweep that
-  found the others was scoped to `src/`. Two paths were affected, and the second is the serious
-  one: `SKILL_BASE` (skills installed where nothing looks) and **`SETTINGS_JSON`** — so on a
-  relocated tree *every hook* was written into a `settings.json` Claude Code never reads. Both
-  reported success, because the files were written; they were simply written somewhere nothing
-  loads from. `uninstall.sh` had the identical pair, so it would have reported removing skills and
-  hooks it never touched — the detector-wider-than-remover shape it already fixed once.
-  The rule is now duplicated in bash deliberately (uninstall must resolve it with the venv already
-  deleted, and `SETTINGS_JSON` is needed long before the venv exists) and **a test asserts the
-  shell rule and `config.resolve_claude_config_dir()` agree** across unset / empty / whitespace /
-  path / path-with-spaces, so the two copies cannot drift.
-- **rekol shipped a skill whose YAML frontmatter does not parse (#175).**
-  `skill/rekol-bootstrap/skill.md` had an unquoted `: ` inside a plain scalar, so
-  `yaml.safe_load` raised `mapping values are not allowed here`. Claude Code's parser is more
-  forgiving, so it loaded and the damage stayed invisible — but `description` is the string Claude
-  Code relevance-matches on, and anything of ours that parses strictly would silently drop the
-  skill. **Third instance of this exact bug**, after a live memory file and a template, so the fix
-  ships with a test that `yaml.safe_load`s the frontmatter of *every* file rekol ships
-  (`skill/*/*.md`, `src/rekol/template/**/*.md`) and asserts each skill declares a non-empty
-  `name` and `description`.
+## [0.5.4] - 2026-08-25
 ### Added
 - **`rekol update` — "is something newer available?" (#27, network half).** The offline half
   shipped in v0.5.2 and answers "is what I have actually installed?"; this answers the other
@@ -394,11 +478,27 @@ follow [Semantic Versioning](https://semver.org/).
   - Opt out with `update_check: false`.
 
 ### Fixed
-- The bats suites would have made ~22 real network calls per run once the update hook was wired —
-  measured at 2.12s each, versus 0.18s and no state written with the check disabled. Every bats
-  fixture now pins `update_check: false`, so CI cannot acquire a hidden network dependency. Same
-  class as #155, where one unit test silently started downloading the embedding model and turned
-  CI red twice on unrelated PRs.
+- **`install.sh` and `uninstall.sh` hardcoded `$HOME/.claude`, ignoring `CLAUDE_CONFIG_DIR`
+  (#176).** Last surviving members of the family fixed in v0.5.2 — missed because the sweep that
+  found the others was scoped to `src/`. Two paths were affected, and the second is the serious
+  one: `SKILL_BASE` (skills installed where nothing looks) and **`SETTINGS_JSON`** — so on a
+  relocated tree *every hook* was written into a `settings.json` Claude Code never reads. Both
+  reported success, because the files were written; they were simply written somewhere nothing
+  loads from. `uninstall.sh` had the identical pair, so it would have reported removing skills and
+  hooks it never touched — the detector-wider-than-remover shape it already fixed once.
+  The rule is now duplicated in bash deliberately (uninstall must resolve it with the venv already
+  deleted, and `SETTINGS_JSON` is needed long before the venv exists) and **a test asserts the
+  shell rule and `config.resolve_claude_config_dir()` agree** across unset / empty / whitespace /
+  path / path-with-spaces, so the two copies cannot drift.
+- **rekol shipped a skill whose YAML frontmatter does not parse (#175).**
+  `skill/rekol-bootstrap/skill.md` had an unquoted `: ` inside a plain scalar, so
+  `yaml.safe_load` raised `mapping values are not allowed here`. Claude Code's parser is more
+  forgiving, so it loaded and the damage stayed invisible — but `description` is the string Claude
+  Code relevance-matches on, and anything of ours that parses strictly would silently drop the
+  skill. **Third instance of this exact bug**, after a live memory file and a template, so the fix
+  ships with a test that `yaml.safe_load`s the frontmatter of *every* file rekol ships
+  (`skill/*/*.md`, `src/rekol/template/**/*.md`) and asserts each skill declares a non-empty
+  `name` and `description`.
 
 ## [0.5.2] - 2026-08-12
 ### ⚠️ Action required for existing installs
