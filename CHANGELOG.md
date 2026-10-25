@@ -5,6 +5,39 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
+  system dark — and a missing `jq` triggered the same stand-down (release blocker).** Found by
+  the 0.6.0 pre-release fan-out review, in #199's own change.
+  Two defects, one cause: `install.sh` gated Step 7.5 — writing `env.REKOL_HOME`,
+  `REKOL_TOOLS_HOME`, `REKOL_INDEX_DIR` and `REKOL_ARCHIVE_DIR` into `settings.json` — on
+  `DO_HOOK`, the same flag the coexistence stand-down clears. But that block is **not hook
+  wiring**, and `plugin/hooks/bootstrap` states the plugin cannot edit `settings.json` at all
+  ("that is the whole point"), so nothing else supplies those keys. By Step 7.5's own comment,
+  without them "the entire memory system is dark". #199's design says to stand down hook wiring
+  *only*; a new `DO_SETTINGS_ENV` flag now holds it to that, tracking the user's explicit
+  `--no-hook`/`--test-mode` intent and clearing on exactly one other condition — a
+  `settings.json` that cannot be parsed, where rewriting it would destroy the user's file.
+  Second, the detector's `rc=2` conflated "a plugin may be enabled, I cannot tell" with "jq is
+  not installed". On any machine with an existing `settings.json` and no `jq` — Debian/Ubuntu
+  minimal, Alpine, older macOS — the installer skipped every hook step, skipped the env block,
+  printed a reassuring "hook wiring skipped", and exited 0. Without `jq` it cannot *mutate*
+  `settings.json` either, so it could not create the duplicate backend the gate exists to
+  prevent: there was nothing to guard against. It now continues, and the documented jq-less
+  fallback (README: "without it the installer prints the snippet to merge by hand") is reachable
+  again rather than dead code.
+  The existing stand-down test could not see any of this: it asserted that hooks were empty and
+  that an unrelated `env` key survived, which holds identically whether the env block was written
+  or skipped. It now asserts `env.REKOL_HOME`, and a new test hides `jq` and asserts the install
+  still succeeds and still prints the snippet. Both were confirmed to fail against the pre-fix
+  installer. Hiding `jq` mirrors **every** PATH entry containing one — this machine has two —
+  and asserts the hiding worked before relying on it; an earlier version used a hand-picked tool
+  allow-list and the installer died with exit 127 while the test still passed.
+- **CI's bats change-filter ignored `plugin/`, which `install.sh` now hard-depends on.** Since
+  #199 the installer `die`s when `plugin/hooks/coexistence.sh` is unreadable, so a change under
+  `plugin/` can break the primary install path with the install suite never running. Added
+  `^plugin/` to the filter; a Python-only change still skips bats.
+
 ### Added
 - **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
   (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,

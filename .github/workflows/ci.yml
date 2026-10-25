@@ -48,7 +48,7 @@ jobs:
         run: |
           base='${{ github.event.pull_request.base.sha }}'
           if changed="$(git diff --name-only "$base" HEAD 2>/dev/null)"; then
-            if printf '%s\n' "$changed" | grep -qE '^(install|uninstall)\.sh$|^hooks/|^tests/test_(install|uninstall)\.bats$|^\.github/workflows/ci\.yml$'; then
+            if printf '%s\n' "$changed" | grep -qE '^(install|uninstall)\.sh$|^hooks/|^plugin/|^tests/test_(install|uninstall)\.bats$|^\.github/workflows/ci\.yml$'; then
               echo 'shell=true' >> "$GITHUB_OUTPUT"; echo 'shell scripts changed -> bats WILL run'
             else
               echo 'shell=false' >> "$GITHUB_OUTPUT"; echo 'no shell-script changes -> bats skipped'
