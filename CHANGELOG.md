@@ -5,6 +5,64 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
+  actually recorded (#203).** A console script can be left pointing at an interpreter where the
+  package no longer resolves, so every call through it dies with
+  `ModuleNotFoundError: No module named 'rekol'`. An interactive shell resolves the working
+  wrapper first, so `command -v rekol` is green and `doctor` passed — while a **hook**, whose PATH
+  order differs, resolves the orphan and the session starts with no memory and nothing saying so.
+  **No program found on PATH is executed.** `--version` is not a safety boundary for an arbitrary
+  program named `rekol`: it can mutate state, read stdin, spawn children or hang, and bounding
+  each candidate still let a scripted `doctor` stall for minutes. (The one thing that *is*
+  executed is a path rekol itself recorded in a hook command — bounded at 5s, in its own process
+  group, killed as a group on timeout, and memoised per path.) Classification reads the shebang
+  and, for a
+  direct Python interpreter, that interpreter's `site-packages` — including following an editable
+  install's `.pth` to its target, because `dist-info` proves a package was *installed*, not that it
+  *resolves*. The real orphan was exactly that shape: `dist-info` present, `.pth` pointing at a
+  deleted worktree.
+  Only exact evidence authorises removal advice — a missing Python interpreter, an absolute-path
+  `.pth` whose target has no `rekol/__init__.py`, or a
+  `site-packages` that was read and does not resolve `rekol`. A non-Python or `env`-resolved
+  shebang is **not classified** (the shipped shim is `#!/usr/bin/env bash`, and "bash has no
+  site-packages" would have advised deleting a working shim), and a `site-packages` that cannot be
+  located or read is **cannot-tell**, never "absent" — reading cannot-tell as absent is the same
+  mistake as #218. A setuptools *finder* `.pth` and a relative-path `.pth` are both cannot-tell:
+  the first resolves through an import hook that would have to be executed, the second against a
+  `sys.path` base we are only guessing at. Both are healthy layouts that an earlier version
+  reported as orphans with removal advice.
+  Hook executability is now its own check that runs **unconditionally**. `unrunnable_hooks()` has
+  existed since #159, but `doctor` only reached it from inside the install-drift check, which
+  returns early with no manifest — so wired-but-dead hooks went unprobed on any machine without
+  one, though probing them needs nothing from the manifest (#215).
+  **Stated limit — this is detection, not prevention.** The PATH walk sees only the PATH of the
+  process running `doctor`, so an entry present solely on a hook's PATH is invisible from there; a
+  green line reports *resolvability*, not a proven hook path. The companion check verifies that the
+  recorded fallback is **runnable**, and does not establish which executable a hook resolves — a
+  hook prefers whatever `command -v rekol` finds in its own environment, and reaches the fallback
+  only when that fails. So in the originally filed failure, where the orphan comes first on the
+  hook's PATH, neither check fires. Preventing that requires preferring the recorded path, which is
+  a separate change.
+- **`uninstall.sh` now names `rekol` console scripts belonging to other interpreters (#203).**
+  It only ever considered `${BIN_DIR}/rekol`, so a script installed through a different
+  interpreter survived an uninstall completely. Reported rather than deleted, deliberately: those
+  files belong to Python environments this installer never created, often need root, and may be
+  an unrelated tool named `rekol`. Deleting another installation's files to finish our own
+  uninstall is not a trade worth making silently — naming them exactly is. It also **never
+  executes** anything it finds on PATH, including under `--dry-run`: a dry run that runs
+  strangers' binaries is not a dry run. Detection is the shebang alone, so it names the
+  definitive case (a Python interpreter that no longer exists) and refers the rest to
+  `doctor`, which holds the full classifier.
+- **`doctor` reports when `rekol --version` disagrees with the code being run (#203).**
+  `cli.py` uses `@click.version_option(package_name="rekol")`, which reads the installed
+  distribution's metadata. For an **editable** install that metadata is frozen at install time,
+  so `--version` keeps reporting whatever was current when `pip install -e` last ran while the
+  source tree moves on. Measured on a live machine: `--version` said 0.5.5 while the executing
+  code was 0.6.1 — six patch releases apart, and that stale number was repeated in coordination
+  notes for days. INFO rather than a problem, since a drifting editable install is the normal
+  state of a development checkout.
+
 ### Fixed
 - **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
   system dark — and a missing `jq` triggered the same stand-down (release blocker).** Found by
