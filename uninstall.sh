@@ -407,6 +407,100 @@ elif [[ "$BIN_DIR_SOURCE" == "default" && "$MANIFEST_FOUND" == "0" ]]; then
 fi
 
 # =============================================================================
+# Step 1.5 — report `rekol` console scripts belonging to OTHER interpreters (#203)
+# =============================================================================
+# A `pip install` through a different interpreter leaves its own console script
+# behind — e.g. /Library/Frameworks/Python.framework/.../bin/rekol. Step 1 above
+# only ever considers ${BIN_DIR}/rekol, so those survive an uninstall entirely.
+#
+# Why that is worse than a stale file: an interactive shell resolves the working
+# wrapper first, so `command -v rekol` stays green and `rekol doctor` passes,
+# while a hook — whose PATH order differs — resolves the orphan and dies with
+# `ModuleNotFoundError: No module named 'rekol'`. The session then starts with no
+# memory and nothing says so.
+#
+# REPORTED, NOT REMOVED, deliberately. These files belong to Python environments
+# this installer never created, frequently need root, and may be a different
+# tool's `rekol` entirely. Deleting another installation's files to finish our
+# own uninstall is not a trade worth making silently; naming them exactly is.
+orphan_count=0
+unsure_count=0
+seen_real=""
+IFS=':' read -ra _uninstall_path_dirs <<< "${PATH}"
+for _pdir in "${_uninstall_path_dirs[@]}"; do
+  [[ -n "$_pdir" ]] || continue
+  _cand="${_pdir}/rekol"
+  [[ -f "$_cand" && -x "$_cand" ]] || continue
+  # One program may be reachable by several PATH entries (a symlink and its
+  # target); report it once.
+  # Resolve the FILE, not just its directory: `cd $(dirname)` + basename leaves a
+  # symlink unresolved, so a link and its target were counted as two programs.
+  # No `readlink -f`/`realpath` — neither is portable to stock macOS.
+  _real="$_cand"
+  _hops=0
+  while [[ -L "$_real" && "$_hops" -lt 10 ]]; do
+    _link="$(readlink "$_real")"
+    case "$_link" in
+      /*) _real="$_link" ;;
+      *)  _real="$(dirname "$_real")/$_link" ;;
+    esac
+    _hops=$((_hops + 1))
+  done
+  _real="$(cd "$(dirname "$_real")" 2>/dev/null && pwd -P)/$(basename "$_real")"
+  case ":${seen_real}:" in *":${_real}:"*) continue ;; esac
+  seen_real="${seen_real}:${_real}"
+  # Skip the shim Step 1 just handled — it is ours and already dealt with.
+  [[ "$_real" == "$rekol_shim_dst" ]] && continue
+
+  # STATIC ONLY. This uninstaller never executes a program it found on PATH,
+  # including under --dry-run. `--version` is not a safety boundary for an
+  # arbitrary executable named `rekol`: it can mutate state, read stdin, spawn
+  # children, or hang, and a dry run that executes strangers' binaries is not a
+  # dry run. So the evidence here is the shebang and nothing else.
+  _shebang="$(head -c 256 "$_cand" 2>/dev/null | head -n 1)"
+  case "$_shebang" in
+    '#!'*) ;;
+    *) continue ;;                       # no shebang: nothing to conclude
+  esac
+  _interp="${_shebang#\#!}"
+  _interp="${_interp#"${_interp%%[![:space:]]*}"}"   # ltrim
+  _interp="${_interp%% *}"                           # first token only
+  case "$(basename "$_interp")" in
+    python | python[23] | python[23].* ) ;;
+    # `env`-resolved and non-Python shebangs are NOT classified. The shipped
+    # bin/rekol shim is `#!/usr/bin/env bash`, and treating "bash has no
+    # site-packages" as "rekol absent" would advise deleting a working shim.
+    *) continue ;;
+  esac
+  if [[ ! -e "$_interp" ]]; then
+    # Exact evidence, no execution required: the interpreter is gone, so this
+    # script cannot run at all.
+    orphan_count=$((orphan_count + 1))
+    say "found a stale 'rekol' on PATH: ${_cand} (its interpreter ${_interp} no longer exists)"
+    note_leftover "orphaned console script, left by another interpreter — its interpreter ${_interp} no longer exists, so every call through it fails. A hook resolving this instead of a working wrapper starts a session with no memory. Path: ${_cand}"
+    continue
+  fi
+  # The interpreter exists. Deciding whether rekol RESOLVES from it means
+  # inspecting that interpreter's site-packages, including following an editable
+  # install's .pth to its target — `rekol doctor` does that and is the right
+  # place for it. Naming the file without a verdict is the honest middle.
+  unsure_count=$((unsure_count + 1))
+  say "note: another 'rekol' is on PATH at ${_cand} — not ours; run 'rekol doctor' to check whether it resolves"
+done
+# Say what was actually checked, not "all clear". This pass reads shebangs only,
+# so the one thing it can conclude is that no `rekol` on PATH has a MISSING
+# interpreter. A script whose interpreter exists but can no longer import rekol
+# looks identical from here — and a reassuring line that nothing proved is the
+# exact shape of the defect this check was added for.
+if [[ "$orphan_count" == "0" ]]; then
+  if [[ "$unsure_count" == "0" ]]; then
+    say "no other 'rekol' found on PATH"
+  else
+    say "no 'rekol' on PATH has a missing interpreter; ${unsure_count} other(s) not assessed here — run 'rekol doctor' to check whether they resolve"
+  fi
+fi
+
+# =============================================================================
 # Step 2 — remove the Claude skills (rekol + the memory shim + init + bootstrap)
 # =============================================================================
 # install.sh Step 6 installed ${SKILL_BASE}/{rekol,memory,rekol-init,rekol-bootstrap}.

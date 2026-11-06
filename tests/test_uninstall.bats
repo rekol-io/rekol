@@ -716,3 +716,111 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to strip"* ]] || { echo "second run did not report a clean no-op"; echo "$output" | grep -i strip; false; }
 }
+
+# ---------------------------------------------------------------------------
+# Orphaned `rekol` console scripts on other interpreters (#203)
+# ---------------------------------------------------------------------------
+# A pip install through a DIFFERENT interpreter leaves its own console script
+# behind. Step 1 only considers ${BIN_DIR}/rekol, so those survive an uninstall
+# entirely — and because an interactive shell resolves the working wrapper
+# first, `command -v rekol` stays green while a hook (different PATH order)
+# resolves the orphan and starts a session with no memory.
+#
+# HERMETIC AND STATIC. The uninstaller never executes a program it found on
+# PATH, so these fixtures are inert files, and PATH is built from fixture
+# directories plus a minimal system set rather than inheriting $PATH — an
+# earlier version appended $PATH and so inspected (and, before the rework,
+# executed) the real `rekol` on this machine.
+
+# A PATH with the tools uninstall.sh needs and nothing of the developer's.
+#
+# The fixed system directories are asserted to hold no `rekol` before being used,
+# so a machine that happens to have one installed in /usr/bin cannot make these
+# tests inspect it. Without that assertion "hermetic" would be an assumption
+# about the host rather than a property of the test.
+_hermetic_path() {
+    for _sysdir in /usr/bin /bin /usr/sbin /sbin; do
+        if [ -e "$_sysdir/rekol" ]; then
+            echo "refusing to run: $_sysdir/rekol exists, so PATH would not be hermetic" >&2
+            return 1
+        fi
+    done
+    printf '%s:/usr/bin:/bin:/usr/sbin:/sbin' "$1"
+}
+
+@test "uninstall names a stale rekol whose shebang interpreter is gone" {
+    orphan_dir="$TESTROOT/other-interpreter/bin"
+    mkdir -p "$orphan_dir"
+    # Exact evidence, no execution: the interpreter in the shebang does not exist.
+    printf '#!%s/deleted/bin/python3.11
+from rekol.cli import main
+' "$TESTROOT"         > "$orphan_dir/rekol"
+    chmod 755 "$orphan_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$orphan_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"stale 'rekol' on PATH"* ]]
+    [[ "$output" == *"$orphan_dir/rekol"* ]]
+    [[ "$output" == *"no longer exists"* ]]
+}
+
+@test "uninstall never advises removing a bash-shebang rekol shim" {
+    # The shipped shim is `#!/usr/bin/env bash`. bash has no site-packages, so a
+    # naive "absent means orphan" rule fires on a working shim and tells the user
+    # to delete it. This asserts that cannot happen.
+    shim_dir="$TESTROOT/foreign-shim/bin"
+    mkdir -p "$shim_dir"
+    printf '#!/usr/bin/env bash
+exec rekol-real "$@"
+' > "$shim_dir/rekol"
+    chmod 755 "$shim_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$shim_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"stale 'rekol' on PATH"* ]]
+    [[ "$output" != *"orphaned console script"* ]]
+}
+
+@test "uninstall reports what it actually checked when nothing on PATH is stale" {
+    empty_dir="$TESTROOT/no-rekol/bin"
+    mkdir -p "$empty_dir"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
+        PATH="$(_hermetic_path "$empty_dir")" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no other 'rekol' found on PATH"* ]]
+}
+
+@test "uninstall does not claim all-clear when a rekol on PATH was left undecided" {
+    # A script whose interpreter EXISTS but may or may not be able to import
+    # rekol. The shebang-only pass cannot tell, so it must say so and point at
+    # doctor — not print a reassuring all-clear. A line nothing proved is the
+    # exact shape of the defect this whole check exists for.
+    undecided_dir="$TESTROOT/undecided/bin"
+    mkdir -p "$undecided_dir"
+    # A fixture-local interpreter, so this does not depend on the host having
+    # /usr/bin/python3 — if that were absent the script would classify as an
+    # orphan and the test would pass for the wrong reason.
+    fake_interp="$TESTROOT/undecided/python3.11"
+    printf '#!/bin/sh\nexit 0\n' > "$fake_interp"
+    chmod 755 "$fake_interp"
+    printf '#!%s\nfrom rekol.cli import main\n' "$fake_interp" > "$undecided_dir/rekol"
+    chmod 755 "$undecided_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
+        PATH="$(_hermetic_path "$undecided_dir")" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no other 'rekol' found on PATH"* ]]
+    [[ "$output" == *"not assessed here"* ]]
+    [[ "$output" == *"rekol doctor"* ]]
+}

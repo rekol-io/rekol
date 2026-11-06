@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,22 +253,63 @@ def unrunnable_hooks(settings: dict, probe: bool = True) -> list[tuple[str, str]
     return problems
 
 
+# Probing is bounded hard and the result memoised: `doctor` probes every wired
+# hook, and the handlers all share one recorded fallback, so an unmemoised probe
+# paid the cost N times for one answer. 5s is generous for `--version` on a
+# healthy install and short enough that a stalled binary cannot hold `doctor`.
+_PROBE_TIMEOUT_SECONDS = 5
+_runs_cache: dict[str, bool] = {}
+
+
 def _runs(exe: Path) -> bool:
-    """True when the executable actually runs.
+    """True when the executable actually runs. Bounded, process-group killed, memoised.
 
     A console script whose interpreter was replaced (``brew upgrade python``)
     stays executable but cannot import, so existence is not enough.
+
+    This executes only a path rekol itself RECORDED in a hook command — never
+    something discovered on PATH. Even so it is bounded: `subprocess.run`'s
+    timeout kills the direct child but leaves its descendants running, so the
+    child gets its own process group (``start_new_session``) and the whole group
+    is killed on timeout. Without that, one hook fallback that spawns and hangs
+    keeps `doctor` waiting on output that never ends.
     """
+    key = str(exe)
+    if key in _runs_cache:
+        return _runs_cache[key]
+
+    proc: subprocess.Popen[bytes] | None = None
     try:
-        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            [str(exe), "--version"],
-            capture_output=True,
-            timeout=20,
-            check=False,
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [key, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
+        proc.communicate(timeout=_PROBE_TIMEOUT_SECONDS)
+        ok = proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        ok = False
     except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+        ok = False
+    _runs_cache[key] = ok
+    return ok
+
+
+def _kill_group(proc: subprocess.Popen[bytes] | None) -> None:
+    """Kill a timed-out probe and everything it spawned, then reap it."""
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        proc.kill()
+    try:
+        proc.communicate(timeout=_PROBE_TIMEOUT_SECONDS)
+    except (subprocess.SubprocessError, OSError):
+        pass
 
 
 def load_settings(path: Path | None = None) -> dict:

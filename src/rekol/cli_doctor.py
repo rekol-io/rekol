@@ -20,6 +20,7 @@ the whole point is to be the tool you reach for when things look broken.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -955,6 +956,9 @@ def _check_install_drift(cfg: Config) -> list[Finding]:
         # for a settings.json where every command pointed at a path that does not
         # exist. So presence is necessary and nowhere near sufficient — probe that
         # each hook's absolute fallback can actually run before claiming health.
+        # Hook executability now has its own unconditional check
+        # (_check_hook_executability) so it also runs when no manifest exists
+        # (#215). Kept here only to avoid changing this finding's shape.
         broken = unrunnable_hooks(load_settings())
         if broken:
             lines = "\n".join(f"      {name} — {why}" for name, why in broken)
@@ -1073,6 +1077,415 @@ def _check_update_staleness(cfg: Config) -> list[Finding]:
     ]
 
 
+def _rekol_scripts_on_path(path_value: str | None = None) -> list[Path]:
+    """Every executable named ``rekol`` on PATH, in resolution order, deduped.
+
+    Deliberately NOT ``shutil.which``, which answers only "what would run here".
+    The whole point of #203 is the entries AFTER the first: a working wrapper
+    early on PATH hides a broken console script later, and a hook with different
+    PATH order resolves the broken one.
+    """
+    raw = os.environ.get("PATH", "") if path_value is None else path_value
+    found: list[Path] = []
+    seen: set[str] = set()
+    for directory in raw.split(os.pathsep):
+        if not directory:
+            continue
+        candidate = Path(directory) / "rekol"
+        if not os.access(candidate, os.X_OK) or candidate.is_dir():
+            continue
+        # Dedupe on the real path: a symlinked ~/bin/rekol and the venv script it
+        # points at are one program, and reporting it twice reads like two faults.
+        real = str(candidate.resolve())
+        if real in seen:
+            continue
+        seen.add(real)
+        found.append(candidate)
+    return found
+
+
+def _check_hook_executability() -> list[Finding]:
+    """Is the fallback path recorded in each wired hook command runnable? (#215).
+
+    Each wired hook command renders as::
+
+        "$(command -v rekol || echo '<recorded absolute path>')" _hook <handler>
+
+    This verifies that recorded fallback is runnable. It does **not** verify which
+    executable the hook resolves: `command -v rekol` is evaluated in the hook's
+    environment, wins whenever it succeeds, and the fallback is reached only when
+    it fails. So a passing result here does not mean the hook runs the right
+    program — only that the recorded path is not itself broken.
+
+    WHY IT IS ITS OWN CHECK: `unrunnable_hooks()` has existed since the #159 work,
+    but doctor only reached it from inside `_check_install_drift`, which returns
+    early when there is no install manifest. So on any machine without one —
+    an install predating manifest recording, or a REKOL_HOME the installer was
+    never pointed at — wired-but-dead hooks were never probed at all, even though
+    probing them needs nothing from the manifest (#215). It depends only on
+    settings.json, so it runs unconditionally.
+    """
+    from rekol.update import load_settings, unrunnable_hooks
+
+    settings = load_settings()
+    if not (settings.get("hooks") or {}):
+        return [
+            Finding(
+                label="hook executability",
+                status=Status.INFO,
+                detail="no hooks registered in settings.json — nothing to probe",
+            )
+        ]
+
+    broken = unrunnable_hooks(settings)
+    if not broken:
+        return [
+            Finding(
+                label="hook executability",
+                status=Status.OK,
+                detail=(
+                    "every wired hook's recorded fallback path is runnable "
+                    "(not a check of which executable a hook resolves)"
+                ),
+            )
+        ]
+    lines = "; ".join(f"{name} — {why}" for name, why in broken)
+    return [
+        Finding(
+            label="hook executability",
+            status=Status.PROBLEM,
+            detail=(
+                f"{len(broken)} wired hook(s) have a recorded fallback that cannot run: "
+                f"{lines}. Note this is the fallback only — a hook prefers whatever "
+                "`command -v rekol` finds in its own PATH, which is not checked here."
+            ),
+            remedy="./install.sh   (re-renders hook commands with a working path)",
+        )
+    ]
+
+
+class _ScriptVerdict(Enum):
+    """What static inspection can honestly conclude about a `rekol` on PATH."""
+
+    RESOLVES = "resolves"
+    ORPHAN = "orphan"
+    UNCLASSIFIED = "unclassified"
+    CANT_TELL = "cant-tell"
+
+
+_PY_SHEBANG_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
+
+
+def _site_packages_for(interpreter: Path) -> tuple[Path | None, str]:
+    """Guess an interpreter's site-packages WITHOUT running it.
+
+    Layout guesswork, and it says so: venv, framework, pyenv, Debian
+    ``dist-packages`` and user-site all differ. When the directory cannot be
+    located the answer is "cannot tell", never "absent" — reading cannot-tell as
+    absent is the mistake behind QA's F3 and it is what would produce removal
+    advice for a perfectly good install.
+    """
+    name = interpreter.name
+    prefix = interpreter.parent.parent
+    match = _PY_SHEBANG_RE.match(name)
+    if match and match.group(1) and "." in match.group(1):
+        candidate = prefix / "lib" / f"python{match.group(1)}" / "site-packages"
+        if candidate.is_dir():
+            return candidate, ""
+        return None, f"no site-packages at {candidate}"
+    # Unversioned (`python3`): the version is not in the name, so glob — but only
+    # an unambiguous single match is evidence.
+    try:
+        matches = sorted((prefix / "lib").glob("python3.*/site-packages"))
+    except OSError as exc:
+        return None, f"could not read {prefix / 'lib'}: {exc}"
+    live = [m for m in matches if m.is_dir()]
+    if len(live) == 1:
+        return live[0], ""
+    if not live:
+        return None, f"no python3.*/site-packages under {prefix / 'lib'}"
+    return None, f"{len(live)} candidate site-packages under {prefix / 'lib'} — ambiguous"
+
+
+def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
+    """Weigh EVERY matching ``.pth`` before deciding, or None when there are none.
+
+    An editable install has no ``rekol/`` in site-packages — only a ``.pth`` — so
+    ``dist-info`` proves a package was installed, NOT that it resolves. The real
+    #203 orphan was exactly that: ``dist-info`` present, ``.pth`` naming a
+    worktree that had been deleted.
+
+    EVIDENCE IS AGGREGATED, not taken from whichever file sorts first. An earlier
+    version returned on the first ``.pth`` it read, so a stale leftover file
+    condemned a healthy install standing right beside it — removal advice for a
+    working editable install, decided by filename order.
+
+    Precedence:
+
+    1. any target resolving ``rekol/__init__.py`` wins — RESOLVES;
+    2. otherwise any inconclusive form (a setuptools *finder* ``.pth`` whose
+       import hook we decline to execute or reimplement, an unreadable file, a
+       relative path that does not resolve from here, or a file naming no path at
+       all) — CANT_TELL, no remedy;
+    3. ORPHAN only when every file gave conclusive absolute-path evidence and
+       none of it resolved.
+
+    So removal advice requires that nothing anywhere was ambiguous.
+    """
+    try:
+        pths = sorted(site_packages.glob("__editable__*.pth")) + sorted(
+            site_packages.glob("*rekol*.pth")
+        )
+    except OSError as exc:
+        return _ScriptVerdict.CANT_TELL, f"could not list {site_packages}: {exc}"
+    if not pths:
+        return None
+
+    inconclusive: list[str] = []
+    absolute_misses: list[Path] = []
+    for pth in pths:
+        try:
+            lines = [
+                line.strip()
+                for line in pth.read_text(encoding="utf-8", errors="replace").splitlines()
+                if line.strip()
+            ]
+        except OSError as exc:
+            inconclusive.append(f"{pth.name} is unreadable ({exc})")
+            continue
+
+        absolute = [Path(line) for line in lines if line.startswith("/")]
+        relative = [
+            site_packages / line
+            for line in lines
+            if not line.startswith("/") and not line.startswith(("import ", "import\t"))
+        ]
+        # Rule 1 outranks everything, including an import hook in the same file.
+        if any((target / "rekol" / "__init__.py").is_file() for target in absolute + relative):
+            return _ScriptVerdict.RESOLVES, f"editable install resolves via {pth.name}"
+
+        if any(line.startswith(("import ", "import\t")) for line in lines):
+            inconclusive.append(f"{pth.name} resolves rekol through an import hook")
+            continue
+        if not absolute and not relative:
+            inconclusive.append(f"{pth.name} names no path")
+            continue
+        if relative:
+            inconclusive.append(f"{pth.name} names a relative path that does not resolve here")
+        absolute_misses.extend(absolute)
+
+    if inconclusive:
+        return _ScriptVerdict.CANT_TELL, "; ".join(inconclusive)
+    if absolute_misses:
+        listed = ", ".join(str(target) for target in absolute_misses)
+        return (
+            _ScriptVerdict.ORPHAN,
+            f"editable install points at {listed}, none of which has rekol/__init__.py",
+        )
+    return None
+
+
+def _classify_rekol_script(script: Path) -> tuple[_ScriptVerdict, str]:
+    """Decide what a `rekol` on PATH is, by reading files only — never executing.
+
+    Executing an arbitrary program named ``rekol`` is not a safe health probe:
+    ``--version`` is not a boundary, it can mutate state, read stdin or spawn
+    children, and bounding it per-candidate still lets a scripted ``doctor`` stall
+    for minutes. So nothing here runs the candidate.
+
+    The verdicts are deliberately four, not two. Only ORPHAN authorizes removal
+    advice, and it requires exact evidence — a missing Python interpreter, or a
+    site-packages that was read and does not resolve ``rekol``. Everything else
+    is reported without a remedy, because telling someone to delete a file on a
+    guess is worse than staying quiet.
+    """
+    try:
+        with script.open("rb") as handle:
+            first = handle.readline(512).decode("utf-8", "replace").strip()
+    except OSError as exc:
+        return _ScriptVerdict.CANT_TELL, f"could not read it: {exc}"
+
+    if not first.startswith("#!"):
+        return _ScriptVerdict.UNCLASSIFIED, "no shebang (binary or wrapper)"
+
+    parts = first[2:].strip().split()
+    if not parts:
+        return _ScriptVerdict.UNCLASSIFIED, "empty shebang"
+    interpreter = Path(parts[0])
+
+    # `#!/usr/bin/env python3` and `#!/usr/bin/env bash` both resolve their real
+    # interpreter through PATH at exec time, so which one runs is not knowable
+    # statically. The shipped `bin/rekol` shim is `#!/usr/bin/env bash`: treating
+    # "bash has no site-packages" as "rekol absent" would advise deleting the
+    # user's own working shim.
+    if interpreter.name == "env":
+        return (
+            _ScriptVerdict.UNCLASSIFIED,
+            f"interpreter resolved via PATH at exec time ({first[2:].strip()})",
+        )
+    if not _PY_SHEBANG_RE.match(interpreter.name):
+        return _ScriptVerdict.UNCLASSIFIED, f"not a Python shebang ({interpreter})"
+
+    if not interpreter.exists():
+        return _ScriptVerdict.ORPHAN, f"its interpreter {interpreter} no longer exists"
+
+    site_packages, why = _site_packages_for(interpreter)
+    if site_packages is None:
+        return _ScriptVerdict.CANT_TELL, why
+
+    if (site_packages / "rekol" / "__init__.py").is_file():
+        return _ScriptVerdict.RESOLVES, f"rekol resolves in {site_packages}"
+
+    # An EDITABLE install has no `rekol/` in site-packages — only a .pth pointing
+    # at the source tree — so dist-info alone proves it was installed, not that it
+    # resolves. The real #203 orphan was exactly this: dist-info present, .pth
+    # pointing at a worktree that had been deleted.
+    editable = _editable_verdict(site_packages)
+    if editable is not None:
+        return editable
+
+    return _ScriptVerdict.ORPHAN, f"rekol is not importable from {site_packages}"
+
+
+def _check_console_scripts(path_value: str | None = None) -> list[Finding]:
+    """Every `rekol` on PATH, classified by STATIC inspection only (#203).
+
+    A console script can be left pointing at an interpreter where the package no
+    longer resolves, and every call through it dies with
+    ``ModuleNotFoundError: No module named 'rekol'``. An interactive shell
+    resolves the working wrapper first, so ``command -v rekol`` is green and this
+    report passed — while a hook, whose PATH order differs, resolves the orphan
+    and the session starts with no memory.
+
+    LIMIT, stated here because a green line must not be read as more than it is:
+    this sees only the PATH of the process running ``doctor``. A hook runs with a
+    different PATH, so an entry present only there is invisible from here — and
+    nothing in this module establishes which executable a hook resolves. The
+    companion check verifies only that the recorded fallback is runnable, which is
+    a different question.
+    """
+    scripts = _rekol_scripts_on_path(path_value)
+    if not scripts:
+        return [
+            Finding(
+                label="rekol on PATH",
+                status=Status.INFO,
+                detail="no `rekol` found on PATH; hooks fall back to the recorded absolute path",
+            )
+        ]
+
+    orphans: list[tuple[Path, str]] = []
+    unknown: list[tuple[Path, str]] = []
+    resolved = 0
+    for script in scripts:
+        verdict, why = _classify_rekol_script(script)
+        if verdict is _ScriptVerdict.RESOLVES:
+            resolved += 1
+        elif verdict is _ScriptVerdict.ORPHAN:
+            orphans.append((script, why))
+        else:
+            unknown.append((script, why))
+
+    if orphans:
+        listed = "; ".join(f"{path} — {why}" for path, why in orphans)
+        return [
+            Finding(
+                label="rekol on PATH",
+                status=Status.PROBLEM,
+                detail=(
+                    f"{len(orphans)} of {len(scripts)} `rekol` on PATH cannot resolve the "
+                    f"package: {listed}. Your shell may resolve a working one first, but a "
+                    "hook with different PATH order can resolve one of these and start a "
+                    "session with no memory."
+                ),
+                remedy=(
+                    "Remove the script(s) named above — they belong to a Python environment "
+                    "where rekol is no longer resolvable. Check with `which -a rekol`."
+                ),
+            )
+        ]
+
+    detail = f"{resolved} of {len(scripts)} on PATH resolve rekol"
+    if unknown:
+        detail += "; not classified: " + "; ".join(f"{p} — {w}" for p, w in unknown)
+    detail += (
+        ". Only this process's PATH was inspected — an entry present only on a hook's "
+        "PATH is not visible here."
+    )
+    return [
+        Finding(
+            label="rekol on PATH",
+            # INFO, not OK, when something could not be classified: a green tick
+            # over an unclassified entry would read as "all clear".
+            status=Status.INFO if unknown else Status.OK,
+            detail=detail,
+        )
+    ]
+
+
+def _check_version_metadata() -> list[Finding]:
+    """``rekol --version`` reads installed metadata, not the code being run.
+
+    ``cli.py`` uses ``@click.version_option(package_name="rekol")``, which
+    reports the version recorded in the installed distribution's metadata. For an
+    **editable** install that metadata is a snapshot from install time, so it
+    keeps reporting the version that was current when `pip install -e` last ran
+    while the source tree moves on.
+
+    This is not cosmetic: it is the number a user pastes into a bug report. On the
+    machine this check was written for, `rekol --version` said 0.5.5 while the
+    code being executed was 0.6.1 — six patch releases apart, and it misled a
+    reader for days.
+
+    INFO rather than PROBLEM on purpose: a drifting editable install is the normal
+    state of a development checkout, and making doctor red for it would train
+    people to ignore the report — which is the failure this project keeps hitting.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as dist_version
+
+    from rekol import __version__ as code_version
+
+    try:
+        metadata_version = dist_version("rekol")
+    except PackageNotFoundError:
+        return [
+            Finding(
+                label="version reporting",
+                status=Status.INFO,
+                detail=(
+                    f"code is {code_version}; no installed distribution metadata found, "
+                    "so `rekol --version` may fail or report nothing"
+                ),
+            )
+        ]
+
+    if metadata_version == code_version:
+        return [
+            Finding(
+                label="version reporting",
+                status=Status.OK,
+                detail=f"`rekol --version` and the running code agree ({code_version})",
+            )
+        ]
+
+    return [
+        Finding(
+            label="version reporting",
+            status=Status.INFO,
+            detail=(
+                f"`rekol --version` reports {metadata_version} but the code being run is "
+                f"{code_version}. The running code is authoritative; --version reads "
+                "install-time metadata, which an editable install does not refresh."
+            ),
+            remedy=(
+                "Reinstall to resync the metadata if the reported version matters "
+                "(e.g. before quoting it in a bug report)."
+            ),
+        )
+    ]
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -1095,6 +1508,13 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
     findings.extend(_check_install_drift(cfg))
+    # #203: both of these look at the ENVIRONMENT rather than the stores, so they
+    # are the only checks here that can see a break in the hook path. Wired
+    # unconditionally (not behind --deep) because the failure they catch is
+    # invisible to every other check and silent at runtime.
+    findings.extend(_check_hook_executability())
+    findings.extend(_check_console_scripts())
+    findings.extend(_check_version_metadata())
     findings.extend(_check_update_staleness(cfg))
     if deep:
         findings.extend(_check_deep(cfg, embedder))
