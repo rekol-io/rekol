@@ -433,7 +433,20 @@ for _pdir in "${_uninstall_path_dirs[@]}"; do
   [[ -f "$_cand" && -x "$_cand" ]] || continue
   # One program may be reachable by several PATH entries (a symlink and its
   # target); report it once.
-  _real="$(cd "$(dirname "$_cand")" 2>/dev/null && pwd -P)/$(basename "$_cand")"
+  # Resolve the FILE, not just its directory: `cd $(dirname)` + basename leaves a
+  # symlink unresolved, so a link and its target were counted as two programs.
+  # No `readlink -f`/`realpath` — neither is portable to stock macOS.
+  _real="$_cand"
+  _hops=0
+  while [[ -L "$_real" && "$_hops" -lt 10 ]]; do
+    _link="$(readlink "$_real")"
+    case "$_link" in
+      /*) _real="$_link" ;;
+      *)  _real="$(dirname "$_real")/$_link" ;;
+    esac
+    _hops=$((_hops + 1))
+  done
+  _real="$(cd "$(dirname "$_real")" 2>/dev/null && pwd -P)/$(basename "$_real")"
   case ":${seen_real}:" in *":${_real}:"*) continue ;; esac
   seen_real="${seen_real}:${_real}"
   # Skip the shim Step 1 just handled — it is ours and already dealt with.
@@ -464,7 +477,7 @@ for _pdir in "${_uninstall_path_dirs[@]}"; do
     # script cannot run at all.
     orphan_count=$((orphan_count + 1))
     say "found a stale 'rekol' on PATH: ${_cand} (its interpreter ${_interp} no longer exists)"
-    note_leftover "orphaned console script ${_cand} — its interpreter ${_interp} no longer exists, so every call through it fails. A hook resolving this instead of a working wrapper starts a session with no memory. Remove it by hand: rm '${_cand}'"
+    note_leftover "orphaned console script, left by another interpreter — its interpreter ${_interp} no longer exists, so every call through it fails. A hook resolving this instead of a working wrapper starts a session with no memory. Path: ${_cand}"
     continue
   fi
   # The interpreter exists. Deciding whether rekol RESOLVES from it means

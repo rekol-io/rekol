@@ -1312,4 +1312,59 @@ def test_doctor_reports_a_wired_hook_whose_recorded_path_is_broken(tmp_path, mon
     # The hook check is what must refuse to call this healthy.
     hook_findings = _check_hook_executability()
     assert hook_findings[0].status is Status.PROBLEM, hook_findings[0].detail
-    assert "cannot execute" in hook_findings[0].detail
+    assert "cannot run" in hook_findings[0].detail
+    # And it must not overclaim: this verifies the recorded FALLBACK, not which
+    # executable a hook resolves. The wording is load-bearing, so pin it.
+    assert "fallback" in hook_findings[0].detail
+    assert "not checked here" in hook_findings[0].detail
+
+
+def test_a_relative_path_editable_install_is_never_an_orphan(tmp_path, monkeypatch) -> None:
+    """A `.pth` naming a RELATIVE path must not produce removal advice.
+
+    Resolution is attempted against site-packages as a best effort, but the real
+    base is whichever `sys.path` entry the interpreter used, so a miss is
+    cannot-tell — not proof the package is gone. Codex reproduced ORPHAN (with
+    removal advice) for this layout against the previous implementation.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    env_root = tmp_path / "env"
+    interp = _interp_tree(env_root)
+    sp = _site_packages(env_root)
+    # Resolves relative to site-packages: ../../../checkout/src
+    target = env_root / "checkout" / "src"
+    (target / "rekol").mkdir(parents=True)
+    (target / "rekol" / "__init__.py").write_text("")
+    (sp / "__editable__.rekol-0.6.1.pth").write_text("../../../checkout/src\n")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    finding = _check_console_scripts()[0]
+    assert finding.status is not Status.PROBLEM, finding.detail
+    assert finding.remedy is None
+
+
+def test_a_setuptools_finder_pth_is_cant_tell_not_an_orphan(tmp_path, monkeypatch) -> None:
+    """A finder `.pth` maps modules through an import hook, so it is not parsed.
+
+    `import __editable___rekol_finder` resolves rekol at runtime through code we
+    would have to execute or reimplement. Codex reproduced ORPHAN plus removal
+    advice for this layout, which is a completely healthy editable install.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    env_root = tmp_path / "env"
+    interp = _interp_tree(env_root)
+    sp = _site_packages(env_root)
+    (sp / "rekol-0.6.1.dist-info").mkdir()
+    (sp / "__editable__.rekol-0.6.1.pth").write_text(
+        "import __editable___rekol_0_6_1_finder; __editable___rekol_0_6_1_finder.install()\n"
+    )
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    finding = _check_console_scripts()[0]
+    assert finding.status is Status.INFO, finding.detail
+    assert finding.remedy is None, "a finder .pth must never yield removal advice"
+    assert "import hook" in finding.detail

@@ -1105,16 +1105,17 @@ def _rekol_scripts_on_path(path_value: str | None = None) -> list[Path]:
 
 
 def _check_hook_executability() -> list[Finding]:
-    """Can the hooks that are WIRED actually run? (#203 blocker 1, #215).
+    """Is the fallback path recorded in each wired hook command runnable? (#215).
 
-    This is the source of truth for the hook path, and the thing doctor's own
-    PATH cannot be. Each wired hook command renders as::
+    Each wired hook command renders as::
 
         "$(command -v rekol || echo '<recorded absolute path>')" _hook <handler>
 
-    so the recorded absolute path is a concrete, checkable artefact: probing it
-    says something about what the HOOK will run, not about what this process's
-    shell happens to resolve.
+    This verifies that recorded fallback is runnable. It does **not** verify which
+    executable the hook resolves: `command -v rekol` is evaluated in the hook's
+    environment, wins whenever it succeeds, and the fallback is reached only when
+    it fails. So a passing result here does not mean the hook runs the right
+    program — only that the recorded path is not itself broken.
 
     WHY IT IS ITS OWN CHECK: `unrunnable_hooks()` has existed since the #159 work,
     but doctor only reached it from inside `_check_install_drift`, which returns
@@ -1142,7 +1143,10 @@ def _check_hook_executability() -> list[Finding]:
             Finding(
                 label="hook executability",
                 status=Status.OK,
-                detail="every wired hook's recorded path can run",
+                detail=(
+                    "every wired hook's recorded fallback path is runnable "
+                    "(not a check of which executable a hook resolves)"
+                ),
             )
         ]
     lines = "; ".join(f"{name} — {why}" for name, why in broken)
@@ -1151,9 +1155,9 @@ def _check_hook_executability() -> list[Finding]:
             label="hook executability",
             status=Status.PROBLEM,
             detail=(
-                f"{len(broken)} wired hook(s) cannot execute: {lines}. These run with the "
-                "hook environment's PATH, not this shell's, so a session can start with no "
-                "memory while interactive `rekol` works fine."
+                f"{len(broken)} wired hook(s) have a recorded fallback that cannot run: "
+                f"{lines}. Note this is the fallback only — a hook prefers whatever "
+                "`command -v rekol` finds in its own PATH, which is not checked here."
             ),
             remedy="./install.sh   (re-renders hook commands with a working path)",
         )
@@ -1204,13 +1208,27 @@ def _site_packages_for(interpreter: Path) -> tuple[Path | None, str]:
 
 
 def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
-    """Follow an editable install's ``.pth`` to its target, or None if there isn't one.
+    """Follow an editable install's ``.pth``, or None when there isn't one.
 
-    An editable install has no ``rekol/`` in site-packages — only a ``.pth``
-    naming the source tree — so the presence of ``dist-info`` proves it was
-    installed, NOT that it resolves. The real #203 orphan was exactly this shape:
-    ``dist-info`` present and a ``.pth`` pointing at a worktree that had since
-    been deleted. Checking for ``dist-info`` alone would call it healthy.
+    An editable install has no ``rekol/`` in site-packages — only a ``.pth`` —
+    so ``dist-info`` proves a package was installed, NOT that it resolves. The
+    real #203 orphan was exactly that: ``dist-info`` present, ``.pth`` naming a
+    worktree that had been deleted.
+
+    Removal advice is deliberately narrow, because the alternative is telling
+    someone to delete a working install. **Only an absolute-path ``.pth`` whose
+    target has no ``rekol/__init__.py`` is an orphan.** Everything else is
+    cannot-tell:
+
+    * a setuptools *finder* ``.pth`` (``import __editable___rekol_finder``) maps
+      modules through an import hook. Resolving it means executing or
+      reimplementing that hook, so it is not parsed at all;
+    * a relative path is resolved against site-packages as a best effort, and a
+      miss is cannot-tell rather than proof, since the real base is whatever
+      ``sys.path`` entry the interpreter used.
+
+    An earlier version returned ORPHAN for both of those, which produced removal
+    advice for two healthy install layouts.
     """
     try:
         pths = sorted(site_packages.glob("__editable__*.pth")) + sorted(
@@ -1221,18 +1239,40 @@ def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
 
     for pth in pths:
         try:
-            lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = [
+                line.strip()
+                for line in pth.read_text(encoding="utf-8", errors="replace").splitlines()
+                if line.strip()
+            ]
         except OSError as exc:
             return _ScriptVerdict.CANT_TELL, f"could not read {pth.name}: {exc}"
-        targets = [Path(line.strip()) for line in lines if line.strip().startswith("/")]
-        if not targets:
-            continue
-        if any((target / "rekol" / "__init__.py").is_file() for target in targets):
+
+        # A .pth may execute code. Any import-bearing line means a finder, which
+        # we do not interpret.
+        if any(line.startswith(("import ", "import	")) for line in lines):
+            return (
+                _ScriptVerdict.CANT_TELL,
+                f"{pth.name} resolves rekol through an import hook, which is not inspectable",
+            )
+
+        absolute = [Path(line) for line in lines if line.startswith("/")]
+        relative = [site_packages / line for line in lines if not line.startswith("/")]
+        if not absolute and not relative:
+            return _ScriptVerdict.CANT_TELL, f"{pth.name} names no path"
+
+        if any((target / "rekol" / "__init__.py").is_file() for target in absolute + relative):
             return _ScriptVerdict.RESOLVES, f"editable install resolves via {pth.name}"
-        listed = ", ".join(str(target) for target in targets)
+
+        if absolute:
+            listed = ", ".join(str(target) for target in absolute)
+            return (
+                _ScriptVerdict.ORPHAN,
+                f"editable install points at {listed}, which has no rekol/__init__.py",
+            )
+        # Relative only: the base we guessed may simply be the wrong one.
         return (
-            _ScriptVerdict.ORPHAN,
-            f"editable install points at {listed}, which has no rekol/__init__.py",
+            _ScriptVerdict.CANT_TELL,
+            f"{pth.name} names a relative path that does not resolve from {site_packages}",
         )
     return None
 
@@ -1311,9 +1351,10 @@ def _check_console_scripts(path_value: str | None = None) -> list[Finding]:
 
     LIMIT, stated here because a green line must not be read as more than it is:
     this sees only the PATH of the process running ``doctor``. A hook runs with a
-    different PATH, so an entry present only there is invisible from here. What
-    the hook will actually resolve is covered by the wired-command check, which
-    probes the absolute fallback recorded in settings.json.
+    different PATH, so an entry present only there is invisible from here — and
+    nothing in this module establishes which executable a hook resolves. The
+    companion check verifies only that the recorded fallback is runnable, which is
+    a different question.
     """
     scripts = _rekol_scripts_on_path(path_value)
     if not scripts:

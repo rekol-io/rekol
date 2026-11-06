@@ -733,7 +733,18 @@ JSON
 # executed) the real `rekol` on this machine.
 
 # A PATH with the tools uninstall.sh needs and nothing of the developer's.
+#
+# The fixed system directories are asserted to hold no `rekol` before being used,
+# so a machine that happens to have one installed in /usr/bin cannot make these
+# tests inspect it. Without that assertion "hermetic" would be an assumption
+# about the host rather than a property of the test.
 _hermetic_path() {
+    for _sysdir in /usr/bin /bin /usr/sbin /sbin; do
+        if [ -e "$_sysdir/rekol" ]; then
+            echo "refusing to run: $_sysdir/rekol exists, so PATH would not be hermetic" >&2
+            return 1
+        fi
+    done
     printf '%s:/usr/bin:/bin:/usr/sbin:/sbin' "$1"
 }
 
