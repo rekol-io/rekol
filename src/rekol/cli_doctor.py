@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -1073,6 +1074,208 @@ def _check_update_staleness(cfg: Config) -> list[Finding]:
     ]
 
 
+def _rekol_scripts_on_path(path_value: str | None = None) -> list[Path]:
+    """Every executable named ``rekol`` on PATH, in resolution order, deduped.
+
+    Deliberately NOT ``shutil.which``, which answers only "what would run here".
+    The whole point of #203 is the entries AFTER the first: a working wrapper
+    early on PATH hides a broken console script later, and a hook with different
+    PATH order resolves the broken one.
+    """
+    raw = os.environ.get("PATH", "") if path_value is None else path_value
+    found: list[Path] = []
+    seen: set[str] = set()
+    for directory in raw.split(os.pathsep):
+        if not directory:
+            continue
+        candidate = Path(directory) / "rekol"
+        if not os.access(candidate, os.X_OK) or candidate.is_dir():
+            continue
+        # Dedupe on the real path: a symlinked ~/bin/rekol and the venv script it
+        # points at are one program, and reporting it twice reads like two faults.
+        real = str(candidate.resolve())
+        if real in seen:
+            continue
+        seen.add(real)
+        found.append(candidate)
+    return found
+
+
+def _check_console_scripts() -> list[Finding]:
+    """Every ``rekol`` on PATH must actually run — not just the first one (#203).
+
+    A console script can be left behind pointing at an interpreter where the
+    package is no longer importable, and every invocation through it dies with
+    ``ModuleNotFoundError: No module named 'rekol'``. An interactive shell
+    resolves the working wrapper first, so ``command -v rekol`` is green and this
+    whole report passes — while a hook, whose PATH order differs, resolves the
+    orphan and the session starts with no memory at all.
+
+    That is the worst failure shape this tool has: doctor cannot see it, because
+    every check it runs resolves ``rekol`` the way the user's shell does. So this
+    check deliberately examines the ones the shell would never reach.
+
+    Each candidate is EXECUTED rather than inspected: the failure is "this
+    program does not work", and reading its shebang would only let us guess at
+    that. Measured at ~0.3s per candidate, and there are normally one or two.
+    """
+    scripts = _rekol_scripts_on_path()
+    if not scripts:
+        # Not a problem on its own: #159/#160 render hooks as
+        # `"$(command -v rekol || echo '<recorded path>')" _hook`, so an empty
+        # PATH falls back to the absolute path install recorded. Reporting this
+        # as degraded would make doctor red on a working setup, which this
+        # project has already shipped twice.
+        return [
+            Finding(
+                label="rekol on PATH",
+                status=Status.INFO,
+                detail="no `rekol` found on PATH; hooks fall back to the recorded absolute path",
+            )
+        ]
+
+    # Two different failures, and conflating them would be actively harmful.
+    #
+    # ORPHANED means the interpreter behind the script can no longer import rekol
+    # — the #203 defect — and the remedy is to delete the script.
+    #
+    # Anything else that merely exits non-zero is NOT safe to call an orphan. The
+    # shipped `bin/rekol` shim resolves its venv from the environment, so it exits
+    # non-zero whenever `REKOL_TOOLS_HOME`/`HOME` point somewhere without one —
+    # during a sandboxed test, or on a machine mid-reinstall. Telling a user to
+    # `rm` that is telling them to delete their own working shim. So an unexplained
+    # failure is reported WITHOUT a deletion remedy.
+    orphaned: list[tuple[Path, str]] = []
+    unexplained: list[tuple[Path, str]] = []
+    for script in scripts:
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [str(script), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            unexplained.append((script, f"{type(exc).__name__}: {exc}"))
+            continue
+        if completed.returncode == 0:
+            continue
+        combined = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+        tail = combined.strip().splitlines()
+        reason = tail[-1] if tail else f"exit {completed.returncode}"
+        looks_orphaned = "rekol" in combined and (
+            "ModuleNotFoundError" in combined or "ImportError" in combined
+        )
+        (orphaned if looks_orphaned else unexplained).append((script, reason))
+
+    broken = orphaned
+
+    if not broken and unexplained:
+        listed = "; ".join(f"{path} — {why}" for path, why in unexplained)
+        return [
+            Finding(
+                label="rekol on PATH",
+                status=Status.INFO,
+                detail=(
+                    f"{len(unexplained)} of {len(scripts)} `rekol` on PATH did not run: "
+                    f"{listed}. Not reported as orphaned: the failure does not name a "
+                    "missing rekol module, so this may be a working shim whose venv is "
+                    "simply not resolvable from here."
+                ),
+            )
+        ]
+
+    if not broken:
+        return [
+            Finding(
+                label="rekol on PATH",
+                status=Status.OK,
+                detail=(f"{len(scripts)} on PATH, all runnable (first: {scripts[0]})"),
+            )
+        ]
+
+    listed = "; ".join(f"{path} — {why}" for path, why in broken)
+    return [
+        Finding(
+            label="rekol on PATH",
+            status=Status.PROBLEM,
+            detail=(
+                f"{len(broken)} of {len(scripts)} `rekol` on PATH do not run: {listed}. "
+                "Your shell may resolve a working one first, but a hook with different "
+                "PATH order can resolve a broken one and start a session with no memory."
+            ),
+            remedy=(
+                "Remove the broken script(s) above — they belong to a Python "
+                "environment where rekol is no longer installed. Check with "
+                "`which -a rekol`."
+            ),
+        )
+    ]
+
+
+def _check_version_metadata() -> list[Finding]:
+    """``rekol --version`` reads installed metadata, not the code being run.
+
+    ``cli.py`` uses ``@click.version_option(package_name="rekol")``, which
+    reports the version recorded in the installed distribution's metadata. For an
+    **editable** install that metadata is a snapshot from install time, so it
+    keeps reporting the version that was current when `pip install -e` last ran
+    while the source tree moves on.
+
+    This is not cosmetic: it is the number a user pastes into a bug report. On the
+    machine this check was written for, `rekol --version` said 0.5.5 while the
+    code being executed was 0.6.1 — six patch releases apart, and it misled a
+    reader for days.
+
+    INFO rather than PROBLEM on purpose: a drifting editable install is the normal
+    state of a development checkout, and making doctor red for it would train
+    people to ignore the report — which is the failure this project keeps hitting.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as dist_version
+
+    from rekol import __version__ as code_version
+
+    try:
+        metadata_version = dist_version("rekol")
+    except PackageNotFoundError:
+        return [
+            Finding(
+                label="version reporting",
+                status=Status.INFO,
+                detail=(
+                    f"code is {code_version}; no installed distribution metadata found, "
+                    "so `rekol --version` may fail or report nothing"
+                ),
+            )
+        ]
+
+    if metadata_version == code_version:
+        return [
+            Finding(
+                label="version reporting",
+                status=Status.OK,
+                detail=f"`rekol --version` and the running code agree ({code_version})",
+            )
+        ]
+
+    return [
+        Finding(
+            label="version reporting",
+            status=Status.INFO,
+            detail=(
+                f"`rekol --version` reports {metadata_version} but the code being run is "
+                f"{code_version}. The running code is authoritative; --version reads "
+                "install-time metadata, which an editable install does not refresh."
+            ),
+            remedy=(
+                "Reinstall to resync the metadata if the reported version matters "
+                "(e.g. before quoting it in a bug report)."
+            ),
+        )
+    ]
+
+
 def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> DoctorReport:
     """Run every health check and return the collected findings.
 
@@ -1095,6 +1298,12 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
     findings.extend(_check_archive(cfg))
     findings.extend(_check_include_scope(cfg))
     findings.extend(_check_install_drift(cfg))
+    # #203: both of these look at the ENVIRONMENT rather than the stores, so they
+    # are the only checks here that can see a break in the hook path. Wired
+    # unconditionally (not behind --deep) because the failure they catch is
+    # invisible to every other check and silent at runtime.
+    findings.extend(_check_console_scripts())
+    findings.extend(_check_version_metadata())
     findings.extend(_check_update_staleness(cfg))
     if deep:
         findings.extend(_check_deep(cfg, embedder))

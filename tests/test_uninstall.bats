@@ -716,3 +716,64 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to strip"* ]] || { echo "second run did not report a clean no-op"; echo "$output" | grep -i strip; false; }
 }
+
+# ---------------------------------------------------------------------------
+# Orphaned `rekol` console scripts on other interpreters (#203)
+# ---------------------------------------------------------------------------
+# A pip install through a DIFFERENT interpreter leaves its own console script
+# behind. Step 1 only considers ${BIN_DIR}/rekol, so those survive an uninstall
+# entirely — and because an interactive shell resolves the working wrapper
+# first, `command -v rekol` stays green while a hook (different PATH order)
+# resolves the orphan and starts a session with no memory.
+#
+# Fixtures, not a real second install: the machine this was written on no longer
+# reproduces it, and a test that needs a broken global Python is unrunnable.
+
+@test "uninstall names a non-working rekol left on PATH by another interpreter" {
+    orphan_dir="$TESTROOT/other-interpreter/bin"
+    mkdir -p "$orphan_dir"
+    # Reproduces the field failure from #203 verbatim.
+    {
+        printf '#!/bin/sh\n'
+        printf 'echo "Traceback (most recent call last):" >&2\n'
+        printf 'echo "    from rekol.cli import main" >&2\n'
+        printf 'echo "ModuleNotFoundError: No module named %srekol%s" >&2\n' "'" "'"
+        printf 'exit 1\n'
+    } > "$orphan_dir/rekol"
+    chmod 755 "$orphan_dir/rekol"
+
+    # A WORKING rekol ahead of it on PATH — this is what makes the problem
+    # invisible to the shell, and what the check has to see past.
+    good_dir="$TESTROOT/good/bin"
+    mkdir -p "$good_dir"
+    printf '#!/bin/sh\necho "rekol, version 9.9.9"\nexit 0\n' > "$good_dir/rekol"
+    chmod 755 "$good_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE \
+        PATH="$good_dir:$orphan_dir:$PATH" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NON-WORKING 'rekol' on PATH"* ]]
+    [[ "$output" == *"$orphan_dir/rekol"* ]]
+    # The working one must NOT be reported — it belongs to a live install.
+    [[ "$output" != *"$good_dir/rekol"* ]]
+}
+
+@test "uninstall stays quiet about orphans when every rekol on PATH runs" {
+    good_dir="$TESTROOT/only-good/bin"
+    mkdir -p "$good_dir"
+    printf '#!/bin/sh\necho "rekol, version 9.9.9"\nexit 0\n' > "$good_dir/rekol"
+    chmod 755 "$good_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE \
+        PATH="$good_dir:$PATH" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no orphaned 'rekol' console scripts"* ]]
+}

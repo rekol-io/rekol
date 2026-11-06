@@ -407,6 +407,59 @@ elif [[ "$BIN_DIR_SOURCE" == "default" && "$MANIFEST_FOUND" == "0" ]]; then
 fi
 
 # =============================================================================
+# Step 1.5 — report `rekol` console scripts belonging to OTHER interpreters (#203)
+# =============================================================================
+# A `pip install` through a different interpreter leaves its own console script
+# behind — e.g. /Library/Frameworks/Python.framework/.../bin/rekol. Step 1 above
+# only ever considers ${BIN_DIR}/rekol, so those survive an uninstall entirely.
+#
+# Why that is worse than a stale file: an interactive shell resolves the working
+# wrapper first, so `command -v rekol` stays green and `rekol doctor` passes,
+# while a hook — whose PATH order differs — resolves the orphan and dies with
+# `ModuleNotFoundError: No module named 'rekol'`. The session then starts with no
+# memory and nothing says so.
+#
+# REPORTED, NOT REMOVED, deliberately. These files belong to Python environments
+# this installer never created, frequently need root, and may be a different
+# tool's `rekol` entirely. Deleting another installation's files to finish our
+# own uninstall is not a trade worth making silently; naming them exactly is.
+orphan_count=0
+seen_real=""
+IFS=':' read -ra _uninstall_path_dirs <<< "${PATH}"
+for _pdir in "${_uninstall_path_dirs[@]}"; do
+  [[ -n "$_pdir" ]] || continue
+  _cand="${_pdir}/rekol"
+  [[ -f "$_cand" && -x "$_cand" ]] || continue
+  # One program may be reachable by several PATH entries (a symlink and its
+  # target); report it once.
+  _real="$(cd "$(dirname "$_cand")" 2>/dev/null && pwd -P)/$(basename "$_cand")"
+  case ":${seen_real}:" in *":${_real}:"*) continue ;; esac
+  seen_real="${seen_real}:${_real}"
+  # Skip the shim Step 1 just handled — it is ours and already dealt with.
+  [[ "$_real" == "$rekol_shim_dst" ]] && continue
+  _probe_out="$("$_cand" --version 2>&1)" && continue   # works: a live install, not ours to touch
+  # Only a script whose interpreter cannot IMPORT rekol is an orphan. The shipped
+  # shim resolves its venv from the environment, so it exits non-zero whenever
+  # REKOL_TOOLS_HOME/HOME point somewhere without one — including right after this
+  # uninstaller removes the venv. Telling a user to `rm` that would be telling
+  # them to delete a working shim, so the deletion advice is reserved for the
+  # failure that actually names a missing rekol module.
+  case "$_probe_out" in
+    *ModuleNotFoundError*rekol* | *rekol*ModuleNotFoundError* | *ImportError*rekol* | *rekol*ImportError*) ;;
+    *)
+      say "note: '${_cand}' did not run, but the failure does not name a missing rekol module — not treating it as an orphan"
+      continue
+      ;;
+  esac
+  orphan_count=$((orphan_count + 1))
+  say "found a NON-WORKING 'rekol' on PATH: ${_cand}"
+  note_leftover "orphaned console script ${_cand} — its interpreter can no longer import rekol. A hook resolving this instead of a working wrapper starts a session with no memory. Remove it by hand: rm '${_cand}'"
+done
+if [[ "$orphan_count" == "0" ]]; then
+  say "no orphaned 'rekol' console scripts on PATH"
+fi
+
+# =============================================================================
 # Step 2 — remove the Claude skills (rekol + the memory shim + init + bootstrap)
 # =============================================================================
 # install.sh Step 6 installed ${SKILL_BASE}/{rekol,memory,rekol-init,rekol-bootstrap}.

@@ -5,6 +5,43 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **`doctor` now checks every `rekol` on PATH, not just the one your shell would run (#203).**
+  A console script can be left pointing at an interpreter where the package is no longer
+  importable, and every call through it dies with `ModuleNotFoundError: No module named 'rekol'`.
+  An interactive shell resolves the working wrapper first, so `command -v rekol` is green and
+  `doctor` passed — while a **hook**, whose PATH order differs, resolves the orphan and the
+  session starts with no memory and nothing saying so. For a memory tool that is the worst
+  failure shape there is, and it was invisible to every check the tool ran, because they all
+  resolved `rekol` the way the user's shell does.
+  The new check walks PATH itself rather than using `shutil.which`, so it reaches the entries
+  after the first — pinned by a test that puts a working script ahead of a broken one and fails
+  against a first-hit-only implementation.
+  It distinguishes two failures on purpose. A script whose output names a missing `rekol` module
+  is an **orphan** and is reported with a removal remedy. Anything else that merely exits
+  non-zero is reported as INFO **with no deletion advice**: the shipped `bin/rekol` shim resolves
+  its venv from the environment and so exits non-zero whenever `REKOL_TOOLS_HOME`/`HOME` point
+  somewhere without one — mid-reinstall, or right after `uninstall.sh` removes the venv. The
+  first version of this check called any non-zero exit an orphan and told the user to delete it,
+  which aimed that advice at their own working shim; a sandboxed test flagging the real
+  `~/bin/rekol` is what caught it.
+  An empty PATH result stays INFO rather than degraded, because hooks fall back to the absolute
+  path the installer recorded — doctor going red on a working setup has shipped twice here.
+- **`uninstall.sh` now names `rekol` console scripts belonging to other interpreters (#203).**
+  It only ever considered `${BIN_DIR}/rekol`, so a script installed through a different
+  interpreter survived an uninstall completely. Reported rather than deleted, deliberately: those
+  files belong to Python environments this installer never created, often need root, and may be
+  an unrelated tool named `rekol`. Deleting another installation's files to finish our own
+  uninstall is not a trade worth making silently — naming them exactly is.
+- **`doctor` reports when `rekol --version` disagrees with the code being run (#203).**
+  `cli.py` uses `@click.version_option(package_name="rekol")`, which reads the installed
+  distribution's metadata. For an **editable** install that metadata is frozen at install time,
+  so `--version` keeps reporting whatever was current when `pip install -e` last ran while the
+  source tree moves on. Measured on a live machine: `--version` said 0.5.5 while the executing
+  code was 0.6.1 — six patch releases apart, and that stale number was repeated in coordination
+  notes for days. INFO rather than a problem, since a drifting editable install is the normal
+  state of a development checkout.
+
 ### Fixed
 - **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
   system dark — and a missing `jq` triggered the same stand-down (release blocker).** Found by
