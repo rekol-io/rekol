@@ -11,6 +11,7 @@ The bar (from the C5 spec):
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -928,84 +929,217 @@ def test_identical_content_still_flagged_but_said_to_be_identical(tmp_path) -> N
 
 # ---------------- orphaned console scripts on PATH (#203) ----------------
 # A `rekol` console script can be left pointing at an interpreter where the
-# package is no longer importable. An interactive shell resolves the WORKING
-# wrapper first, so `command -v rekol` is green and doctor passes — while a hook,
-# whose PATH order differs, resolves the orphan and the session starts with no
-# memory. Fixtures rather than the real thing: the machine this was written on no
-# longer reproduces it, and a test that needs a broken global install is a test
-# nobody can run.
+# package no longer resolves. An interactive shell resolves the WORKING wrapper
+# first, so `command -v rekol` is green and doctor passed — while a hook, whose
+# PATH order differs, resolves the orphan and the session starts with no memory.
+#
+# Classification is STATIC: nothing here executes a candidate. `--version` is not
+# a safety boundary for an arbitrary program named `rekol`, and bounding each one
+# still lets a scripted doctor stall. Fixtures build real interpreter trees so the
+# inspection under test is the shipped inspection.
+#
+# Verdict table these pin (only ORPHAN may advise removal):
+#   Python shebang, interpreter missing        -> orphan,       remedy
+#   Python shebang, site-packages has no rekol -> orphan,       remedy
+#   editable install, target missing rekol     -> orphan,       remedy
+#   non-Python or env-resolved shebang         -> unclassified, NO remedy
+#   site-packages not locatable                -> can't tell,   NO remedy
+#   rekol resolves                             -> OK
 
 
-def _fake_rekol(directory: Path, *, works: bool) -> Path:
-    """A stand-in console script on PATH — runnable, or dead the way an orphan is."""
+def _interp_tree(root: Path, *, version: str = "3.11") -> Path:
+    """A plausible venv layout: <root>/bin/pythonX.Y + <root>/lib/pythonX.Y/site-packages."""
+    interp = root / "bin" / f"python{version}"
+    interp.parent.mkdir(parents=True, exist_ok=True)
+    interp.write_text("#!/bin/sh\nexit 0\n")
+    interp.chmod(0o755)
+    (root / "lib" / f"python{version}" / "site-packages").mkdir(parents=True, exist_ok=True)
+    return interp
+
+
+def _site_packages(root: Path, *, version: str = "3.11") -> Path:
+    return root / "lib" / f"python{version}" / "site-packages"
+
+
+def _script_for(directory: Path, interpreter: Path | str) -> Path:
+    """A console script whose shebang names `interpreter` — never executed by the check."""
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "rekol"
-    if works:
-        script.write_text("#!/bin/sh\necho 'rekol, version 9.9.9'\nexit 0\n")
-    else:
-        # The real orphan's failure, verbatim from the field report in #203.
-        script.write_text(
-            "#!/bin/sh\n"
-            'echo "Traceback (most recent call last):" >&2\n'
-            'echo "    from rekol.cli import main" >&2\n'
-            "echo \"ModuleNotFoundError: No module named 'rekol'\" >&2\n"
-            "exit 1\n"
-        )
+    script.write_text(f"#!{interpreter}\nfrom rekol.cli import main\nmain()\n")
     script.chmod(0o755)
     return script
 
 
-def test_console_script_check_reports_a_broken_rekol_on_path(tmp_path, monkeypatch) -> None:
-    from rekol.cli_doctor import _check_console_scripts
+def test_orphan_when_the_shebang_interpreter_is_gone(tmp_path, monkeypatch) -> None:
+    """A stale script whose interpreter was deleted. Exact evidence, so removal is advised.
 
-    broken = _fake_rekol(tmp_path / "orphan", works=False)
-    monkeypatch.setenv("PATH", str(broken.parent))
-
-    findings = _check_console_scripts()
-
-    assert len(findings) == 1
-    assert findings[0].status is Status.PROBLEM, findings[0].detail
-    assert str(broken) in findings[0].detail
-    assert "ModuleNotFoundError" in findings[0].detail
-
-
-def test_a_working_rekol_first_does_not_hide_a_broken_one_after_it(tmp_path, monkeypatch) -> None:
-    """THE #203 property: the orphan is reported even though the shell never reaches it.
-
-    This is the case every other doctor check is blind to. `shutil.which` — and a
-    user's shell — stop at the first hit, so an orphan later on PATH is invisible
-    while being exactly what a hook with different PATH order will run.
+    This form fails at `exec` with ENOENT and prints no Python traceback at all, so
+    an output-matching classifier downgrades it to INFO and misses a real orphan.
     """
     from rekol.cli_doctor import _check_console_scripts
 
-    good = _fake_rekol(tmp_path / "good", works=True)
-    orphan = _fake_rekol(tmp_path / "orphan", works=False)
-    # Working one FIRST, which is what makes the shell (and the old checks) green.
+    script = _script_for(tmp_path / "bin", tmp_path / "deleted" / "bin" / "python3.11")
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.PROBLEM, findings[0].detail
+    assert "no longer exists" in findings[0].detail
+    assert findings[0].remedy is not None
+
+
+def test_orphan_when_site_packages_has_no_rekol(tmp_path, monkeypatch) -> None:
+    from rekol.cli_doctor import _check_console_scripts
+
+    interp = _interp_tree(tmp_path / "env")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.PROBLEM, findings[0].detail
+    assert "not importable" in findings[0].detail
+    assert findings[0].remedy is not None
+
+
+def test_orphan_when_an_editable_install_points_at_a_deleted_tree(tmp_path, monkeypatch) -> None:
+    """THE real #203 orphan: an editable install whose .pth target was deleted.
+
+    Its `dist-info` is still in site-packages, so a check that looks only for
+    `rekol-*.dist-info` calls it healthy — which is what made this the one form the
+    first design missed. The .pth has to be followed to its target.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    interp = _interp_tree(tmp_path / "env")
+    sp = _site_packages(tmp_path / "env")
+    (sp / "rekol-0.1.0.dist-info").mkdir()
+    (sp / "rekol-0.1.0.dist-info" / "direct_url.json").write_text(
+        '{"dir_info": {"editable": true}, "url": "file:///gone/worktree"}'
+    )
+    # Points at a tree that no longer exists — the deleted agent worktree.
+    (sp / "__editable__.rekol-0.1.0.pth").write_text(str(tmp_path / "gone" / "src") + "\n")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.PROBLEM, findings[0].detail
+    assert "no rekol/__init__.py" in findings[0].detail
+    assert findings[0].remedy is not None
+
+
+def test_an_editable_install_that_resolves_is_not_an_orphan(tmp_path, monkeypatch) -> None:
+    """The same shape as Leon's live install, which must stay green."""
+    from rekol.cli_doctor import _check_console_scripts
+
+    interp = _interp_tree(tmp_path / "env")
+    sp = _site_packages(tmp_path / "env")
+    target = tmp_path / "checkout" / "src"
+    (target / "rekol").mkdir(parents=True)
+    (target / "rekol" / "__init__.py").write_text("")
+    (sp / "__editable__.rekol-0.6.1.pth").write_text(str(target) + "\n")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.OK, findings[0].detail
+    assert "resolve" in findings[0].detail
+
+
+def test_the_bash_shim_is_never_classified_or_advised_for_removal(tmp_path, monkeypatch) -> None:
+    """The shipped `bin/rekol` shim is `#!/usr/bin/env bash`.
+
+    bash has no site-packages, so "absent means orphan" would fire on the user's
+    own working shim and tell them to delete it. Two earlier versions of this
+    check did exactly that in different ways, which is why it has its own test.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    script = _script_for(tmp_path / "bin", "/usr/bin/env bash")
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.INFO, findings[0].detail
+    assert findings[0].remedy is None, "must never advise deleting the shipped shim"
+    assert "rm " not in findings[0].detail
+
+
+def test_env_resolved_python_is_not_classified(tmp_path, monkeypatch) -> None:
+    """`#!/usr/bin/env python3` picks its interpreter from PATH at exec time.
+
+    Which interpreter runs is therefore not knowable statically, so no verdict —
+    and certainly no removal advice — can be justified.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    script = _script_for(tmp_path / "bin", "/usr/bin/env python3")
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.INFO, findings[0].detail
+    assert findings[0].remedy is None
+
+
+def test_unlocatable_site_packages_is_cant_tell_not_absent(tmp_path, monkeypatch) -> None:
+    """ "Couldn't find it" must never mean "absent" — that is QA's F3 in another form.
+
+    Locating site-packages without running the interpreter is layout guesswork
+    (venv, framework, pyenv, Debian dist-packages, user site). When the guess
+    fails the honest answer is "cannot tell", with no removal advice.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    # An interpreter with no lib/ tree at all: nothing to read, so nothing to conclude.
+    interp = tmp_path / "weird" / "bin" / "python3.11"
+    interp.parent.mkdir(parents=True)
+    interp.write_text("#!/bin/sh\nexit 0\n")
+    interp.chmod(0o755)
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    findings = _check_console_scripts()
+    assert findings[0].status is Status.INFO, findings[0].detail
+    assert findings[0].remedy is None
+    assert "no site-packages" in findings[0].detail
+
+
+def test_a_working_rekol_first_does_not_hide_an_orphan_after_it(tmp_path, monkeypatch) -> None:
+    """THE #203 property: the orphan is reported even though the shell never reaches it.
+
+    `shutil.which` — and a user's shell — stop at the first hit, so an orphan later
+    on PATH is invisible while being exactly what a hook with different PATH order
+    may resolve. Fails against a first-hit-only implementation.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    good_env = _interp_tree(tmp_path / "good-env")
+    (_site_packages(tmp_path / "good-env") / "rekol").mkdir()
+    (_site_packages(tmp_path / "good-env") / "rekol" / "__init__.py").write_text("")
+    good = _script_for(tmp_path / "good", good_env)
+
+    orphan = _script_for(tmp_path / "orphan", tmp_path / "deleted" / "bin" / "python3.11")
+
     monkeypatch.setenv("PATH", os.pathsep.join([str(good.parent), str(orphan.parent)]))
 
     findings = _check_console_scripts()
-
     assert findings[0].status is Status.PROBLEM, findings[0].detail
     assert str(orphan) in findings[0].detail
     assert "1 of 2" in findings[0].detail
 
 
-def test_all_runnable_rekol_on_path_is_ok(tmp_path, monkeypatch) -> None:
+def test_all_resolving_rekol_on_path_is_ok(tmp_path, monkeypatch) -> None:
     from rekol.cli_doctor import _check_console_scripts
 
-    good = _fake_rekol(tmp_path / "good", works=True)
-    monkeypatch.setenv("PATH", str(good.parent))
+    interp = _interp_tree(tmp_path / "env")
+    (_site_packages(tmp_path / "env") / "rekol").mkdir()
+    (_site_packages(tmp_path / "env") / "rekol" / "__init__.py").write_text("")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
 
     findings = _check_console_scripts()
     assert findings[0].status is Status.OK, findings[0].detail
 
 
 def test_no_rekol_on_path_is_info_not_degraded(tmp_path, monkeypatch) -> None:
-    """Must NOT be red: hooks fall back to the absolute path install recorded.
-
-    doctor reporting DEGRADED on a working setup has shipped twice in this
-    project, and each time it taught people to ignore the report.
-    """
+    """Must NOT be red: hooks fall back to the absolute path the installer recorded."""
     from rekol.cli_doctor import _check_console_scripts
 
     empty = tmp_path / "empty"
@@ -1014,6 +1148,24 @@ def test_no_rekol_on_path_is_info_not_degraded(tmp_path, monkeypatch) -> None:
 
     findings = _check_console_scripts()
     assert findings[0].status is Status.INFO, findings[0].detail
+
+
+def test_the_report_states_that_only_this_process_path_was_inspected(tmp_path, monkeypatch) -> None:
+    """A green line must not read as "the hook path is proven".
+
+    doctor sees only its own PATH; a hook runs with a different one. Saying so in
+    the output is the difference between a true statement and an overclaim.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    interp = _interp_tree(tmp_path / "env")
+    (_site_packages(tmp_path / "env") / "rekol").mkdir()
+    (_site_packages(tmp_path / "env") / "rekol" / "__init__.py").write_text("")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    detail = _check_console_scripts()[0].detail
+    assert "only this process's PATH" in detail.lower() or "this process's PATH" in detail
 
 
 def test_a_directory_named_rekol_is_not_mistaken_for_a_script(tmp_path, monkeypatch) -> None:
@@ -1031,7 +1183,8 @@ def test_the_same_script_reached_twice_is_reported_once(tmp_path, monkeypatch) -
     """A symlink and its target are one program; listing it twice reads as two faults."""
     from rekol.cli_doctor import _rekol_scripts_on_path
 
-    real = _fake_rekol(tmp_path / "real", works=True)
+    interp = _interp_tree(tmp_path / "env")
+    real = _script_for(tmp_path / "real", interp)
     linkdir = tmp_path / "link"
     linkdir.mkdir()
     (linkdir / "rekol").symlink_to(real)
@@ -1091,36 +1244,65 @@ def test_missing_distribution_metadata_is_info_not_a_crash(monkeypatch) -> None:
     assert "metadata" in findings[0].detail
 
 
-def test_a_script_that_fails_without_an_import_error_is_not_called_an_orphan(
+# -------- blocker 1: doctor's PATH vs the hook's PATH are different things --------
+
+
+def test_doctor_is_not_green_when_the_hook_resolves_something_doctor_cannot_see(
     tmp_path, monkeypatch
 ) -> None:
-    """The safety property: never advise deleting a script that may be a good shim.
+    """#203's filed environment split, which the PATH walk alone cannot close.
 
-    The shipped `bin/rekol` shim resolves its venv from the environment, so it
-    exits non-zero whenever `REKOL_TOOLS_HOME`/`HOME` point somewhere without one
-    — in a sandboxed test, mid-reinstall, or immediately after `uninstall.sh`
-    removes the venv. The first version of this check reported any non-zero exit
-    as an orphan with the remedy "remove the broken script(s)", which pointed a
-    user at their own working shim. It was caught by a test run under a sandboxed
-    HOME flagging the real `~/bin/rekol`.
+    The interactive shell running doctor gets its PATH from `.zshrc` and contains
+    only the WORKING entry. The non-interactive hook gets a different PATH and
+    resolves an entry doctor never sees. A check that only walks doctor's PATH
+    returns OK in exactly that state while the hook stays broken.
 
-    So an unexplained failure is INFO with no deletion advice, and PROBLEM is
-    reserved for a failure that actually names a missing rekol module.
+    So the authority for the hook path is what the installer RECORDED in the hook
+    command, not this process's PATH. Here doctor's PATH holds a perfectly healthy
+    `rekol`, while the wired hook's recorded fallback points at a path that does
+    not exist — and doctor must not report healthy.
     """
-    from rekol.cli_doctor import _check_console_scripts
+    from rekol.cli_doctor import _check_console_scripts, _check_hook_executability
 
-    shim_dir = tmp_path / "shim"
-    shim_dir.mkdir()
-    script = shim_dir / "rekol"
-    # Fails the way a shim with an unresolvable venv does: no ModuleNotFoundError.
-    script.write_text("#!/bin/sh\necho 'rekol venv not found' >&2\nexit 1\n")
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(shim_dir))
+    # 1. doctor's PATH: one healthy, resolvable rekol. Nothing wrong here.
+    env_root = tmp_path / "good-env"
+    interp = _interp_tree(env_root)
+    (_site_packages(env_root) / "rekol").mkdir()
+    (_site_packages(env_root) / "rekol" / "__init__.py").write_text("")
+    good = _script_for(tmp_path / "shellbin", interp)
+    monkeypatch.setenv("PATH", str(good.parent))
 
-    findings = _check_console_scripts()
+    # 2. The hook's recorded invocation points somewhere that does not exist.
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    missing = tmp_path / "gone" / "bin" / "rekol"
+    (config_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"\"$(command -v rekol || echo '{missing}')\" "
+                                        "_hook session-start 2>/dev/null || true"
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
 
-    assert len(findings) == 1
-    assert findings[0].status is Status.INFO, findings[0].detail
-    assert findings[0].remedy is None, "must not advise deleting a possibly-good shim"
-    assert "did not run" in findings[0].detail
-    assert "rm " not in (findings[0].detail + (findings[0].remedy or ""))
+    # The PATH walk alone is happy — that is precisely the blind spot.
+    assert _check_console_scripts()[0].status is Status.OK
+
+    # The hook check is what must refuse to call this healthy.
+    hook_findings = _check_hook_executability()
+    assert hook_findings[0].status is Status.PROBLEM, hook_findings[0].detail
+    assert "cannot execute" in hook_findings[0].detail

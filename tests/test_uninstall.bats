@@ -726,53 +726,57 @@ JSON
 # first, `command -v rekol` stays green while a hook (different PATH order)
 # resolves the orphan and starts a session with no memory.
 #
-# Fixtures, not a real second install: the machine this was written on no longer
-# reproduces it, and a test that needs a broken global Python is unrunnable.
+# HERMETIC AND STATIC. The uninstaller never executes a program it found on
+# PATH, so these fixtures are inert files, and PATH is built from fixture
+# directories plus a minimal system set rather than inheriting $PATH — an
+# earlier version appended $PATH and so inspected (and, before the rework,
+# executed) the real `rekol` on this machine.
 
-@test "uninstall names a non-working rekol left on PATH by another interpreter" {
-    orphan_dir="$TESTROOT/other-interpreter/bin"
-    mkdir -p "$orphan_dir"
-    # Reproduces the field failure from #203 verbatim.
-    {
-        printf '#!/bin/sh\n'
-        printf 'echo "Traceback (most recent call last):" >&2\n'
-        printf 'echo "    from rekol.cli import main" >&2\n'
-        printf 'echo "ModuleNotFoundError: No module named %srekol%s" >&2\n' "'" "'"
-        printf 'exit 1\n'
-    } > "$orphan_dir/rekol"
-    chmod 755 "$orphan_dir/rekol"
-
-    # A WORKING rekol ahead of it on PATH — this is what makes the problem
-    # invisible to the shell, and what the check has to see past.
-    good_dir="$TESTROOT/good/bin"
-    mkdir -p "$good_dir"
-    printf '#!/bin/sh\necho "rekol, version 9.9.9"\nexit 0\n' > "$good_dir/rekol"
-    chmod 755 "$good_dir/rekol"
-
-    run env -u MEMORY_HOME -u TEST_MODE \
-        PATH="$good_dir:$orphan_dir:$PATH" \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
-
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"NON-WORKING 'rekol' on PATH"* ]]
-    [[ "$output" == *"$orphan_dir/rekol"* ]]
-    # The working one must NOT be reported — it belongs to a live install.
-    [[ "$output" != *"$good_dir/rekol"* ]]
+# A PATH with the tools uninstall.sh needs and nothing of the developer's.
+_hermetic_path() {
+    printf '%s:/usr/bin:/bin:/usr/sbin:/sbin' "$1"
 }
 
-@test "uninstall stays quiet about orphans when every rekol on PATH runs" {
-    good_dir="$TESTROOT/only-good/bin"
-    mkdir -p "$good_dir"
-    printf '#!/bin/sh\necho "rekol, version 9.9.9"\nexit 0\n' > "$good_dir/rekol"
-    chmod 755 "$good_dir/rekol"
+@test "uninstall names a stale rekol whose shebang interpreter is gone" {
+    orphan_dir="$TESTROOT/other-interpreter/bin"
+    mkdir -p "$orphan_dir"
+    # Exact evidence, no execution: the interpreter in the shebang does not exist.
+    printf '#!%s/deleted/bin/python3.11
+from rekol.cli import main
+' "$TESTROOT"         > "$orphan_dir/rekol"
+    chmod 755 "$orphan_dir/rekol"
 
-    run env -u MEMORY_HOME -u TEST_MODE \
-        PATH="$good_dir:$PATH" \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$orphan_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"stale 'rekol' on PATH"* ]]
+    [[ "$output" == *"$orphan_dir/rekol"* ]]
+    [[ "$output" == *"no longer exists"* ]]
+}
+
+@test "uninstall never advises removing a bash-shebang rekol shim" {
+    # The shipped shim is `#!/usr/bin/env bash`. bash has no site-packages, so a
+    # naive "absent means orphan" rule fires on a working shim and tells the user
+    # to delete it. This asserts that cannot happen.
+    shim_dir="$TESTROOT/foreign-shim/bin"
+    mkdir -p "$shim_dir"
+    printf '#!/usr/bin/env bash
+exec rekol-real "$@"
+' > "$shim_dir/rekol"
+    chmod 755 "$shim_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$shim_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"stale 'rekol' on PATH"* ]]
+    [[ "$output" != *"orphaned console script"* ]]
+}
+
+@test "uninstall stays quiet about orphans when nothing on PATH is stale" {
+    empty_dir="$TESTROOT/no-rekol/bin"
+    mkdir -p "$empty_dir"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$empty_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"no orphaned 'rekol' console scripts"* ]]

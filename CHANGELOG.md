@@ -6,33 +6,45 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Added
-- **`doctor` now checks every `rekol` on PATH, not just the one your shell would run (#203).**
-  A console script can be left pointing at an interpreter where the package is no longer
-  importable, and every call through it dies with `ModuleNotFoundError: No module named 'rekol'`.
-  An interactive shell resolves the working wrapper first, so `command -v rekol` is green and
-  `doctor` passed — while a **hook**, whose PATH order differs, resolves the orphan and the
-  session starts with no memory and nothing saying so. For a memory tool that is the worst
-  failure shape there is, and it was invisible to every check the tool ran, because they all
-  resolved `rekol` the way the user's shell does.
-  The new check walks PATH itself rather than using `shutil.which`, so it reaches the entries
-  after the first — pinned by a test that puts a working script ahead of a broken one and fails
-  against a first-hit-only implementation.
-  It distinguishes two failures on purpose. A script whose output names a missing `rekol` module
-  is an **orphan** and is reported with a removal remedy. Anything else that merely exits
-  non-zero is reported as INFO **with no deletion advice**: the shipped `bin/rekol` shim resolves
-  its venv from the environment and so exits non-zero whenever `REKOL_TOOLS_HOME`/`HOME` point
-  somewhere without one — mid-reinstall, or right after `uninstall.sh` removes the venv. The
-  first version of this check called any non-zero exit an orphan and told the user to delete it,
-  which aimed that advice at their own working shim; a sandboxed test flagging the real
-  `~/bin/rekol` is what caught it.
-  An empty PATH result stays INFO rather than degraded, because hooks fall back to the absolute
-  path the installer recorded — doctor going red on a working setup has shipped twice here.
+- **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
+  actually recorded (#203).** A console script can be left pointing at an interpreter where the
+  package no longer resolves, so every call through it dies with
+  `ModuleNotFoundError: No module named 'rekol'`. An interactive shell resolves the working
+  wrapper first, so `command -v rekol` is green and `doctor` passed — while a **hook**, whose PATH
+  order differs, resolves the orphan and the session starts with no memory and nothing saying so.
+  **Nothing is executed.** `--version` is not a safety boundary for an arbitrary program named
+  `rekol`: it can mutate state, read stdin, spawn children or hang, and bounding each candidate
+  still let a scripted `doctor` stall for minutes. Classification reads the shebang and, for a
+  direct Python interpreter, that interpreter's `site-packages` — including following an editable
+  install's `.pth` to its target, because `dist-info` proves a package was *installed*, not that it
+  *resolves*. The real orphan was exactly that shape: `dist-info` present, `.pth` pointing at a
+  deleted worktree.
+  Only exact evidence authorises removal advice — a missing Python interpreter, or a
+  `site-packages` that was read and does not resolve `rekol`. A non-Python or `env`-resolved
+  shebang is **not classified** (the shipped shim is `#!/usr/bin/env bash`, and "bash has no
+  site-packages" would have advised deleting a working shim), and a `site-packages` that cannot be
+  located or read is **cannot-tell**, never "absent" — reading cannot-tell as absent is the same
+  mistake as #218.
+  Hook executability is now its own check that runs **unconditionally**. `unrunnable_hooks()` has
+  existed since #159, but `doctor` only reached it from inside the install-drift check, which
+  returns early with no manifest — so wired-but-dead hooks went unprobed on any machine without
+  one, though probing them needs nothing from the manifest (#215).
+  **Stated limit:** the PATH walk sees only the PATH of the process running `doctor`. An entry
+  present solely on a hook's PATH is invisible from there, so a green line reports
+  *resolvability*, not a proven hook path; the recorded-command check is the authority for the
+  hook. A regression pins this with two genuinely different PATH values — doctor's PATH holding a
+  healthy `rekol` while the wired hook's recorded fallback does not exist — and asserts `doctor`
+  does not report healthy.
 - **`uninstall.sh` now names `rekol` console scripts belonging to other interpreters (#203).**
   It only ever considered `${BIN_DIR}/rekol`, so a script installed through a different
   interpreter survived an uninstall completely. Reported rather than deleted, deliberately: those
   files belong to Python environments this installer never created, often need root, and may be
   an unrelated tool named `rekol`. Deleting another installation's files to finish our own
-  uninstall is not a trade worth making silently — naming them exactly is.
+  uninstall is not a trade worth making silently — naming them exactly is. It also **never
+  executes** anything it finds on PATH, including under `--dry-run`: a dry run that runs
+  strangers' binaries is not a dry run. Detection is the shebang alone, so it names the
+  definitive case (a Python interpreter that no longer exists) and refers the rest to
+  `doctor`, which holds the full classifier.
 - **`doctor` reports when `rekol --version` disagrees with the code being run (#203).**
   `cli.py` uses `@click.version_option(package_name="rekol")`, which reads the installed
   distribution's metadata. For an **editable** install that metadata is frozen at install time,

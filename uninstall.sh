@@ -424,6 +424,7 @@ fi
 # tool's `rekol` entirely. Deleting another installation's files to finish our
 # own uninstall is not a trade worth making silently; naming them exactly is.
 orphan_count=0
+unsure_count=0
 seen_real=""
 IFS=':' read -ra _uninstall_path_dirs <<< "${PATH}"
 for _pdir in "${_uninstall_path_dirs[@]}"; do
@@ -437,23 +438,41 @@ for _pdir in "${_uninstall_path_dirs[@]}"; do
   seen_real="${seen_real}:${_real}"
   # Skip the shim Step 1 just handled — it is ours and already dealt with.
   [[ "$_real" == "$rekol_shim_dst" ]] && continue
-  _probe_out="$("$_cand" --version 2>&1)" && continue   # works: a live install, not ours to touch
-  # Only a script whose interpreter cannot IMPORT rekol is an orphan. The shipped
-  # shim resolves its venv from the environment, so it exits non-zero whenever
-  # REKOL_TOOLS_HOME/HOME point somewhere without one — including right after this
-  # uninstaller removes the venv. Telling a user to `rm` that would be telling
-  # them to delete a working shim, so the deletion advice is reserved for the
-  # failure that actually names a missing rekol module.
-  case "$_probe_out" in
-    *ModuleNotFoundError*rekol* | *rekol*ModuleNotFoundError* | *ImportError*rekol* | *rekol*ImportError*) ;;
-    *)
-      say "note: '${_cand}' did not run, but the failure does not name a missing rekol module — not treating it as an orphan"
-      continue
-      ;;
+
+  # STATIC ONLY. This uninstaller never executes a program it found on PATH,
+  # including under --dry-run. `--version` is not a safety boundary for an
+  # arbitrary executable named `rekol`: it can mutate state, read stdin, spawn
+  # children, or hang, and a dry run that executes strangers' binaries is not a
+  # dry run. So the evidence here is the shebang and nothing else.
+  _shebang="$(head -c 256 "$_cand" 2>/dev/null | head -n 1)"
+  case "$_shebang" in
+    '#!'*) ;;
+    *) continue ;;                       # no shebang: nothing to conclude
   esac
-  orphan_count=$((orphan_count + 1))
-  say "found a NON-WORKING 'rekol' on PATH: ${_cand}"
-  note_leftover "orphaned console script ${_cand} — its interpreter can no longer import rekol. A hook resolving this instead of a working wrapper starts a session with no memory. Remove it by hand: rm '${_cand}'"
+  _interp="${_shebang#\#!}"
+  _interp="${_interp#"${_interp%%[![:space:]]*}"}"   # ltrim
+  _interp="${_interp%% *}"                           # first token only
+  case "$(basename "$_interp")" in
+    python | python[23] | python[23].* ) ;;
+    # `env`-resolved and non-Python shebangs are NOT classified. The shipped
+    # bin/rekol shim is `#!/usr/bin/env bash`, and treating "bash has no
+    # site-packages" as "rekol absent" would advise deleting a working shim.
+    *) continue ;;
+  esac
+  if [[ ! -e "$_interp" ]]; then
+    # Exact evidence, no execution required: the interpreter is gone, so this
+    # script cannot run at all.
+    orphan_count=$((orphan_count + 1))
+    say "found a stale 'rekol' on PATH: ${_cand} (its interpreter ${_interp} no longer exists)"
+    note_leftover "orphaned console script ${_cand} — its interpreter ${_interp} no longer exists, so every call through it fails. A hook resolving this instead of a working wrapper starts a session with no memory. Remove it by hand: rm '${_cand}'"
+    continue
+  fi
+  # The interpreter exists. Deciding whether rekol RESOLVES from it means
+  # inspecting that interpreter's site-packages, including following an editable
+  # install's .pth to its target — `rekol doctor` does that and is the right
+  # place for it. Naming the file without a verdict is the honest middle.
+  unsure_count=$((unsure_count + 1))
+  say "note: another 'rekol' is on PATH at ${_cand} — not ours; run 'rekol doctor' to check whether it resolves"
 done
 if [[ "$orphan_count" == "0" ]]; then
   say "no orphaned 'rekol' console scripts on PATH"
