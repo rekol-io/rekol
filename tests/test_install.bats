@@ -1535,3 +1535,73 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"already soft-fail"* ]] || { echo "second run did not report a no-op"; echo "$output" | grep -i soft; false; }
 }
+
+@test "a wired hook runs the recorded path even when an orphan rekol is first on its PATH (#203)" {
+  # THE #203 failure, end to end. The orphan console script is FIRST on the
+  # hook's PATH, so `command -v rekol` succeeds and — under the old resolution
+  # order — the hook ran the orphan and the session started with no memory.
+  #
+  # Note what this does NOT depend on: the interactive shell's PATH, or anything
+  # doctor can see. Detection cannot close this; only resolution order can.
+  SBHOME="$TESTROOT/sandhome-order"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-order"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ]
+
+  # An orphan that leaves a trace if it is ever executed.
+  orphan_dir="$TESTROOT/orphan-order/bin"
+  mkdir -p "$orphan_dir"
+  marker="$TESTROOT/orphan-ran.marker"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo orphan-was-executed >> "%s"\n' "$marker"
+    printf 'echo "ModuleNotFoundError: No module named rekol" >&2\n'
+    printf 'exit 1\n'
+  } > "$orphan_dir/rekol"
+  chmod 755 "$orphan_dir/rekol"
+
+  HOOK_PATH="$orphan_dir:/usr/bin:/bin:/usr/sbin:/sbin"
+
+  # ASSERT THE PRECONDITION both ways round, or this proves nothing:
+  # (a) the orphan really is what a bare `rekol` resolves to on HOOK_PATH, and
+  # (b) the recorded shim really exists, so there is something to prefer.
+  resolved="$(env -i PATH="$HOOK_PATH" /bin/sh -c 'command -v rekol' 2>/dev/null || true)"
+  [ "$resolved" = "$orphan_dir/rekol" ] || {
+    echo "PRECONDITION FAILED: bare 'rekol' resolves to '$resolved', not the orphan"; false; }
+  [ -x "$BIN_DIR/rekol" ] || {
+    echo "PRECONDITION FAILED: no recorded shim at $BIN_DIR/rekol to prefer"; false; }
+
+  jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("rekol|REKOL"))' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/cmds-order.txt"
+  n="$(wc -l < "$TESTROOT/cmds-order.txt" | tr -d ' ')"
+  [ "$n" -ge 6 ] || { echo "only $n hook commands found — expected >= 6"; false; }
+
+  jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/hookenv-order.txt"
+  HOOK_ENV=""
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    [ -n "$kv" ] && HOOK_ENV="$HOOK_ENV $kv"
+  done < "$TESTROOT/hookenv-order.txt"
+
+  while IFS= read -r cmd || [ -n "$cmd" ]; do
+    [ -n "$cmd" ] || continue
+    # shellcheck disable=SC2086
+    env -i PATH="$HOOK_PATH" HOME="$SBHOME" $HOOK_ENV /bin/sh -c "$cmd" >/dev/null 2>&1 || true
+  done < "$TESTROOT/cmds-order.txt"
+
+  # The orphan must never have been executed by ANY wired hook.
+  [ ! -f "$marker" ] || {
+    echo "FAIL: a hook executed the orphan at $orphan_dir/rekol"
+    echo "      resolution order still prefers PATH over the recorded path"
+    cat "$marker"
+    false; }
+}

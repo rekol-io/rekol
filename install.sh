@@ -855,12 +855,29 @@ fi
 # rest were failing silently behind `|| true` and output redirection, which is
 # worse, not better.
 #
-# The fallback is BIN_DIR (not a hardcoded ~/bin) so `--bin-dir` installs stay
-# correct. `command -v` is still tried first, so the hooks keep working if the
-# install is later moved and PATH is what's accurate.
+# The recorded path is BIN_DIR (not a hardcoded ~/bin) so `--bin-dir` installs
+# stay correct.
+#
+# RESOLUTION ORDER, INVERTED (#203). `command -v rekol` used to be tried FIRST,
+# on the reasoning that PATH is what stays accurate if the install is later
+# moved. That reasoning had the risk backwards: PATH is the *unreliable* half in
+# a hook environment, and whatever it finds first wins. A stale `rekol` console
+# script left by another interpreter — the #203 orphan — therefore beat a
+# perfectly good recorded path, and the session started with no memory.
+#
+# Now: use the recorded path when it is executable, and fall through to
+# `command -v` only when it is not. A moved or reinstalled tree still adapts,
+# because the recorded path stops being executable and the PATH lookup takes
+# over exactly as before. What is no longer possible is an orphan earlier on a
+# hook's PATH hijacking a working install.
+#
+# The remaining failure is a recorded path that EXISTS but is broken, which is a
+# genuinely broken install rather than a resolution accident — and `doctor`'s
+# hook-executability check reports it by name.
 #
 # This is the pattern hooks/auto-reindex.sh already used to be the only hook
-# immune to the bug; Step 6.9 just applies it everywhere.
+# immune to the #159 bug; Step 6.9 applies it everywhere, now with the order
+# that also survives a hostile PATH.
 
 RENDERED_HOOK_DIR=""
 if [[ "$DO_HOOK" == "1" ]]; then
@@ -868,7 +885,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
   # shellcheck disable=SC2064  # expand RENDERED_HOOK_DIR now, not at trap time
   trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
 
-  REKOL_INVOCATION="\$(command -v rekol || echo '${BIN_DIR}/rekol')"
+  REKOL_INVOCATION="\$([ -x '${BIN_DIR}/rekol' ] && echo '${BIN_DIR}/rekol' || command -v rekol || echo '${BIN_DIR}/rekol')"
   # Same value, pre-quoted, for the steps that build a command string directly
   # rather than rendering a snippet.
   REKOL_INVOCATION_QUOTED="\"${REKOL_INVOCATION}\""

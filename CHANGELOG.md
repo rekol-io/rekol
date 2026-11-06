@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A hook could resolve an orphaned `rekol` on its PATH instead of the install's own, starting a
+  session with no memory (#203).** Hook commands rendered as
+  `"$(command -v rekol || echo '<recorded path>')"` — PATH first, recorded path only as a
+  fallback. The reasoning was that PATH stays accurate if the install is later moved, but it had
+  the risk backwards: **PATH is the unreliable half in a hook environment**, and whatever it finds
+  first wins. A stale console script left behind by another interpreter therefore beat a perfectly
+  good recorded path, and because an interactive shell resolves the working wrapper first,
+  `command -v rekol` was green and `doctor` passed while every hook ran the orphan.
+  The order is now inverted: use the recorded path when it is executable, and fall through to
+  `command -v` only when it is not. A moved or reinstalled tree still adapts — the recorded path
+  stops being executable and the PATH lookup takes over exactly as before — but an orphan earlier
+  on a hook's PATH can no longer hijack a working install.
+  Proven end to end rather than argued: a regression installs for real, puts an orphan **first** on
+  the hook's PATH, asserts that a bare `rekol` genuinely resolves to that orphan (so the test
+  cannot pass vacuously), then executes every wired hook command and asserts the orphan was never
+  run. Against the previous order **nine** hooks executed it.
+  Two residual cases, both narrower and both visible: a recorded path that exists but is broken is
+  a genuinely broken install, and `doctor`'s hook-executability check names it; and if the recorded
+  path is *absent* — a tree moved without reinstalling — PATH resolution resumes and an orphan
+  could win again, which is the cost of keeping a moved install working. Re-running `install.sh`
+  re-records the path and closes that window.
+
+### Fixed
 - **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
   system dark — and a missing `jq` triggered the same stand-down (release blocker).** Found by
   the 0.6.0 pre-release fan-out review, in #199's own change.
