@@ -38,37 +38,6 @@ follow [Semantic Versioning](https://semver.org/).
   `plugin/` can break the primary install path with the install suite never running. Added
   `^plugin/` to the filter; a Python-only change still skips bats.
 
-### Added
-- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
-  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
-  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
-  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
-  despite being the second most common non-resumable code, and the existing `server_error` test
-  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
-  key), so a regression depending on that prose would have slipped past it. The new test uses
-  the real payload shape and was confirmed to fail when `authentication_failed` is added to
-  `LIMIT_ERROR_TYPES`.
-  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
-  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
-  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
-  recorded on the issue rather than changed here, since what to do about it is a design call.
-
-- **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
-  `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
-  `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
-  — and it only fires when `REKOL.md` is absent. Where both exist, `MEMORY.md` is never read and
-  anything living only there is silently unreachable.
-  Found on a live machine (shipwright, 2026-10-08): both files present, contents diverged, neither
-  a superset — `MEMORY.md` held the infra/topic pointers while `REKOL.md` held the always-on
-  rules. A session read one and got a partial picture with nothing saying so. This is the fourth
-  instance of the same half-finished rename, after #177 (`skill.md`), #188 (`NON_MEMORY_FILES`)
-  and doctor's own exclusion prose.
-  The check reports the byte sizes, names which file is actually read, and gives a different
-  remedy for identical copies (remove the redundant one) than for diverged ones (diff, fold, then
-  remove). Deliberately silent when only `MEMORY.md` exists — that is the un-migrated state the
-  fallback handles correctly, and a check that fires on the healthy path gets ignored.
-
-### Fixed
 - **Two `doctor` tests were named for behaviour they never executed (#194).** Found in the
   v0.5.12 external review; the production fix (#188) was correct, the evidence for it was not.
   `test_shipped_index_files_are_excluded_from_coverage` never ran `doctor` and never built an
@@ -184,6 +153,36 @@ follow [Semantic Versioning](https://semver.org/).
   installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol
   plugin and skips its own hook wiring. Detection failures are handled conservatively so an
   unreadable settings file or unavailable parser cannot silently enable both backends.
+
+### Added
+- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
+  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
+  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
+  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
+  despite being the second most common non-resumable code, and the existing `server_error` test
+  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
+  key), so a regression depending on that prose would have slipped past it. The new test uses
+  the real payload shape and was confirmed to fail when `authentication_failed` is added to
+  `LIMIT_ERROR_TYPES`.
+  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
+  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
+  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
+  recorded on the issue rather than changed here, since what to do about it is a design call.
+
+- **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
+  `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
+  `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
+  — and it only fires when `REKOL.md` is absent. Where both exist, `MEMORY.md` is never read and
+  anything living only there is silently unreachable.
+  Found on a live machine (shipwright, 2026-10-08): both files present, contents diverged, neither
+  a superset — `MEMORY.md` held the infra/topic pointers while `REKOL.md` held the always-on
+  rules. A session read one and got a partial picture with nothing saying so. This is the fourth
+  instance of the same half-finished rename, after #177 (`skill.md`), #188 (`NON_MEMORY_FILES`)
+  and doctor's own exclusion prose.
+  The check reports the byte sizes, names which file is actually read, and gives a different
+  remedy for identical copies (remove the redundant one) than for diverged ones (diff, fold, then
+  remove). Deliberately silent when only `MEMORY.md` exists — that is the un-migrated state the
+  fallback handles correctly, and a check that fires on the healthy path gets ignored.
 
 ### Documentation
 - **README now covers a Python that is too NEW (#207).** The install troubleshooting list
