@@ -487,8 +487,17 @@ for _pdir in "${_uninstall_path_dirs[@]}"; do
   unsure_count=$((unsure_count + 1))
   say "note: another 'rekol' is on PATH at ${_cand} — not ours; run 'rekol doctor' to check whether it resolves"
 done
+# Say what was actually checked, not "all clear". This pass reads shebangs only,
+# so the one thing it can conclude is that no `rekol` on PATH has a MISSING
+# interpreter. A script whose interpreter exists but can no longer import rekol
+# looks identical from here — and a reassuring line that nothing proved is the
+# exact shape of the defect this check was added for.
 if [[ "$orphan_count" == "0" ]]; then
-  say "no orphaned 'rekol' console scripts on PATH"
+  if [[ "$unsure_count" == "0" ]]; then
+    say "no other 'rekol' found on PATH"
+  else
+    say "no 'rekol' on PATH has a missing interpreter; ${unsure_count} other(s) not assessed here — run 'rekol doctor' to check whether they resolve"
+  fi
 fi
 
 # =============================================================================
