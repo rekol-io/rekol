@@ -1022,7 +1022,7 @@ def test_orphan_when_an_editable_install_points_at_a_deleted_tree(tmp_path, monk
 
     findings = _check_console_scripts()
     assert findings[0].status is Status.PROBLEM, findings[0].detail
-    assert "no rekol/__init__.py" in findings[0].detail
+    assert "rekol/__init__.py" in findings[0].detail
     assert findings[0].remedy is not None
 
 
@@ -1367,4 +1367,76 @@ def test_a_setuptools_finder_pth_is_cant_tell_not_an_orphan(tmp_path, monkeypatc
     finding = _check_console_scripts()[0]
     assert finding.status is Status.INFO, finding.detail
     assert finding.remedy is None, "a finder .pth must never yield removal advice"
+    assert "import hook" in finding.detail
+
+
+def test_a_stale_pth_sorting_first_does_not_condemn_a_live_one(tmp_path, monkeypatch) -> None:
+    """Evidence is aggregated, not taken from whichever `.pth` sorts first.
+
+    An earlier version returned on the first file it read, so a stale leftover
+    beside a working editable install produced removal advice for the working
+    one — a verdict decided by filename order. Codex reproduced it.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    env_root = tmp_path / "env"
+    interp = _interp_tree(env_root)
+    sp = _site_packages(env_root)
+    live = tmp_path / "checkout" / "src"
+    (live / "rekol").mkdir(parents=True)
+    (live / "rekol" / "__init__.py").write_text("")
+    # "aaa" sorts BEFORE "zzz": the stale file is read first.
+    (sp / "__editable__.aaa-stale.pth").write_text(str(tmp_path / "gone" / "src") + "\n")
+    (sp / "__editable__.zzz-live.pth").write_text(str(live) + "\n")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    finding = _check_console_scripts()[0]
+    assert finding.status is Status.OK, finding.detail
+    assert finding.remedy is None
+
+
+def test_a_live_pth_first_and_a_stale_one_after_also_resolves(tmp_path, monkeypatch) -> None:
+    """The mirror of the above, so the result cannot depend on order either way."""
+    from rekol.cli_doctor import _check_console_scripts
+
+    env_root = tmp_path / "env"
+    interp = _interp_tree(env_root)
+    sp = _site_packages(env_root)
+    live = tmp_path / "checkout" / "src"
+    (live / "rekol").mkdir(parents=True)
+    (live / "rekol" / "__init__.py").write_text("")
+    (sp / "__editable__.aaa-live.pth").write_text(str(live) + "\n")
+    (sp / "__editable__.zzz-stale.pth").write_text(str(tmp_path / "gone" / "src") + "\n")
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    finding = _check_console_scripts()[0]
+    assert finding.status is Status.OK, finding.detail
+    assert finding.remedy is None
+
+
+def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
+    tmp_path, monkeypatch
+) -> None:
+    """Mixed lines in a single `.pth`: an import hook anywhere makes it inconclusive.
+
+    The absolute path in the same file does not resolve, but the import hook could
+    — and we decline to execute or reimplement it — so no removal advice is
+    justified. ORPHAN requires that nothing anywhere was ambiguous.
+    """
+    from rekol.cli_doctor import _check_console_scripts
+
+    env_root = tmp_path / "env"
+    interp = _interp_tree(env_root)
+    sp = _site_packages(env_root)
+    (sp / "__editable__.rekol-mixed.pth").write_text(
+        f"{tmp_path / 'gone' / 'src'}\nimport __editable___rekol_finder; _f.install()\n"
+    )
+    script = _script_for(tmp_path / "bin", interp)
+    monkeypatch.setenv("PATH", str(script.parent))
+
+    finding = _check_console_scripts()[0]
+    assert finding.status is Status.INFO, finding.detail
+    assert finding.remedy is None
     assert "import hook" in finding.detail

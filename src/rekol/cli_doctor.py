@@ -1208,27 +1208,29 @@ def _site_packages_for(interpreter: Path) -> tuple[Path | None, str]:
 
 
 def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
-    """Follow an editable install's ``.pth``, or None when there isn't one.
+    """Weigh EVERY matching ``.pth`` before deciding, or None when there are none.
 
-    An editable install has no ``rekol/`` in site-packages — only a ``.pth`` —
-    so ``dist-info`` proves a package was installed, NOT that it resolves. The
-    real #203 orphan was exactly that: ``dist-info`` present, ``.pth`` naming a
+    An editable install has no ``rekol/`` in site-packages — only a ``.pth`` — so
+    ``dist-info`` proves a package was installed, NOT that it resolves. The real
+    #203 orphan was exactly that: ``dist-info`` present, ``.pth`` naming a
     worktree that had been deleted.
 
-    Removal advice is deliberately narrow, because the alternative is telling
-    someone to delete a working install. **Only an absolute-path ``.pth`` whose
-    target has no ``rekol/__init__.py`` is an orphan.** Everything else is
-    cannot-tell:
+    EVIDENCE IS AGGREGATED, not taken from whichever file sorts first. An earlier
+    version returned on the first ``.pth`` it read, so a stale leftover file
+    condemned a healthy install standing right beside it — removal advice for a
+    working editable install, decided by filename order.
 
-    * a setuptools *finder* ``.pth`` (``import __editable___rekol_finder``) maps
-      modules through an import hook. Resolving it means executing or
-      reimplementing that hook, so it is not parsed at all;
-    * a relative path is resolved against site-packages as a best effort, and a
-      miss is cannot-tell rather than proof, since the real base is whatever
-      ``sys.path`` entry the interpreter used.
+    Precedence:
 
-    An earlier version returned ORPHAN for both of those, which produced removal
-    advice for two healthy install layouts.
+    1. any target resolving ``rekol/__init__.py`` wins — RESOLVES;
+    2. otherwise any inconclusive form (a setuptools *finder* ``.pth`` whose
+       import hook we decline to execute or reimplement, an unreadable file, a
+       relative path that does not resolve from here, or a file naming no path at
+       all) — CANT_TELL, no remedy;
+    3. ORPHAN only when every file gave conclusive absolute-path evidence and
+       none of it resolved.
+
+    So removal advice requires that nothing anywhere was ambiguous.
     """
     try:
         pths = sorted(site_packages.glob("__editable__*.pth")) + sorted(
@@ -1236,7 +1238,11 @@ def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
         )
     except OSError as exc:
         return _ScriptVerdict.CANT_TELL, f"could not list {site_packages}: {exc}"
+    if not pths:
+        return None
 
+    inconclusive: list[str] = []
+    absolute_misses: list[Path] = []
     for pth in pths:
         try:
             lines = [
@@ -1245,34 +1251,36 @@ def _editable_verdict(site_packages: Path) -> tuple[_ScriptVerdict, str] | None:
                 if line.strip()
             ]
         except OSError as exc:
-            return _ScriptVerdict.CANT_TELL, f"could not read {pth.name}: {exc}"
-
-        # A .pth may execute code. Any import-bearing line means a finder, which
-        # we do not interpret.
-        if any(line.startswith(("import ", "import	")) for line in lines):
-            return (
-                _ScriptVerdict.CANT_TELL,
-                f"{pth.name} resolves rekol through an import hook, which is not inspectable",
-            )
+            inconclusive.append(f"{pth.name} is unreadable ({exc})")
+            continue
 
         absolute = [Path(line) for line in lines if line.startswith("/")]
-        relative = [site_packages / line for line in lines if not line.startswith("/")]
-        if not absolute and not relative:
-            return _ScriptVerdict.CANT_TELL, f"{pth.name} names no path"
-
+        relative = [
+            site_packages / line
+            for line in lines
+            if not line.startswith("/") and not line.startswith(("import ", "import\t"))
+        ]
+        # Rule 1 outranks everything, including an import hook in the same file.
         if any((target / "rekol" / "__init__.py").is_file() for target in absolute + relative):
             return _ScriptVerdict.RESOLVES, f"editable install resolves via {pth.name}"
 
-        if absolute:
-            listed = ", ".join(str(target) for target in absolute)
-            return (
-                _ScriptVerdict.ORPHAN,
-                f"editable install points at {listed}, which has no rekol/__init__.py",
-            )
-        # Relative only: the base we guessed may simply be the wrong one.
+        if any(line.startswith(("import ", "import\t")) for line in lines):
+            inconclusive.append(f"{pth.name} resolves rekol through an import hook")
+            continue
+        if not absolute and not relative:
+            inconclusive.append(f"{pth.name} names no path")
+            continue
+        if relative:
+            inconclusive.append(f"{pth.name} names a relative path that does not resolve here")
+        absolute_misses.extend(absolute)
+
+    if inconclusive:
+        return _ScriptVerdict.CANT_TELL, "; ".join(inconclusive)
+    if absolute_misses:
+        listed = ", ".join(str(target) for target in absolute_misses)
         return (
-            _ScriptVerdict.CANT_TELL,
-            f"{pth.name} names a relative path that does not resolve from {site_packages}",
+            _ScriptVerdict.ORPHAN,
+            f"editable install points at {listed}, none of which has rekol/__init__.py",
         )
     return None
 
