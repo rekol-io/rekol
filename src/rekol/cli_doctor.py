@@ -30,7 +30,7 @@ from pathlib import Path
 
 import click
 
-from rekol.config import Config, load_config
+from rekol.config import Config, load_config, resolve_claude_config_dir
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
 from rekol.indexer import (
@@ -496,20 +496,55 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     # (#165). It is a PROBLEM, and a distinct one from "nothing to index yet".
     projects_root = cfg.claude_projects_dir
     if not projects_root.is_dir():
-        findings.append(
-            Finding(
-                label="transcript source",
-                status=Status.PROBLEM,
-                detail=(
-                    f"claude_projects_dir does not exist: {projects_root} — "
-                    "session-index fails on every session end and the index can never build"
-                ),
-                remedy=(
-                    "set claude_projects_dir in rekol.config.yaml, or CLAUDE_CONFIG_DIR "
-                    "if you relocated Claude Code's tree"
-                ),
+        # An absent projects dir has two causes with opposite meanings, and
+        # reporting both as PROBLEM made `doctor` red out of the box on a first
+        # run — which this project has shipped twice, and which teaches people to
+        # ignore the report.
+        #
+        # AT THE DEFAULT LOCATION it simply has not been created yet: Claude Code
+        # creates it on first use, and rekol can be installed before that happens.
+        # (Measured on a live machine: the directory predated the rekol install by
+        # nearly three months, so the ordinary case is that it already exists —
+        # but a brand-new machine legitimately hits the gap.) Nothing is wrong,
+        # there is just nothing to index. Neutral.
+        #
+        # AT AN EXPLICITLY CONFIGURED LOCATION the user said where it is and it is
+        # not there, so `session-index` exits 2 on every SessionEnd — into
+        # `>/dev/null 2>&1`, so nobody ever sees it — and the index can NEVER be
+        # built. That is #165 and it stays a PROBLEM.
+        #
+        # Compared against the resolved default rather than the raw config value,
+        # so a relocated `CLAUDE_CONFIG_DIR` is treated as the default too: there
+        # the path is correct and merely not yet populated.
+        at_default_location = projects_root == resolve_claude_config_dir() / "projects"
+        if at_default_location:
+            findings.append(
+                Finding(
+                    label="transcript source",
+                    status=Status.INFO,
+                    detail=(
+                        f"claude_projects_dir does not exist yet: {projects_root} — "
+                        "Claude Code creates it on first use, so there is nothing to "
+                        "index until a session has ended"
+                    ),
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    label="transcript source",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"claude_projects_dir is set to a path that does not exist: "
+                        f"{projects_root} — session-index fails on every session end and "
+                        "the index can never build"
+                    ),
+                    remedy=(
+                        "correct claude_projects_dir in rekol.config.yaml, or unset it to "
+                        "use Claude Code's default location"
+                    ),
+                )
+            )
         return findings
 
     db_path = cfg.sessions_db_path

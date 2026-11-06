@@ -5,6 +5,30 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **A brand-new install reported `index is DEGRADED` because Claude Code had not created
+  `~/.claude/projects` yet.** An absent projects dir has two causes with opposite meanings, and
+  both were reported as a problem. At the **default** location it simply has not been created yet
+  — Claude Code creates it on first use, and rekol can be installed before that happens — so
+  nothing is wrong and there is merely nothing to index. That is now a neutral line naming
+  `claude_projects_dir`, with no remedy.
+  At an **explicitly configured** location the finding is unchanged and stays a PROBLEM: the user
+  said where it is and it is not there, so `session-index` exits 2 on every SessionEnd — into
+  `>/dev/null 2>&1`, where nobody ever sees it — and the index can never build (#165). The
+  comparison is against the *resolved* default, so a relocated `CLAUDE_CONFIG_DIR` counts as the
+  default too; there the path is correct and merely unpopulated.
+  Verified end to end on a first-run shape: `index is healthy`, exit 0, with the neutral line
+  present and no `✗ transcript source`. Measured for context while fixing it — on a live machine
+  the directory predated the rekol install by nearly three months, so the ordinary case is that it
+  already exists; the gap is narrow, and a first impression is a bad place to be wrong. `doctor`
+  being red out of the box has shipped twice, and each time it taught people to ignore the report.
+- **`doctor`'s own tests could fail from a stray `rekol` on the developer's PATH.** Since the
+  console-script check walks PATH (#203), a leftover build shim made five tests in
+  `test_cli_doctor.py` fail — Codex hit this under `uv run` and the suite only passed with a
+  restricted PATH. The module now pins PATH to an empty directory, so the host cannot influence
+  it; tests that care about PATH still set their own. Reproduced before fixing and confirmed after:
+  a broken `rekol` early on PATH fails five tests before, none after.
+
 ### Added
 - **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
   actually recorded (#203).** A console script can be left pointing at an interpreter where the

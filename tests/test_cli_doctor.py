@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from cache_helpers import cache_dir_for
@@ -26,6 +27,25 @@ from rekol.embeddings import HashingEmbedder
 from rekol.indexer import Indexer
 from rekol.sessions.store import SessionStore
 from rekol.store import IndexStore
+
+
+@pytest.fixture(autouse=True)
+def _pin_path_for_doctor(tmp_path_factory, monkeypatch):
+    """Pin PATH so `doctor`'s console-script check cannot read the host's.
+
+    `run_doctor` walks PATH looking for every `rekol` (#203), so any stray one on
+    the developer's PATH becomes a PROBLEM finding and fails the healthy-path
+    assertions here. Codex hit exactly that: a temporary build shim left on PATH
+    by `uv run` made this module fail, and the suite only passed under a
+    restricted PATH. Reproduced before fixing — a broken `rekol` early on PATH
+    fails five tests in this file.
+
+    So the ambient PATH is replaced with an empty directory. Tests that care about
+    PATH set their own with `monkeypatch.setenv`, which runs after this fixture
+    and therefore wins.
+    """
+    empty = tmp_path_factory.mktemp("no-rekol-on-path")
+    monkeypatch.setenv("PATH", str(empty))
 
 
 def _write_memory_home(tmp_path: Path, monkeypatch, *, with_transcripts: bool = True) -> Path:
@@ -1440,3 +1460,61 @@ def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
     assert finding.status is Status.INFO, finding.detail
     assert finding.remedy is None
     assert "import hook" in finding.detail
+
+
+# ---- first run: an absent projects dir is not a fault (#165 kept for the real one) ----
+
+
+def test_absent_projects_dir_at_the_default_location_is_neutral(tmp_path, monkeypatch) -> None:
+    """A brand-new machine has no `~/.claude/projects` yet, and that is not a fault.
+
+    Claude Code creates it on first use, and rekol can be installed before that.
+    Reporting it as DEGRADED made `doctor` red out of the box — which this project
+    has shipped twice, and which is how a report stops being read.
+
+    Measured on a live machine while writing this: the directory predated the
+    rekol install by nearly three months, so the ordinary case is that it already
+    exists. The gap is narrow but real, and a first impression is a bad place to
+    be wrong.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    # Point Claude Code's whole tree at somewhere that does not exist, so the
+    # DEFAULT projects dir resolves under it and is absent.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude-yet"))
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    _build_curated_index(home)
+
+    cfg = load_config()
+    findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert source[0].remedy is None
+    assert "does not exist yet" in source[0].detail
+    # QA asserts on this wording: a neutral line naming the setting, no ✗ line.
+    assert "claude_projects_dir" in source[0].detail
+
+
+def test_an_explicitly_configured_missing_projects_dir_is_still_a_problem(
+    tmp_path, monkeypatch
+) -> None:
+    """#165 must survive: if the user SAID where it is and it is not there, that is broken.
+
+    `session-index` then exits 2 on every SessionEnd — into `>/dev/null 2>&1`, so
+    nobody ever sees it — and the index can never build. Making the first-run case
+    neutral must not soften this one.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    missing = tmp_path / "typo-in-my-config"
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {missing}\n"
+    )
+    _build_curated_index(home)
+
+    cfg = load_config()
+    findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert source[0].remedy is not None
+    assert str(missing) in source[0].detail
