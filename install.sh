@@ -23,6 +23,20 @@
 # Note: set -euo pipefail used here per explicit installer design requirement.
 set -euo pipefail
 
+# bash 5.2 added `patsub_replacement`, ON by default, which expands `&` in the
+# replacement string of ${var//pattern/replacement} to the text the pattern
+# matched. Every snippet placeholder here is filled that way with a PATH, so a
+# tools dir or bin dir containing `&` silently produced `@REKOL@@REKOL@` instead
+# of the path — the placeholder survived and the guard below refused the install.
+# That is how an `&&` in the rendered invocation broke every hook-wiring test on
+# ubuntu (bash 5.2) while passing on macOS (bash 3.2, no such option).
+#
+# Turning it off restores the literal behaviour this script was written against.
+# Verified on both: bash 5.2.21 goes from "placeholder remains" to intact for `&`
+# and `&&` paths, and on bash 3.2.57 the option does not exist, so this is a
+# clean no-op (rc=0 via the guard). Backslash in a path is unaffected either way.
+shopt -u patsub_replacement 2>/dev/null || true
+
 # Resolve installer's own directory so it works from any working directory
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 readonly COMPONENT_DIR
@@ -885,7 +899,29 @@ if [[ "$DO_HOOK" == "1" ]]; then
   # shellcheck disable=SC2064  # expand RENDERED_HOOK_DIR now, not at trap time
   trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
 
-  REKOL_INVOCATION="\$([ -x '${BIN_DIR}/rekol' ] && echo '${BIN_DIR}/rekol' || command -v rekol || echo '${BIN_DIR}/rekol')"
+  # Single-quote-escape the recorded path before embedding it in a shell command.
+  # The rendered invocation quotes the path, so a path containing an apostrophe
+  # (`/Users/o'brien/bin`) would otherwise close the quote early and leave the
+  # hook command unparseable — `sh: unexpected EOF while looking for matching '`.
+  # POSIX has no escape inside single quotes, so the idiom is to close, emit an
+  # escaped quote, and reopen: ' -> '\''. Spaces need no special handling once the
+  # path is quoted; the apostrophe is the case that actually breaks.
+  # POSIX has no escape inside single quotes, so the idiom is close-escape-reopen:
+  # ' becomes '\''. Built from two variables because writing that replacement
+  # inline is easy to get wrong — the first attempt here produced
+  # `Dir\'\\'\'s` and was caught only by executing the rendered command.
+  BIN_DIR_SQ="'"
+  BIN_DIR_SQ_ESCAPED="'\''"
+  BIN_DIR_SHELL_SAFE="${BIN_DIR//$BIN_DIR_SQ/$BIN_DIR_SQ_ESCAPED}"
+  # NO `&&` ANYWHERE IN THIS STRING, deliberately. It is substituted in via
+  # `${body//@REKOL@/${REKOL_INVOCATION}}`, and **bash 5.2 expands `&` in the
+  # replacement to the text the pattern matched**. An `&&` therefore became
+  # `@REKOL@@REKOL@`, the placeholder survived, and install.sh's own guard
+  # correctly refused with "a placeholder is still present" — on bash 5 only,
+  # which is why this passed on macOS (bash 3.2) and failed every hook-wiring
+  # test on ubuntu. Escaping the `&` is not the fix: the escape itself differs
+  # between bash 3.2 and 5.2, so the `if` form avoids the character entirely.
+  REKOL_INVOCATION="\$(if [ -x '${BIN_DIR_SHELL_SAFE}/rekol' ]; then printf %s '${BIN_DIR_SHELL_SAFE}/rekol'; else command -v rekol || printf %s '${BIN_DIR_SHELL_SAFE}/rekol'; fi)"
   # Same value, pre-quoted, for the steps that build a command string directly
   # rather than rendering a snippet.
   REKOL_INVOCATION_QUOTED="\"${REKOL_INVOCATION}\""
@@ -1162,7 +1198,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart coverage banner already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${COV_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. That was always
+    # fragile and only held because the old invocation's `||` happened to fall
+    # inside a quoted segment; preferring the recorded path put `] && echo`
+    # outside one and broke 18 hook tests.
+    REKOL_JQ_CMD="${COV_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart coverage banner to ${SETTINGS_JSON}"
@@ -1194,7 +1238,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart task injection already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${TASKS_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. That was always
+    # fragile and only held because the old invocation's `||` happened to fall
+    # inside a quoted segment; preferring the recorded path put `] && echo`
+    # outside one and broke 18 hook tests.
+    REKOL_JQ_CMD="${TASKS_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart task injection to ${SETTINGS_JSON}"
@@ -1229,7 +1281,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart update check already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${UPDATE_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. That was always
+    # fragile and only held because the old invocation's `||` happened to fall
+    # inside a quoted segment; preferring the recorded path put `] && echo`
+    # outside one and broke 18 hook tests.
+    REKOL_JQ_CMD="${UPDATE_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart update check to ${SETTINGS_JSON}"
@@ -1592,7 +1652,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "UserPromptSubmit capture-nudge already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${NUDGE_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. That was always
+    # fragile and only held because the old invocation's `||` happened to fall
+    # inside a quoted segment; preferring the recorded path put `] && echo`
+    # outside one and broke 18 hook tests.
+    REKOL_JQ_CMD="${NUDGE_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED UserPromptSubmit capture-nudge to ${SETTINGS_JSON}"
@@ -1659,7 +1727,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # Use the PATH-independent invocation (#159). This step used to write a
     # hardcoded bare `rekol review --nudge`, i.e. the installer itself
     # reintroduced the exit-127 bug on any machine where Step 7D no-ops.
-    run "jq --arg cmd '${REKOL_INVOCATION_QUOTED} review --nudge' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. That was always
+    # fragile and only held because the old invocation's `||` happened to fall
+    # inside a quoted segment; preferring the recorded path put `] && echo`
+    # outside one and broke 18 hook tests.
+    REKOL_JQ_CMD="${REKOL_INVOCATION_QUOTED} review --nudge"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "MERGED SessionEnd review-nudge handler into ${SETTINGS_JSON}"

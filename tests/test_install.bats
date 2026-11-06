@@ -1605,3 +1605,72 @@ JSON
     cat "$marker"
     false; }
 }
+
+# Shared body for the awkward-path installs below. $1 = the bin dir to install
+# into. Asserts the install succeeds AND that every wired hook command parses,
+# because a quoting or substitution fault shows up only when something runs it.
+_install_into_bin_dir_and_run_hooks() {
+  nasty="$1"
+  mkdir -p "$nasty"
+  SBHOME="$TESTROOT/sandhome-$2"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-$2"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$nasty"
+  [ "$status" -eq 0 ] || { echo "install failed for bin-dir '$nasty':"; echo "$output" | tail -15; false; }
+  [ -x "$nasty/rekol" ] || { echo "no shim at '$nasty/rekol'"; false; }
+
+  jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("rekol|REKOL"))' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/cmds-$2.txt"
+  n="$(wc -l < "$TESTROOT/cmds-$2.txt" | tr -d ' ')"
+  [ "$n" -ge 6 ] || { echo "only $n hook commands found — expected >= 6"; false; }
+
+  jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/env-$2.txt"
+  HOOK_ENV=""
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    [ -n "$kv" ] && HOOK_ENV="$HOOK_ENV $kv"
+  done < "$TESTROOT/env-$2.txt"
+
+  faults=0
+  while IFS= read -r cmd || [ -n "$cmd" ]; do
+    [ -n "$cmd" ] || continue
+    # shellcheck disable=SC2086
+    err="$(env -i PATH="/usr/bin:/bin" HOME="$SBHOME" $HOOK_ENV /bin/sh -c "$cmd" 2>&1 >/dev/null || true)"
+    case "$err" in
+      *"unexpected EOF"* | *"syntax error"* | *"unterminated"*)
+        echo "QUOTING FAULT in: $cmd"; echo "  -> $err"; faults=$((faults + 1)) ;;
+    esac
+  done < "$TESTROOT/cmds-$2.txt"
+  [ "$faults" -eq 0 ] || { echo "$faults hook command(s) failed to parse"; false; }
+}
+
+@test "install survives a bin-dir containing a space and an ampersand, and its hooks run" {
+  # The `&` is the load-bearing character here. bash >= 5.2 expands `&` in the
+  # replacement of ${var//pat/rep} to the matched text, and every snippet
+  # placeholder is filled with a PATH — so `a&b` produced `@REKOL@@REKOL@`, the
+  # placeholder survived, and install.sh refused. Measured in a container:
+  # without `shopt -u patsub_replacement` this exact path gives EXIT=1 and 0
+  # hooks; with it, EXIT=0 and 11 hooks.
+  #
+  # NOTE FOR ANYONE READING A GREEN RUN ON macOS: bash 3.2 has no such option,
+  # so this test cannot fail there. It is meaningful only on bash >= 5.2, i.e.
+  # the ubuntu job.
+  _install_into_bin_dir_and_run_hooks "$TESTROOT/My & Dir bin" "amp"
+}
+
+@test "install survives a bin-dir containing an apostrophe" {
+  # SKIPPED, not deleted: reproduction for #222. install.sh dies with
+  # `eval: line 165: unexpected EOF` because 32 `run "..."` sites interpolate
+  # paths into a string that `run` then evals, and an apostrophe closes the
+  # quote early. Pre-existing and out of scope here; unskip with that sweep.
+  skip "reproduction for #222 (run() evals interpolated paths); unskip with the sweep"
+  _install_into_bin_dir_and_run_hooks "$TESTROOT/My Dir's bin" "apos"
+}
