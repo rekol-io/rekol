@@ -161,8 +161,23 @@ bootstrap() {
 # Criterion #4: a user who ran install.sh and THEN installs the plugin would be
 # double-wired — two SessionStart injections, duplicate memory blocks, duplicate
 # capture-nudge. The plugin cannot edit settings.json (that is the whole point of
-# it), so it must DEFER rather than compete: detect the installer's hooks and go
-# silent, telling the user once how to pick one.
+# it), so it must DEFER rather than compete: detect the installer's hooks and
+# stand down.
+#
+# IT SAYS SO EVERY SESSION, NOT ONCE (#201). The first version printed the full
+# explanation once, gated on a state file, and stood down silently thereafter.
+# That made an inert plugin indistinguishable from a working one: the user sees a
+# single message they may scroll past or never read, and `doctor` has no backend
+# awareness to contradict them afterwards. They believe the plugin is running.
+# Same reports-healthy-while-dead shape as #143 B2 (auto-resume ENABLED while
+# inert) and #159 (hooks failing silently behind `|| true`).
+#
+# The verbose explanation still prints once, because repeating four lines every
+# session would blow the session-start context budget the design sets out
+# (acceptance criterion 13). What repeats is ONE line — cheap enough to carry
+# forever, and the whole point is that it is there when nobody is looking for it.
+# The noise is self-limiting: it appears only while two backends are installed,
+# which is a state the user should resolve, and it stops when they pick one.
 settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
 settings_has_rekol_install_hooks "$settings"
 coexist_rc=$?
@@ -174,6 +189,8 @@ if [ "$MODE" != "doctor" ] && [ "$coexist_rc" -eq 0 ]; then
         echo "  in ~/.claude/settings.json, and running both would double every injection."
         echo "  Keep the existing install for now, or explicitly remove its owned hooks before"
         echo "  enabling this plugin backend. No automatic retirement was attempted."
+    else
+        echo "[rekol] plugin inactive — the install.sh backend owns the hooks (rekol doctor)"
     fi
     exit 0
 fi
