@@ -196,6 +196,88 @@ teardown() {
   run jq -e '.enabledPlugins["rekol@local"] == true and .env.KEEP_ME == "yes" and ((.hooks // {}) == {})' \
     "$sandhome/.claude/settings.json"
   [ "$status" -eq 0 ]
+  # ...and the env block IS still written. Standing down is supposed to skip hook
+  # WIRING only (#199). The plugin cannot edit settings.json at all — plugin/hooks/
+  # bootstrap says so outright — so nothing else supplies REKOL_HOME, and without
+  # it Step 7.5's own comment says "the entire memory system is dark".
+  #
+  # The assertion above cannot see that: it checks that hooks are empty and that an
+  # unrelated key survived, which holds identically whether the env block was
+  # written or skipped. That is why this shipped.
+  run jq -e --arg want "$rekolhome" '.env.REKOL_HOME == $want' \
+    "$sandhome/.claude/settings.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "install still wires the env block, and prints the snippet, when jq is absent" {
+  # REGRESSION (release blocker, found by the 0.6.0 fan-out review): with an
+  # existing settings.json and no jq, the coexistence detector returns 2 ("cannot
+  # inspect"), which used to clear DO_HOOK — skipping every hook step AND the env
+  # block, while printing a reassuring message and exiting 0. The documented
+  # jq-less fallback (README: "without it the installer prints the snippet to merge
+  # by hand") became unreachable dead code.
+  #
+  # Without jq install.sh cannot MUTATE settings.json either, so it cannot create
+  # the duplicate backend the gate exists to prevent: there was nothing to guard.
+  sandhome="$TESTROOT/nojq-home"
+  rekolhome="$TESTROOT/nojq-memory"
+  mkdir -p "$sandhome/.claude" "$rekolhome" "$TESTROOT/nojq-bin"
+  printf '%s\n' '{"env":{"KEEP_ME":"yes"},"hooks":{}}' > "$sandhome/.claude/settings.json"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' > "$rekolhome/rekol.config.yaml"
+
+  # Hide ONLY jq: mirror its directory, symlinking every entry except jq itself,
+  # then swap that mirror in for the original directory in PATH. An allow-list of
+  # hand-picked tools was the first attempt and it was worse than useless —
+  # install.sh needs binaries the list did not name, so it died with exit 127
+  # while the assertions below still passed. The test reported success for a run
+  # that never reached the code under test.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed; nothing to hide"
+  # EVERY PATH entry holding a jq must be mirrored, not just the first one found:
+  # this machine has both /opt/homebrew/bin/jq and /usr/bin/jq, and hiding only
+  # the first left jq reachable, which the assertion below caught.
+  # Each directory is mirrored in place so PATH order — and therefore which
+  # python3/git/etc wins — is exactly unchanged.
+  nojq_path=""
+  mirror_n=0
+  IFS=':' read -ra _path_dirs <<< "$PATH"
+  for pdir in "${_path_dirs[@]}"; do
+    if [ -z "$pdir" ]; then continue; fi
+    if [ -x "$pdir/jq" ]; then
+      mirror_n=$((mirror_n + 1))
+      pmirror="$TESTROOT/nojq-bin/$mirror_n"
+      mkdir -p "$pmirror"
+      for entry in "$pdir"/*; do
+        if [ ! -e "$entry" ]; then continue; fi
+        if [ "$(basename "$entry")" = "jq" ]; then continue; fi
+        ln -sf "$entry" "$pmirror/$(basename "$entry")" 2>/dev/null || true
+      done
+      nojq_path="${nojq_path:+$nojq_path:}$pmirror"
+    else
+      nojq_path="${nojq_path:+$nojq_path:}$pdir"
+    fi
+  done
+
+  # Assert the hiding actually worked BEFORE relying on it: if jq were still
+  # reachable this test would exercise the ordinary path and pass for nothing.
+  # `command` is a shell builtin, so this needs a shell, not `env`.
+  run bash -c "PATH='$nojq_path' command -v jq"
+  [ "$status" -ne 0 ]
+
+  run env -u MEMORY_HOME -u TEST_MODE PATH="$nojq_path" \
+    REKOL_HOME="$rekolhome" HOME="$sandhome" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc --skip-deps \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  # Exit status is asserted FIRST. Without it an early crash (exit 127 on a
+  # too-thin PATH — the first version of this test did exactly that) satisfies
+  # every string assertion below while never reaching the code under test.
+  [ "$status" -eq 0 ]
+  # It must NOT stand down over a missing jq...
+  [[ "$output" != *"hook wiring skipped"* ]]
+  # ...must say why it could not detect a backend, rather than going quiet...
+  [[ "$output" == *"jq not found"* ]]
+  # ...and must reach the DOCUMENTED fallback, which standing down had turned into
+  # unreachable dead code (README promises it).
+  [[ "$output" == *"printing hook snippet"* ]]
 }
 
 # Reads the local-only INDEX_DIR install recorded in the manifest under the given

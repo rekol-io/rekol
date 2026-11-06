@@ -72,6 +72,18 @@ readonly SHELL_RC
 # Mutable config (set by flag parsing)
 DRY_RUN=0
 DO_HOOK=1
+# Writing `env.REKOL_HOME` into settings.json is NOT hook wiring, and must not be
+# cleared by the plugin stand-down. The plugin cannot edit settings.json at all —
+# `plugin/hooks/bootstrap` says so explicitly, "that is the whole point" — so
+# nothing else supplies this key. With it gated on DO_HOOK, standing down for an
+# enabled plugin skipped Step 7.5, and by that step's own comment "the entire
+# memory system is dark". #199's design says to stand down hook wiring ONLY;
+# this is the flag that holds it to that.
+#
+# It tracks the user's EXPLICIT intent (`--no-hook`, `--test-mode`) and is
+# cleared on exactly one other condition: a settings.json we cannot parse, where
+# rewriting it would destroy the user's file.
+DO_SETTINGS_ENV=1
 DO_SKILL=1
 DO_SHELLRC=1
 DO_MIGRATE=0
@@ -235,11 +247,11 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)    DRY_RUN=1;                            shift ;;
-    --no-hook)    DO_HOOK=0;                            shift ;;
+    --no-hook)    DO_HOOK=0; DO_SETTINGS_ENV=0;         shift ;;
     --no-skill)   DO_SKILL=0;                           shift ;;
     --no-shellrc) DO_SHELLRC=0;                         shift ;;
     --migrate)    DO_MIGRATE=1;                         shift ;;
-    --test-mode)  DO_HOOK=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
+    --test-mode)  DO_HOOK=0; DO_SETTINGS_ENV=0; DO_SKILL=0; DO_SHELLRC=0; TEST_MODE=1; shift ;;
     --skip-deps)  SKIP_DEPS=1;                          shift ;;
     --tools-home) TOOLS_HOME="$2";                      shift 2 ;;
     --bin-dir)    BIN_DIR="$2";                         shift 2 ;;
@@ -266,9 +278,26 @@ if [[ "$DO_HOOK" == "1" ]]; then
     say "[rekol] Existing settings hooks were left untouched; choose one backend explicitly before migrating."
     DO_HOOK=0
   elif [[ "$plugin_coexist_rc" == "2" ]]; then
-    say "[rekol] hook wiring skipped — cannot safely inspect $SETTINGS_JSON (invalid JSON or jq unavailable)."
-    say "[rekol] Fix the settings file or install jq, then rerun install.sh to wire hooks."
-    DO_HOOK=0
+    # rc=2 conflates two very different situations, and treating them alike was a
+    # silent regression in the PRIMARY install path: an existing settings.json
+    # plus no jq cleared DO_HOOK, which skipped every hook step AND Step 7.5's
+    # env block, while printing a reassuring message and exiting 0.
+    if command -v jq >/dev/null 2>&1; then
+      # jq works, so it is the FILE that cannot be parsed. Rewriting it would
+      # destroy the user's settings, so touch nothing — including the env block.
+      say "[rekol] hook wiring skipped — cannot parse $SETTINGS_JSON (invalid JSON)."
+      say "[rekol] Fix the settings file, then rerun install.sh to wire hooks."
+      DO_HOOK=0
+      DO_SETTINGS_ENV=0
+    else
+      # jq is absent. install.sh cannot MUTATE settings.json without jq either, so
+      # it cannot create the duplicate backend this gate exists to prevent —
+      # there is nothing here to protect against. Keep going so the documented
+      # jq-less path still prints the hook snippet to merge by hand (README:94),
+      # which standing down had turned into dead code.
+      say "[rekol] jq not found — cannot detect a plugin backend."
+      say "[rekol] Continuing: the hook snippet will be printed for manual merge."
+    fi
   fi
 fi
 
@@ -1234,7 +1263,7 @@ fi
 # entire memory system is dark.  Idempotent: if the key is already set to the
 # current value, no-op.
 
-if [[ "$DO_HOOK" == "1" ]]; then
+if [[ "$DO_SETTINGS_ENV" == "1" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
     say "jq not found; skipping Claude settings.json env update — add env.REKOL_HOME manually"
   else
