@@ -1244,23 +1244,30 @@ def test_missing_distribution_metadata_is_info_not_a_crash(monkeypatch) -> None:
     assert "metadata" in findings[0].detail
 
 
-# -------- blocker 1: doctor's PATH vs the hook's PATH are different things --------
+# -------- the recorded hook path is independent evidence (#215) --------
+# NOT a fix for #203's filed split: see the test docstring. In that state
+# `command -v` succeeds on the orphan, so the recorded fallback is never
+# consulted and nothing here fires. Preferring the recorded path is what
+# closes it, in the hook-order PR.
 
 
-def test_doctor_is_not_green_when_the_hook_resolves_something_doctor_cannot_see(
-    tmp_path, monkeypatch
-) -> None:
-    """#203's filed environment split, which the PATH walk alone cannot close.
+def test_doctor_reports_a_wired_hook_whose_recorded_path_is_broken(tmp_path, monkeypatch) -> None:
+    """A wired hook whose recorded fallback cannot run, with doctor's PATH healthy.
 
-    The interactive shell running doctor gets its PATH from `.zshrc` and contains
-    only the WORKING entry. The non-interactive hook gets a different PATH and
-    resolves an entry doctor never sees. A check that only walks doctor's PATH
-    returns OK in exactly that state while the hook stays broken.
+    What this proves: doctor does not report healthy just because its OWN PATH is
+    fine. The recorded path is independent evidence, and it is checked even with
+    no install manifest present (#215).
 
-    So the authority for the hook path is what the installer RECORDED in the hook
-    command, not this process's PATH. Here doctor's PATH holds a perfectly healthy
-    `rekol`, while the wired hook's recorded fallback points at a path that does
-    not exist — and doctor must not report healthy.
+    What this does NOT prove, and must not be read as: closing #203. In the filed
+    failure the orphan is FIRST on the hook's PATH, so `command -v rekol`
+    *succeeds*, the orphan runs, and the recorded fallback — which is perfectly
+    healthy — is never reached. `unrunnable_hooks()` therefore passes, and the
+    orphan is absent from doctor's PATH, so the PATH walk passes too. Neither
+    check fires.
+
+    Only preferring the recorded path over the PATH lookup prevents that, which is
+    the hook-order change. The regression for the filed split belongs there, and
+    #214 is detection only.
     """
     from rekol.cli_doctor import _check_console_scripts, _check_hook_executability
 
