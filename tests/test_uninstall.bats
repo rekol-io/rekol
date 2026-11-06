@@ -783,12 +783,44 @@ exec rekol-real "$@"
     [[ "$output" != *"orphaned console script"* ]]
 }
 
-@test "uninstall stays quiet about orphans when nothing on PATH is stale" {
+@test "uninstall reports what it actually checked when nothing on PATH is stale" {
     empty_dir="$TESTROOT/no-rekol/bin"
     mkdir -p "$empty_dir"
 
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$empty_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
+        PATH="$(_hermetic_path "$empty_dir")" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no orphaned 'rekol' console scripts"* ]]
+    [[ "$output" == *"no other 'rekol' found on PATH"* ]]
+}
+
+@test "uninstall does not claim all-clear when a rekol on PATH was left undecided" {
+    # A script whose interpreter EXISTS but may or may not be able to import
+    # rekol. The shebang-only pass cannot tell, so it must say so and point at
+    # doctor — not print a reassuring all-clear. A line nothing proved is the
+    # exact shape of the defect this whole check exists for.
+    undecided_dir="$TESTROOT/undecided/bin"
+    mkdir -p "$undecided_dir"
+    # A fixture-local interpreter, so this does not depend on the host having
+    # /usr/bin/python3 — if that were absent the script would classify as an
+    # orphan and the test would pass for the wrong reason.
+    fake_interp="$TESTROOT/undecided/python3.11"
+    printf '#!/bin/sh\nexit 0\n' > "$fake_interp"
+    chmod 755 "$fake_interp"
+    printf '#!%s\nfrom rekol.cli import main\n' "$fake_interp" > "$undecided_dir/rekol"
+    chmod 755 "$undecided_dir/rekol"
+
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
+        PATH="$(_hermetic_path "$undecided_dir")" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no other 'rekol' found on PATH"* ]]
+    [[ "$output" == *"not assessed here"* ]]
+    [[ "$output" == *"rekol doctor"* ]]
 }
