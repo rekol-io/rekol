@@ -18,6 +18,22 @@ follow [Semantic Versioning](https://semver.org/).
   that is what is now tested.
 - The vanished-storage wording no longer says messages "were indexed from it", which claims
   per-message provenance this does not check. It says the session index holds them.
+- **The existence probes sat OUTSIDE the error boundary, and what they do depends on the Python
+  version.** Both the sessions DB and the transcript source were tested with `Path.exists()` /
+  `is_dir()` before any `try`. Measured on the same sealed-directory fixture: **3.11.15 raises
+  `PermissionError`**, so `doctor` dies with a traceback, and **3.15.0 answers False**, so the same
+  install reads as ABSENT — a fresh machine with nothing indexed yet. One mode bit on a parent
+  directory produced either a crash or a reassuring lie depending on the interpreter. A
+  self-looping symlink answers False on **both**, so that case was silently wrong everywhere.
+  Both probes are now `os.stat` inside the boundary, classified by errno: `ENOENT`/`ENOTDIR` really
+  means absent, and anything else is reported as "cannot be inspected" / UNKNOWN rather than
+  rounded to absence. First-run neutrality is pinned by its own control, so a fix that answered
+  UNKNOWN unconditionally fails three tests.
+- **The UNKNOWN remedy pointed at a report that is never printed.** It said "check the sessions DB
+  (rekol doctor reports it below)" — but that finding *returns*, so the session-index checks which
+  would have reported the DB never run. It read as if the answer were already on screen. The
+  remedy now names the DB path and gives two real actions, split by cause: move a corrupt DB aside
+  and rebuild, or fix permissions on an unreadable one.
 
 ### Fixed
 - **A brand-new install reported `index is DEGRADED` because Claude Code had not created

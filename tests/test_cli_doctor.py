@@ -1721,3 +1721,118 @@ def test_a_listable_but_untraversable_projects_dir_is_a_problem(
     assert source, [f.label for f in findings]
     assert source[0].status is Status.PROBLEM, source[0].detail
     assert "cannot be read" in source[0].detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unstattable_sessions_db_is_unknown_not_absent(tmp_path: Path, monkeypatch) -> None:
+    """``exists()`` cannot tell "no such file" from "cannot look".
+
+    The DB is intact here; only the directory holding it has no search bit, and
+    the old probe was ``Path.exists()``. What that does with an access failure
+    depends on the interpreter, which is why this is worse than either outcome:
+
+      * 3.11.15 — raises ``PermissionError``, so ``doctor`` dies with a traceback
+      * 3.15.0  — answers False, so this reads as ABSENT and the caller reports
+                  a fresh machine with nothing indexed yet
+
+    Both measured on this fixture. A self-looping symlink at the DB path answers
+    False on both versions, so that case is silently wrong everywhere.
+
+    Tested on the function rather than through the whole report because the
+    sessions DB shares its directory with the curated index: sealing that
+    directory in a full `doctor` run breaks the earlier checks too, and the
+    failure would no longer be about this probe.
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+
+    _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    sealed_index = tmp_path / "sealed-index"
+    sealed_index.mkdir()
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(sealed_index))
+    cfg = load_config()
+    cfg.sessions_db_path.write_bytes(b"a real DB would be here")
+
+    sealed_index.chmod(0o000)
+    try:
+        state, count = _prior_index_state(cfg, HashingEmbedder(dim=384))
+    finally:
+        sealed_index.chmod(0o755)
+
+    assert state is _PriorIndex.UNKNOWN, state
+    assert count == 0
+
+
+def test_a_genuinely_missing_sessions_db_is_still_absent(tmp_path: Path, monkeypatch) -> None:
+    """The counterpart: the fix must not turn every answer into UNKNOWN.
+
+    Without this, returning UNKNOWN unconditionally would pass the test above
+    while destroying first-run neutrality — the thing this PR exists to protect.
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+
+    _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(tmp_path / "never-created"))
+    cfg = load_config()
+    assert not cfg.sessions_db_path.exists()
+
+    state, count = _prior_index_state(cfg, HashingEmbedder(dim=384))
+    assert state is _PriorIndex.ABSENT, state
+    assert count == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_a_projects_dir_under_a_sealed_parent_is_not_reported_as_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The source probe had the same hole as the DB probe, one level up.
+
+    With the PARENT sealed, ``is_dir()`` either raises (3.11) or answers False
+    (3.15) — so a locked-out source was either a traceback or a report that the
+    path does not exist, sending the user to correct a config value that is in
+    fact correct. The answer now says it could not find out.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    sealed = tmp_path / "sealed"
+    (sealed / "projects").mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {sealed / 'projects'}\n"
+    )
+    _build_curated_index(home)
+    cfg = load_config()
+
+    sealed.chmod(0o000)
+    try:
+        findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    finally:
+        sealed.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be inspected" in source[0].detail, source[0].detail
+    assert "does not exist" not in source[0].detail, source[0].detail
+    assert source[0].remedy and "traversable" in source[0].remedy
+
+
+def test_the_unknown_remedy_names_the_db_and_an_action(tmp_path: Path, monkeypatch) -> None:
+    """A remedy pointing at a report that is never printed is worse than none.
+
+    The UNKNOWN branch used to say "check the sessions DB (rekol doctor reports
+    it below)". It does not: this finding RETURNS, so the session-index checks
+    that would have reported the DB never run. It read as if the answer were
+    already on screen.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    cfg.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.sessions_db_path.write_bytes(b"this is not an sqlite database at all")
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source and source[0].remedy, source
+    remedy = source[0].remedy
+    assert "reports it below" not in remedy, remedy
+    assert str(cfg.sessions_db_path) in remedy, remedy
+    assert "session-index --full" in remedy, remedy
