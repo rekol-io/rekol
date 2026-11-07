@@ -51,6 +51,23 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
                 f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
                 f"defaulted={report.by_defaulted}, archived={report.archived})"
             )
+    # DELIBERATELY NOT GATED ON --quiet. Moving a user's file is not routine
+    # progress output, and install.sh passes --quiet: QA measured the old
+    # deletion of MEMORY.md producing no output at all on that path, so the one
+    # destructive step in the run was also the most silent. Printed for both
+    # dry-run (as "would move") and the real thing.
+    if report.legacy_pointer_archived is not None:
+        if dry_run:
+            click.echo(
+                f"{label}: MEMORY.md WOULD be moved to "
+                f"{report.legacy_pointer_archived} (it is not imported — "
+                f"autoMemory would otherwise keep injecting it)"
+            )
+        else:
+            click.echo(
+                f"{label}: moved MEMORY.md to {report.legacy_pointer_archived} "
+                f"(not imported; kept byte-complete in the archive)"
+            )
     if report.by_defaulted and dry_run:
         # Dry-run writes, archives and retires NOTHING — claiming otherwise is a
         # user-facing falsehood, and this function is where the original bug

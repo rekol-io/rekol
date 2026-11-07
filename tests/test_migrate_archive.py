@@ -56,21 +56,69 @@ def test_archive_file_collision_appends_suffix(tmp_path: Path) -> None:
     assert [n.name for n in names] == ["x-1.md", "x.md"]
 
 
-def test_write_retirement_pointer_writes_marker_and_removes_legacy(
+def test_write_retirement_pointer_archives_legacy_memory_md_never_deletes_it(
     tmp_path: Path,
 ) -> None:
-    """New convention: write hidden ``.MIGRATED`` marker; remove pre-existing
-    ``MEMORY.md`` (which Claude Code's autoMemory would otherwise inject)."""
+    """A real ``MEMORY.md`` must be MOVED into the archive, not unlinked.
+
+    INVERTED (QA, 2026-11-06). This test previously wrote
+    ``"# Original index\n\nReal content.\n"`` and asserted the file was **gone**
+    — so the data loss was not a slip, it was pinned by a test.
+
+    The original intent was to stop Claude Code's autoMemory injecting a
+    *tombstone* written by an older version of this tool. But both callers sit
+    behind `has_migration_marker`, which already treats an old-format tombstone
+    as retired, so a real tombstone never reaches here: everything the unlink
+    could delete was a user's own file. Moving it stops the injection just as
+    well, because autoMemory cannot inject what is no longer at that path.
+    """
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
-    (memory_dir / "MEMORY.md").write_text("# Original index\n\nReal content.\n")
-    write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+    body = "# Original index\n\nReal content.\n"
+    (memory_dir / "MEMORY.md").write_text(body)
+
+    archived = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+
     marker = memory_dir / MIGRATION_MARKER_NAME
     assert marker.is_file()
     assert "/fake/memory" in marker.read_text()
-    # MEMORY.md was removed so autoMemory has nothing to inject
-    assert not (memory_dir / "MEMORY.md").exists()
     assert has_migration_marker(memory_dir) is True
+
+    # Gone from the injection path...
+    assert not (memory_dir / "MEMORY.md").exists()
+    # ...but byte-identical in the archive, and the caller is told where.
+    assert archived is not None
+    assert archived == memory_dir / "old-memory-archive" / "MEMORY.md"
+    assert archived.is_file()
+    assert archived.read_text() == body
+
+
+def test_archiving_a_legacy_pointer_never_overwrites_an_earlier_copy(
+    tmp_path: Path,
+) -> None:
+    """A second migration must not clobber the first archived MEMORY.md.
+
+    The archive holds the only byte-complete original, so one silent overwrite is
+    one unrecoverable file.
+    """
+    memory_dir = tmp_path / "memory"
+    (memory_dir / "old-memory-archive").mkdir(parents=True)
+    (memory_dir / "old-memory-archive" / "MEMORY.md").write_text("FIRST\n")
+    (memory_dir / "MEMORY.md").write_text("SECOND\n")
+
+    archived = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+
+    assert archived == memory_dir / "old-memory-archive" / "MEMORY-1.md"
+    assert archived.read_text() == "SECOND\n"
+    assert (memory_dir / "old-memory-archive" / "MEMORY.md").read_text() == "FIRST\n"
+
+
+def test_write_retirement_pointer_returns_none_when_there_is_no_legacy_pointer(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    assert write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory")) is None
 
 
 def test_write_retirement_pointer_idempotent(tmp_path: Path) -> None:
