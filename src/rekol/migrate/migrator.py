@@ -21,9 +21,67 @@ from rekol.migrate.archive import (
 )
 from rekol.migrate.classify import Classification, classify_file
 from rekol.migrate.discover import (
+    MIGRATION_MARKER_NAME,
     discover_files_in_dir,
     has_migration_marker,
 )
+
+
+def _nested_md_files(source_dir: Path) -> list[Path]:
+    """Every ``.md`` file below ``source_dir`` that discovery will never see.
+
+    Discovery is deliberately non-recursive, so these are neither imported nor
+    archived. They are reported rather than migrated: importing them would
+    change discovery semantics, which is a design decision and not a fix.
+    """
+    return [
+        path
+        for path in sorted(source_dir.rglob("*.md"))
+        if path.parent != source_dir and ARCHIVE_DIR_NAME not in path.parts
+    ]
+
+
+def _nested_file_warning(source_dir: Path, nested: list[Path], *, dry_run: bool) -> str:
+    """The warning for nested files, with a remedy that actually works.
+
+    The previous wording said only "Move them up one level and re-run". QA
+    followed it literally and nothing happened: ``discover_auto_memory_sources``
+    filters out retired directories, so a re-run never looks at this one again.
+    Documenting a remedy that cannot work is the #166 failure, so the marker is
+    named here — that is what makes the directory eligible again.
+
+    ``dry_run`` changes the tense, and it is not cosmetic: a dry run retires
+    nothing, so saying "this directory is now retired" would be the same kind of
+    false claim this warning exists to prevent. In dry-run the useful advice is
+    also different — move the files BEFORE committing and no marker needs
+    deleting at all.
+    """
+    listed = ", ".join(str(path.relative_to(source_dir)) for path in nested)
+    opening = (
+        f"{len(nested)} file(s) in subdirectories will NOT be imported, will NOT be "
+        f"archived, and will NOT be searchable"
+        if dry_run
+        else f"{len(nested)} file(s) in subdirectories were NOT imported, are NOT in "
+        f"the archive, and are NOT searchable"
+    )
+    if dry_run:
+        remedy = (
+            f"Nothing has been retired yet, so the simplest fix is to move them up "
+            f"into {source_dir} BEFORE running --commit. If you commit first, you "
+            f"will also have to delete {MIGRATION_MARKER_NAME} there to make the "
+            f"directory eligible again."
+        )
+    else:
+        remedy = (
+            f"This directory is now retired, so a later run skips it: to migrate "
+            f"them, move them up into {source_dir} AND delete "
+            f"{MIGRATION_MARKER_NAME} there, then re-run — or import them by hand."
+        )
+    return (
+        f"{opening} — migration does not recurse: {listed}. They stay where they "
+        f"are on disk. {remedy}"
+    )
+
 
 # Map singular layer name (in Classification.layer) to on-disk dir name.
 LAYER_DIR_MAP = {
@@ -53,6 +111,11 @@ class MigrationReport:
     # exactly how its deletion stayed invisible in both the dry-run preview and
     # the final output (QA, 2026-11-06).
     legacy_pointer_archived: Path | None = None
+    # Set when a `MEMORY.md` was found and deliberately LEFT ALONE, which is the
+    # `migrate repo` contract. Distinct from `legacy_pointer_archived is None`,
+    # which only means there was no such file — the CLI has to tell a user that
+    # their repo's own MEMORY.md was spared, not merely stay quiet about it.
+    legacy_pointer_left_in_place: Path | None = None
     skipped_retired: int = 0
     skipped_missing: int = 0
     skipped_duplicate: int = 0  # body-hash matched an already-migrated file
@@ -129,6 +192,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     memory_home: Path,
     dry_run: bool,
     allow_llm: bool,
+    archive_legacy_pointer: bool = True,
 ) -> MigrationReport:
     """Migrate every legacy .md file in ``source_dir`` into ``memory_home``.
 
@@ -137,6 +201,15 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
 
     When ``dry_run`` is True, no filesystem writes occur; ``would_migrate`` is
     populated but ``migrated`` stays 0.
+
+    ``archive_legacy_pointer`` False leaves any ``MEMORY.md`` strictly alone and
+    records it in ``legacy_pointer_left_in_place``. The default True is the
+    auto-memory contract: Claude Code's autoMemory injects
+    ``~/.claude/projects/<slug>/memory/MEMORY.md`` into every session, so a
+    migrated directory must not leave one there. Outside that tree the file is
+    quite possibly a tracked project file — rekol ships one in its own template
+    — so archiving it would move tracked content and drop an untracked
+    ``old-memory-archive/`` into someone's repository.
     """
     report = MigrationReport()
 
@@ -153,14 +226,32 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
         # Still write the retirement pointer so re-runs skip cleanly. A directory
         # holding ONLY `MEMORY.md` lands here — which is how that file used to be
         # deleted with nothing imported and exit 0.
+        #
+        # G2 (QA, 2026-11-06): the nested-file warning used to sit further down,
+        # below this return, so a directory whose ONLY .md files were nested
+        # retired in silence with `migrated 0` and exit 0 — the summary line
+        # looked like there had been nothing to do. These are the likeliest
+        # shapes to be overlooked, so the warning has to be raised here too.
+        nested = _nested_md_files(source_dir)
+        if nested:
+            report.warnings.append(_nested_file_warning(source_dir, nested, dry_run=dry_run))
+
         legacy_pointer = source_dir / "MEMORY.md"
-        if dry_run:
+        if not archive_legacy_pointer:
             if legacy_pointer.exists():
+                report.legacy_pointer_left_in_place = legacy_pointer
+        if dry_run:
+            if legacy_pointer.exists() and archive_legacy_pointer:
                 report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
         else:
-            report.legacy_pointer_archived = write_retirement_pointer(
-                source_dir, memory_home=memory_home
+            outcome = write_retirement_pointer(
+                source_dir,
+                memory_home=memory_home,
+                archive_legacy_pointer=archive_legacy_pointer,
             )
+            report.legacy_pointer_archived = outcome.legacy_pointer_archived
+            if outcome.error:
+                report.errors.append(outcome.error)
         return report
 
     # INDEX.md now lives in the local-only cache (outside $REKOL_HOME); fall
@@ -267,7 +358,15 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # `errors` means UNIMPORTED. Diagnostics about imported-but-poorly-described
     # files live in `warnings` and deliberately do not block retirement.
     unimported = len(report.errors) > 0
-    progressed = report.migrated > 0 or report.skipped_duplicate > 0
+    # `would_migrate` belongs here (G1, QA 2026-11-06). In dry-run `migrated`
+    # stays 0 by design, so `progressed` was False and NOTHING below fired: no
+    # MEMORY.md preview and no nested-file warning, in the commonest shape of
+    # all (a MEMORY.md beside one topic file). It appeared to work only for a
+    # directory with no topic files, which takes the early return above and has
+    # its own preview — so the test covering that shape passed while the normal
+    # path previewed nothing, and the one destructive step in the run was the
+    # one step a user could not see coming.
+    progressed = report.migrated > 0 or report.would_migrate > 0 or report.skipped_duplicate > 0
     retirable = progressed and not unimported
     # F7 (QA, 2026-11-06): discovery is deliberately NON-recursive, but retirement
     # is permanent — so a nested file was left on disk, never imported, and no
@@ -278,30 +377,33 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # `migrate auto` retry forever with no way to progress) but name them, so the
     # user can act instead of silently losing track.
     if retirable:
-        nested = [
-            path
-            for path in sorted(source_dir.rglob("*.md"))
-            if path.parent != source_dir and ARCHIVE_DIR_NAME not in path.parts
-        ]
+        nested = _nested_md_files(source_dir)
         if nested:
-            listed = ", ".join(str(path.relative_to(source_dir)) for path in nested)
-            report.warnings.append(
-                f"{len(nested)} file(s) in subdirectories were NOT imported and are NOT in "
-                f"the archive — migration does not recurse: {listed}. They stay where they "
-                f"are, but this directory is now retired, so re-running will skip it. Move "
-                f"them up one level and re-run, or import them by hand."
-            )
+            report.warnings.append(_nested_file_warning(source_dir, nested, dry_run=dry_run))
+
+    legacy_pointer = source_dir / "MEMORY.md"
+    if retirable and not archive_legacy_pointer and legacy_pointer.exists():
+        report.legacy_pointer_left_in_place = legacy_pointer
 
     if not dry_run and retirable:
-        report.legacy_pointer_archived = write_retirement_pointer(
-            source_dir, memory_home=memory_home
+        outcome = write_retirement_pointer(
+            source_dir,
+            memory_home=memory_home,
+            archive_legacy_pointer=archive_legacy_pointer,
         )
+        report.legacy_pointer_archived = outcome.legacy_pointer_archived
+        if outcome.error:
+            # G4: reported as an error, which both blocks the exit-0 claim and
+            # — because the marker was never written — leaves the directory
+            # eligible for a later run. Previously this escaped as an uncaught
+            # PermissionError traceback AFTER the marker had been written, so
+            # the directory reported itself migrated and never retried.
+            report.errors.append(outcome.error)
     elif dry_run and retirable:
-        # Preview it. Dry-run previously reported "would migrate N" and never
-        # mentioned MEMORY.md at all, so the one destructive step in the run was
-        # the one step a user could not preview.
-        legacy_pointer = source_dir / "MEMORY.md"
-        if legacy_pointer.exists():
+        # Preview it. Dry-run reported "would migrate N" and never mentioned
+        # MEMORY.md, so the one destructive step in the run was the one step a
+        # user could not preview.
+        if legacy_pointer.exists() and archive_legacy_pointer:
             report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
 
     return report

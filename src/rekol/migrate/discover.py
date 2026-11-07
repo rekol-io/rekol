@@ -93,6 +93,34 @@ def discover_files_in_dir(source_root: Path) -> list[LegacyFile]:
     return files
 
 
+def is_auto_memory_dir(memory_dir: Path) -> bool:
+    """Is ``memory_dir`` a Claude Code auto-memory dir — ``<projects>/<slug>/memory``?
+
+    This decides whether a ``MEMORY.md`` there may be archived. Only autoMemory
+    injection justifies moving that file: Claude Code injects
+    ``~/.claude/projects/<slug>/memory/MEMORY.md`` into every session, so a
+    migrated directory must not leave one behind. Anywhere else the file is
+    quite possibly tracked by the user's own repository — rekol ships one in its
+    template — and moving it would relocate tracked content and leave an
+    untracked ``old-memory-archive/`` in their working tree.
+
+    Resolved on both sides so a symlinked or relative path cannot slip past, and
+    compared against the same ``resolve_claude_config_dir()`` the discovery
+    above uses, so a relocated ``CLAUDE_CONFIG_DIR`` is honoured here too (#165).
+    """
+    projects_root = resolve_claude_config_dir() / "projects"
+    try:
+        resolved = memory_dir.resolve()
+        root = projects_root.resolve()
+    except OSError:
+        return False
+    if resolved.name != "memory":
+        return False
+    # Exactly <root>/<slug>/memory — not something buried deeper, whose MEMORY.md
+    # autoMemory does not inject either.
+    return resolved.parent.parent == root
+
+
 def discover_auto_memory_sources() -> list[Path]:
     """Find all ~/.claude/projects/*/memory/ dirs that have not been migrated.
 

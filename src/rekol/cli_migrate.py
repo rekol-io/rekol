@@ -23,7 +23,7 @@ from typing import Any
 import click
 
 from rekol.config import resolve_memory_home
-from rekol.migrate.discover import discover_auto_memory_sources
+from rekol.migrate.discover import discover_auto_memory_sources, is_auto_memory_dir
 from rekol.migrate.migrator import MigrationReport, migrate_dir
 
 
@@ -34,6 +34,38 @@ def _memory_home() -> Path:
         click.echo("error: neither REKOL_HOME nor MEMORY_HOME is set.", err=True)
         sys.exit(2)
     return Path(os.path.expanduser(env))
+
+
+def _print_legacy_pointer_outcome(report: MigrationReport, label: str, dry_run: bool) -> None:
+    """What happened to a legacy ``MEMORY.md`` — moved, or deliberately spared.
+
+    DELIBERATELY NOT GATED ON --quiet, in either direction. Moving a user's file
+    is not routine progress output, and install.sh passes --quiet: QA measured
+    the old deletion of MEMORY.md producing no output at all on that path, so the
+    one destructive step in the run was also the most silent. Sparing it needs
+    saying for the mirror-image reason — silence would be indistinguishable from
+    the behaviour that moved it.
+    """
+    if report.legacy_pointer_archived is not None:
+        if dry_run:
+            click.echo(
+                f"{label}: MEMORY.md WOULD be moved to "
+                f"{report.legacy_pointer_archived} (it is not imported — "
+                f"autoMemory would otherwise keep injecting it)"
+            )
+        else:
+            click.echo(
+                f"{label}: moved MEMORY.md to {report.legacy_pointer_archived} "
+                f"(not imported; kept byte-complete in the archive)"
+            )
+    if report.legacy_pointer_left_in_place is not None:
+        click.echo(
+            f"{label}: left MEMORY.md alone at "
+            f"{report.legacy_pointer_left_in_place} — outside Claude Code's "
+            f"projects tree it is likely a tracked project file, and nothing "
+            f"injects it, so there is no reason to move it. It was not imported "
+            f"and is not searchable."
+        )
 
 
 def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: bool) -> None:
@@ -51,23 +83,7 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
                 f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
                 f"defaulted={report.by_defaulted}, archived={report.archived})"
             )
-    # DELIBERATELY NOT GATED ON --quiet. Moving a user's file is not routine
-    # progress output, and install.sh passes --quiet: QA measured the old
-    # deletion of MEMORY.md producing no output at all on that path, so the one
-    # destructive step in the run was also the most silent. Printed for both
-    # dry-run (as "would move") and the real thing.
-    if report.legacy_pointer_archived is not None:
-        if dry_run:
-            click.echo(
-                f"{label}: MEMORY.md WOULD be moved to "
-                f"{report.legacy_pointer_archived} (it is not imported — "
-                f"autoMemory would otherwise keep injecting it)"
-            )
-        else:
-            click.echo(
-                f"{label}: moved MEMORY.md to {report.legacy_pointer_archived} "
-                f"(not imported; kept byte-complete in the archive)"
-            )
+    _print_legacy_pointer_outcome(report, label, dry_run)
     if report.by_defaulted and dry_run:
         # Dry-run writes, archives and retires NOTHING — claiming otherwise is a
         # user-facing falsehood, and this function is where the original bug
@@ -206,6 +222,12 @@ def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool) -> None:
         memory_home=memory_home,
         dry_run=dry_run,
         allow_llm=not no_llm,
+        # Decided by WHERE the directory is, not by which subcommand was typed,
+        # so `migrate repo` pointed at a real auto-memory dir and `migrate auto`
+        # reaching the same dir agree about it. Only autoMemory injection
+        # justifies touching MEMORY.md, and that applies solely inside Claude
+        # Code's projects tree.
+        archive_legacy_pointer=is_auto_memory_dir(source),
     )
     _print_report(report, target.name, dry_run, quiet)
     if report.errors:

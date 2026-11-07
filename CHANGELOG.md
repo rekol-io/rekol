@@ -5,6 +5,53 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- **`migrate repo` now leaves a repository's own `MEMORY.md` alone.** The only justification for
+  touching that file is Claude Code's autoMemory, which injects
+  `~/.claude/projects/<slug>/memory/MEMORY.md` into every session — so a migrated auto-memory
+  directory must not leave one behind. Outside that tree the file is quite possibly tracked by the
+  user's own repo (rekol ships one in its template), where archiving it would relocate tracked
+  content and drop an untracked `old-memory-archive/` into their working copy. It is now left in
+  place and **said so explicitly**, not merely skipped in silence — silence would be
+  indistinguishable from the behaviour that moved it.
+  The decision keys on *where the directory is*, not which subcommand was typed, so `migrate repo`
+  pointed at a real auto-memory dir and `migrate auto` reaching the same dir agree about it. A
+  relocated `CLAUDE_CONFIG_DIR` is honoured (#165).
+
+### Fixed
+- **Dry-run previewed the `MEMORY.md` move in only one shape (G1).** `progressed` keyed on
+  `migrated > 0`, which stays 0 in dry-run by design, so in the commonest shape of all — a
+  `MEMORY.md` beside one topic file — nothing was previewed and the nested-file warning never
+  appeared either. It looked correct only for a directory with no topic files, which takes a
+  different early return that has its own preview; the test covering that shape passed while the
+  ordinary path previewed nothing, so the one destructive step in the run was the one step a user
+  could not see coming. Dry-run and `--commit` are now asserted to agree about the destination.
+- **A directory whose only `.md` files were nested retired in silence (G2).** The warning sat below
+  the `if not files:` return, so those directories reported `migrated 0`, exit 0, and never
+  mentioned the files left behind — the summary line looked like there had been nothing to do.
+  These are the likeliest shapes to be overlooked, and they are now warned about in all four
+  combinations of `MEMORY.md`/topic file/nested file.
+- **The nested-file warning's remedy did nothing when followed (G3).** It said to move the files up
+  one level and re-run; QA did exactly that and nothing happened, because retired directories are
+  filtered out of discovery. It now names `.MIGRATED` as well, and states the files are not
+  imported and not searchable. There is a regression test that *executes* the remedy rather than
+  reading it. In dry-run the wording also no longer claims "this directory is now retired" — a dry
+  run retires nothing, so the past tense was the same species of false claim the warning exists to
+  prevent, and it advises moving the files before committing, where no marker needs deleting at all.
+- **An unwritable archive left the directory permanently retired (G4).** `shutil.move` had no
+  `except`, so a mode-555 `old-memory-archive/` produced an uncaught `PermissionError` traceback —
+  and because the marker was written *first*, `.MIGRATED` claimed completion with `MEMORY.md` still
+  in place, so `has_migration_marker` skipped the directory for good and the file was stranded.
+  The legacy pointer is now archived **first** and the marker written **last**, the failure is
+  caught and reported as a plain error, and nothing claims the directory is done — so a later run
+  retries once the archive is writable.
+  The previous order's stated rationale was also wrong and is corrected in the docstring: it
+  claimed marker-last "would leave neither file on partial failure, causing a re-run to re-migrate
+  already-archived content", but `discover_files_in_dir` iterates files only and never recurses, so
+  the archive cannot be re-discovered and that failure mode does not exist.
+- The `.MIGRATED` marker text no longer wraps mid-clause (it read `KEEP them unless you` / `have` /
+  `checked…`), with a test that no line is a single orphaned word.
+
 ### Fixed
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
