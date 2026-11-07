@@ -215,6 +215,56 @@ def _candidate_archive_names(archive_dir: Path, name: str) -> Iterator[Path]:
         yield archive_dir / f"{stem}-{counter}{suffix}"
 
 
+def predict_archive_name(source_path: Path, archive_dir: Path) -> Path:
+    """Where ``publish_into_archive`` would put ``source_path`` right now.
+
+    For dry-run previews ONLY. The dry run used to hardcode
+    ``<archive>/<name>``, so it promised ``old-memory-archive/MEMORY.md`` while
+    ``--commit`` would pick ``MEMORY-1.md`` because the first name was already
+    taken (Codex, 2026-11-06) — a preview that does not match what happens is
+    worse than no preview.
+
+    This is a prediction, not a reservation: it tests existence, which is
+    exactly the race ``publish_into_archive`` refuses to rely on. That is
+    acceptable here because nothing is being written — a preview can only ever
+    be a best guess about a future run, and the real publication still refuses
+    to clobber whatever it finds.
+    """
+    for candidate in _candidate_archive_names(archive_dir, source_path.name):
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    return archive_dir / source_path.name
+
+
+def write_migration_marker(marker: Path, text: str) -> None:
+    """Write ``marker`` atomically: it either does not exist, or is complete.
+
+    ``has_migration_marker()`` only asks whether the file exists, so a partially
+    written marker is accepted as a completed migration (Codex, 2026-11-06). A
+    plain ``write_text`` that fails or is interrupted part-way therefore leaves a
+    directory that reports itself migrated while this function's caller reports
+    "NOT retired, so re-running retries it" — the two statements contradict each
+    other, and the one the next run believes is the file.
+
+    Staged in the same directory so the ``os.replace`` is a same-filesystem
+    rename, which is atomic: no reader ever sees a short marker.
+    """
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    staged_fd, staged_name = tempfile.mkstemp(
+        dir=marker.parent, prefix=".partial-marker-", suffix=".tmp"
+    )
+    staged_path = Path(staged_name)
+    try:
+        with os.fdopen(staged_fd, "w") as staged:
+            staged.write(text)
+            staged.flush()
+            os.fsync(staged.fileno())
+        os.replace(staged_path, marker)
+    except OSError:
+        staged_path.unlink(missing_ok=True)
+        raise
+
+
 def write_retirement_pointer(
     memory_dir: Path,
     *,
@@ -288,12 +338,13 @@ def write_retirement_pointer(
     if not marker.exists():
         today = dt.date.today().isoformat()
         try:
-            marker.write_text(
+            write_migration_marker(
+                marker,
                 f"migrated to {memory_home} on {today}\n"
                 f"Files discovered here are in {ARCHIVE_DIR_NAME}/ — KEEP them unless you have\n"
                 f"checked that the migrated copies contain everything you need.\n"
                 f"Migration rewrites frontmatter: recognised fields are regenerated and any\n"
-                f"UNRECOGNISED key is dropped, so those values survive only in the archive.\n"
+                f"UNRECOGNISED key is dropped, so those values survive only in the archive.\n",
             )
         except OSError as exc:
             return RetirementOutcome(

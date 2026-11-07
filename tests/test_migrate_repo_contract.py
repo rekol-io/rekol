@@ -32,6 +32,7 @@ from click.testing import CliRunner
 
 from rekol.cli_migrate import main
 from rekol.migrate import archive as archive_module
+from rekol.migrate import migrator as migrator_module
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
     MIGRATION_MARKER_NAME,
@@ -391,28 +392,238 @@ def test_a_retry_succeeds_once_the_archive_is_writable_again(
     assert (memory_dir / MIGRATION_MARKER_NAME).is_file()
 
 
-def test_the_marker_is_written_last_so_a_failure_leaves_nothing_claiming_success(
-    tmp_path: Path,
+def test_the_marker_is_written_after_the_archive_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Order asserted directly, since the ordering IS the fix.
+    """Order asserted DIRECTLY, by observing the calls.
 
-    The previous docstring argued for marker-first on the grounds that the
-    reverse "would leave neither file on partial failure, causing a re-run to
-    re-migrate already-archived content". That is false: discovery iterates
-    files only and never recurses, so the archive cannot be re-discovered.
+    The first version of this test compared mtimes — which proves nothing,
+    because a move preserves the original's mtime, so marker-first passed it too
+    (Codex, 2026-11-06). A test that cannot fail on the defect it names is worse
+    than no test: it reads as coverage.
+
+    The order is the fix: archiving first means a failure leaves nothing claiming
+    the directory is done. The reverse shipped briefly, and its stated rationale
+    was also false — `discover_files_in_dir` never recurses, so the archive
+    cannot be re-discovered.
     """
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
     (memory_dir / "MEMORY.md").write_text("body\n")
 
-    outcome = write_retirement_pointer(memory_dir, memory_home=tmp_path / "home")
+    calls: list[str] = []
+    real_publish = archive_module.publish_into_archive
+    real_marker = archive_module.write_migration_marker
 
-    archived = outcome.legacy_pointer_archived
-    assert archived is not None
+    def observed_publish(source_path: Path, archive_dir: Path) -> Path:
+        calls.append("archive")
+        return real_publish(source_path, archive_dir)
+
+    def observed_marker(marker: Path, text: str) -> None:
+        calls.append("marker")
+        real_marker(marker, text)
+
+    monkeypatch.setattr(archive_module, "publish_into_archive", observed_publish)
+    monkeypatch.setattr(archive_module, "write_migration_marker", observed_marker)
+
+    outcome = archive_module.write_retirement_pointer(memory_dir, memory_home=tmp_path / "home")
+
+    assert outcome.retired is True
+    assert calls == ["archive", "marker"], f"wrong order: {calls}"
+
+
+def test_a_partially_written_marker_never_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`has_migration_marker` only asks whether the file EXISTS.
+
+    So a short write would be accepted as a completed migration while the report
+    said the directory was not retired — the next run believes the file, not the
+    report (Codex, 2026-11-06).
+    """
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
     marker = memory_dir / MIGRATION_MARKER_NAME
-    assert marker.is_file()
-    # The archived copy must not be newer than the marker: the move happened first.
-    assert archived.stat().st_mtime <= marker.stat().st_mtime + 1
+
+    real_replace = archive_module.os.replace
+
+    def failing_replace(src, dst):  # noqa: ANN001, ARG001
+        raise OSError("disk full")
+
+    monkeypatch.setattr(archive_module.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        archive_module.write_migration_marker(marker, "migrated\n")
+
+    # Before creation: no marker at all, and no debris under a real name.
+    assert not marker.exists()
+    assert [p.name for p in memory_dir.iterdir()] == []
+
+    monkeypatch.setattr(archive_module.os, "replace", real_replace)
+    archive_module.write_migration_marker(marker, "migrated\n")
+    # After creation: complete, and nothing staged left behind.
+    assert marker.read_text() == "migrated\n"
+    assert [p.name for p in memory_dir.iterdir()] == [MIGRATION_MARKER_NAME]
+
+
+def test_dry_run_predicts_the_suffixed_name_commit_would_choose(tmp_path: Path) -> None:
+    """The preview promised MEMORY.md while --commit would pick MEMORY-1.md."""
+    source_dir = _source_dir(tmp_path, with_memory_md=True, with_topic=True)
+    archive_dir = source_dir / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    (archive_dir / "MEMORY.md").write_text("an earlier archived original\n")
+
+    previewed = migrate_dir(
+        source_dir=source_dir,
+        memory_home=_memory_home(tmp_path),
+        dry_run=True,
+        allow_llm=False,
+    ).legacy_pointer_archived
+    committed = migrate_dir(
+        source_dir=source_dir,
+        memory_home=_memory_home(tmp_path),
+        dry_run=False,
+        allow_llm=False,
+    ).legacy_pointer_archived
+
+    assert previewed == archive_dir / "MEMORY-1.md"
+    assert previewed == committed, "the preview promised a different path"
+    assert (archive_dir / "MEMORY.md").read_text() == "an earlier archived original\n"
+
+
+def test_the_nested_warning_does_not_claim_retirement_when_it_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two contradictory statements in one report, with no way to tell which is true.
+
+    Only the LEGACY POINTER's publication is made to fail. An unwritable archive
+    directory cannot express this case: it fails the topic file's archiving too,
+    so the directory never becomes retirable and the warning is never reached —
+    which is how an earlier version of this test passed while asserting nothing.
+    """
+    source_dir = _source_dir(tmp_path, with_memory_md=True, with_topic=True)
+    (source_dir / "notes").mkdir()
+    (source_dir / "notes" / "deep.md").write_text("nested\n")
+
+    real_publish = archive_module.publish_into_archive
+
+    def publish_except_memory_md(source_path: Path, archive_dir: Path) -> Path:
+        if source_path.name == "MEMORY.md":
+            raise archive_module.ArchivePublishError(
+                f"could not archive {source_path}: simulated. Nothing was moved."
+            )
+        return real_publish(source_path, archive_dir)
+
+    monkeypatch.setattr(archive_module, "publish_into_archive", publish_except_memory_md)
+
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=_memory_home(tmp_path),
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.migrated == 1, "the topic file must import, or nothing is retirable"
+    assert report.errors, "expected the archive failure to be reported"
+    warning = _nested_warning(report.warnings)
+    assert warning is not None, "the nested warning must still be raised"
+    assert "is now retired" not in warning, warning
+    assert "was NOT retired" in warning
+    # And the claim is true: no marker, and MEMORY.md still in place.
+    assert not (source_dir / MIGRATION_MARKER_NAME).exists()
+    assert (source_dir / "MEMORY.md").is_file()
+
+
+def test_an_imported_file_gets_a_suffix_when_the_name_is_taken(tmp_path: Path) -> None:
+    """The ordinary sequential collision.
+
+    NOT a regression test for the race: verified by reverting to
+    `exists()` + `write_text`, where this still passes, because the old suffix
+    loop handled the sequential case correctly. The race is covered by the test
+    below, which injects a competitor between name selection and creation.
+    """
+    memory_home = _memory_home(tmp_path)
+    # The real target name, confirmed by running the migrator: the project slug
+    # is prefixed and an unclassified file defaults to knowledge/. Guessing
+    # `topics/sailing.md` made an earlier version of this test pass without ever
+    # creating a collision.
+    existing = memory_home / "knowledge" / "proj-sailing.md"
+    existing.write_text("ALREADY IMPORTED, must survive\n")
+
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=memory_home,
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.migrated == 1
+    assert existing.read_text() == "ALREADY IMPORTED, must survive\n"
+    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
+
+
+def test_a_competitor_creating_the_target_name_does_not_lose_the_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual race: a file appears at the chosen name before the write.
+
+    `exists()` then `write_text` overwrote it. `O_CREAT|O_EXCL` is one atomic
+    operation, so the loser of the race takes the next name instead of
+    destroying the winner. Injected at `os.open`, which is the only place the
+    name is claimed — the same probe shape Codex used for the archive.
+    """
+    memory_home = _memory_home(tmp_path)
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    contested = memory_home / "knowledge" / "proj-sailing.md"
+
+    real_open = migrator_module.os.open
+    raced = {"done": False}
+
+    def racing_open(path, flags, mode=0o777):  # noqa: ANN001
+        if not raced["done"] and str(path) == str(contested):
+            raced["done"] = True
+            # A competitor wins the name in the instant before our claim.
+            contested.write_text("COMPETITOR'S IMPORT\n")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(migrator_module.os, "open", racing_open)
+
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=memory_home,
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert raced["done"], "the race was never triggered; this test proved nothing"
+    assert report.migrated == 1
+    # The competitor's content must survive untouched.
+    assert contested.read_text() == "COMPETITOR'S IMPORT\n"
+    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
+
+
+def test_an_imported_file_is_not_written_through_a_dangling_symlink(tmp_path: Path) -> None:
+    """`exists()` follows the link and returns False, so the name read as free.
+
+    `write_text` then followed it and wrote THROUGH the link, creating or
+    truncating whatever it pointed at — anywhere on disk.
+    """
+    memory_home = _memory_home(tmp_path)
+    victim = tmp_path / "somewhere-else.md"
+    (memory_home / "knowledge" / "proj-sailing.md").symlink_to(victim)
+
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=memory_home,
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.migrated == 1
+    # Nothing was written through the link.
+    assert not victim.exists(), "wrote through a dangling symlink to an unrelated path"
+    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
 
 
 def test_the_marker_text_does_not_wrap_mid_clause(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ multiple calls for ``auto`` mode.
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from rekol.config import resolve_index_dir
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
     archive_file,
+    predict_archive_name,
     write_retirement_pointer,
 )
 from rekol.migrate.classify import Classification, classify_file
@@ -41,7 +43,9 @@ def _nested_md_files(source_dir: Path) -> list[Path]:
     ]
 
 
-def _nested_file_warning(source_dir: Path, nested: list[Path], *, dry_run: bool) -> str:
+def _nested_file_warning(
+    source_dir: Path, nested: list[Path], *, dry_run: bool, retired: bool
+) -> str:
     """The warning for nested files, with a remedy that actually works.
 
     The previous wording said only "Move them up one level and re-run". QA
@@ -71,17 +75,31 @@ def _nested_file_warning(source_dir: Path, nested: list[Path], *, dry_run: bool)
             f"will also have to delete {MIGRATION_MARKER_NAME} there to make the "
             f"directory eligible again."
         )
-    else:
+    elif retired:
         remedy = (
             f"This directory is now retired, so a later run skips it: to migrate "
             f"them, move them up into {source_dir} AND delete "
             f"{MIGRATION_MARKER_NAME} there, then re-run — or import them by hand."
+        )
+    else:
+        # Retirement FAILED (see the error in the same report). Claiming the
+        # directory is retired here would contradict that error, and would send
+        # the user to delete a marker that was never written.
+        remedy = (
+            f"This directory was NOT retired — see the error above — so a later "
+            f"run will retry it. Move them up into {source_dir} before then and "
+            f"they will be imported; no {MIGRATION_MARKER_NAME} needs deleting, "
+            f"because none was written."
         )
     return (
         f"{opening} — migration does not recurse: {listed}. They stay where they "
         f"are on disk. {remedy}"
     )
 
+
+# Bounded so a pathological layer dir cannot spin forever; far above any real
+# number of same-named imports.
+MAX_TARGET_NAME_ATTEMPTS = 1000
 
 # Map singular layer name (in Classification.layer) to on-disk dir name.
 LAYER_DIR_MAP = {
@@ -179,21 +197,48 @@ def _serialize_memory_file(classification: Classification) -> str:
     return f"---\n{fm}\n---\n\n{classification.body.strip()}\n"
 
 
-def _resolve_target_path(
+def _write_imported_file(
     memory_home: Path,
     classification: Classification,
+    body: str,
 ) -> Path:
-    """Return the unique target path.  Appends -N suffix if a file already exists."""
+    """Create the target file, never overwriting an existing one. Returns its path.
+
+    WHY THIS IS NOT ``_resolve_target_path`` + ``write_text`` ANY MORE
+    (Codex named the overwrite; product asked for it fixed or shown harmless).
+    The old pair picked a name with ``while candidate.exists()`` and then called
+    ``Path.write_text``, which has two ways to destroy a file:
+
+    1. **The gap between the check and the write.** Two migrations running at
+       once pick the same free name, and the second overwrites the first's
+       imported memory. Not hypothetical for ``migrate auto``, which install.sh
+       can run while a session's SessionEnd hook is also working.
+    2. **A dangling symlink reads as absent.** ``exists()`` follows the link and
+       returns False, so the name looked free — and ``write_text`` then follows
+       the link and writes THROUGH it, creating or truncating whatever it points
+       at, anywhere on disk.
+
+    ``O_CREAT|O_EXCL`` closes both: it is a single atomic create that fails if
+    the name is taken, and its check is on the name itself, so a dangling
+    symlink is refused rather than followed.
+    """
     layer_dir = memory_home / LAYER_DIR_MAP[classification.layer]
     layer_dir.mkdir(parents=True, exist_ok=True)
     base = classification.target_filename
     stem = base[:-3] if base.endswith(".md") else base
-    candidate = layer_dir / f"{stem}.md"
-    counter = 2
-    while candidate.exists():
-        candidate = layer_dir / f"{stem}-{counter}.md"
-        counter += 1
-    return candidate
+
+    for counter in range(1, MAX_TARGET_NAME_ATTEMPTS):
+        candidate = layer_dir / (f"{stem}.md" if counter == 1 else f"{stem}-{counter}.md")
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        with os.fdopen(descriptor, "w") as target:
+            target.write(body)
+        return candidate
+    raise OSError(
+        f"no free name for {stem}.md in {layer_dir} after {MAX_TARGET_NAME_ATTEMPTS} attempts"
+    )
 
 
 def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separately
@@ -242,17 +287,21 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
         # retired in silence with `migrated 0` and exit 0 — the summary line
         # looked like there had been nothing to do. These are the likeliest
         # shapes to be overlooked, so the warning has to be raised here too.
+        # Collected before the retirement, worded after it: the warning's text
+        # depends on whether retirement actually succeeded, and announcing "now
+        # retired" beside the error saying otherwise is what Codex caught.
         nested = _nested_md_files(source_dir)
-        if nested:
-            report.warnings.append(_nested_file_warning(source_dir, nested, dry_run=dry_run))
 
         legacy_pointer = source_dir / "MEMORY.md"
         if not archive_legacy_pointer:
             if legacy_pointer.exists():
                 report.legacy_pointer_left_in_place = legacy_pointer
+        retired = False
         if dry_run:
             if legacy_pointer.exists() and archive_legacy_pointer:
-                report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
+                report.legacy_pointer_archived = predict_archive_name(
+                    legacy_pointer, source_dir / ARCHIVE_DIR_NAME
+                )
         else:
             outcome = write_retirement_pointer(
                 source_dir,
@@ -260,8 +309,14 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
                 archive_legacy_pointer=archive_legacy_pointer,
             )
             report.legacy_pointer_archived = outcome.legacy_pointer_archived
+            retired = outcome.retired
             if outcome.error:
                 report.errors.append(outcome.error)
+
+        if nested:
+            report.warnings.append(
+                _nested_file_warning(source_dir, nested, dry_run=dry_run, retired=retired)
+            )
         return report
 
     # INDEX.md now lives in the local-only cache (outside $REKOL_HOME); fall
@@ -319,9 +374,8 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             seen_hashes.add(body_hash)
             continue
 
-        target = _resolve_target_path(memory_home, c)
         try:
-            target.write_text(_serialize_memory_file(c))
+            _write_imported_file(memory_home, c, _serialize_memory_file(c))
             archive_file(lf)
             report.moved.append(lf.source_path)
             seen_hashes.add(body_hash)
@@ -392,15 +446,16 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # discovery defines what counts. Retire anyway (refusing would make
     # `migrate auto` retry forever with no way to progress) but name them, so the
     # user can act instead of silently losing track.
-    if retirable:
-        nested = _nested_md_files(source_dir)
-        if nested:
-            report.warnings.append(_nested_file_warning(source_dir, nested, dry_run=dry_run))
-
     legacy_pointer = source_dir / "MEMORY.md"
     if retirable and not archive_legacy_pointer and legacy_pointer.exists():
         report.legacy_pointer_left_in_place = legacy_pointer
 
+    # The retirement happens BEFORE the nested-file warning is worded, because
+    # the warning's whole content depends on whether it succeeded (Codex,
+    # 2026-11-06). Emitted earlier, it announced "this directory is now retired"
+    # in the same report as the error saying it was NOT retired — two
+    # contradictory statements, and the user has no way to tell which is true.
+    retired = False
     if not dry_run and retirable:
         outcome = write_retirement_pointer(
             source_dir,
@@ -408,6 +463,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             archive_legacy_pointer=archive_legacy_pointer,
         )
         report.legacy_pointer_archived = outcome.legacy_pointer_archived
+        retired = outcome.retired
         if outcome.error:
             # G4: reported as an error, which both blocks the exit-0 claim and
             # — because the marker was never written — leaves the directory
@@ -420,6 +476,15 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
         # MEMORY.md, so the one destructive step in the run was the one step a
         # user could not preview.
         if legacy_pointer.exists() and archive_legacy_pointer:
-            report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
+            report.legacy_pointer_archived = predict_archive_name(
+                legacy_pointer, source_dir / ARCHIVE_DIR_NAME
+            )
+
+    if retirable:
+        nested = _nested_md_files(source_dir)
+        if nested:
+            report.warnings.append(
+                _nested_file_warning(source_dir, nested, dry_run=dry_run, retired=retired)
+            )
 
     return report

@@ -6,6 +6,52 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Archiving could overwrite the only byte-complete copy of a file.** `_free_archive_name` tested
+  `exists()` and then called `shutil.move`, which replaces its destination — so a file created at
+  that name in between was destroyed. Codex reproduced the loss of an earlier archived original
+  with a deterministic probe; sequential suffix tests cannot see it. Two more holes in the same
+  code: `exists()` is False for a **dangling symlink**, so such a name read as free, and across
+  filesystems `shutil.move` becomes copy-then-unlink, where a failed copy leaves partial debris
+  that the next run's `exists()` would treat as an occupied, complete archive copy.
+  Publication is now staged: the content is copied into a unique `.partial-` temporary, fsynced,
+  and the final name claimed with `os.link`, which is atomic and **fails** if the name is taken —
+  a dangling symlink included, since the check is on the name and not on what it points at. A real
+  archive name therefore only ever appears as a complete file, and the source is unlinked only
+  afterwards. A short copy is refused rather than published.
+- **A relative `MEMORY.md` symlink broke when archived**, making "kept byte-complete in the
+  archive" untrue: moving the link re-resolved its target against the archive directory. Symlink
+  sources are now followed and archived as real content, which makes the claim literally true,
+  while the target file is left exactly where it is — only the link is removed, which is all that
+  is needed to stop autoMemory injecting it. A **dangling** source symlink has no content to
+  preserve, so it is refused and nothing is touched.
+- **A partially written `.MIGRATED` marker was accepted as a completed migration.**
+  `has_migration_marker()` only asks whether the file exists, so a short write produced a
+  directory that reported itself migrated while the same run reported "NOT retired, so re-running
+  retries it" — and the next run believes the file, not the report. The marker is now staged and
+  renamed into place, so it either does not exist or is complete.
+- **Importing a file could overwrite an existing memory, or write through a dangling symlink.**
+  The target write picked a name with `while candidate.exists()` and then called `write_text`:
+  two migrations at once could pick the same free name and the second overwrite the first's
+  import, and a dangling symlink at the candidate name read as absent, so `write_text` followed it
+  and created or truncated whatever it pointed at, anywhere on disk. Both are closed by a single
+  `O_CREAT|O_EXCL` create.
+- **The dry-run preview named a path `--commit` would not use.** It hardcoded
+  `old-memory-archive/MEMORY.md` while a commit would pick `MEMORY-1.md` when the first name was
+  taken. The preview now predicts the same name the publication would choose.
+- **The nested-file warning could announce "this directory is now retired" in the same report as
+  the error saying it was not.** It was worded before the retirement was attempted. It is now
+  worded after, and on failure says the directory was *not* retired, a later run will retry it, and
+  no marker needs deleting because none was written.
+
+### Changed
+- The marker is written **after** the legacy pointer is archived, not before, so a failed archive
+  leaves nothing claiming the directory is done. The previous order's stated rationale was false:
+  it claimed the reverse would let a re-run re-migrate already-archived content, but
+  `discover_files_in_dir` iterates files only and never recurses, so the archive cannot be
+  re-discovered. The order is now asserted by observing the calls — the earlier test compared
+  mtimes, which a move preserves, so marker-first passed it too.
+
+### Fixed
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
