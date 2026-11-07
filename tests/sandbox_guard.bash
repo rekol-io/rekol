@@ -75,15 +75,44 @@ REKOL_BATS_PATH_OVERRIDES=(
 # /private is accepted as an alternative prefix because macOS reaches /tmp and
 # /var/folders through a symlink, so the same directory arrives in either form
 # depending on whether a tool resolved it.
+#
+# CONTAINMENT, NOT SPELLING (Codex, 2026-11-06). The first version compared
+# strings, so `$TESTROOT/../../outside` passed the check: it carries the right
+# prefix and resolves somewhere else entirely. Both sides are now canonicalized
+# first, and the comparison requires a component boundary, so a sibling named
+# `${TESTROOT}-evil` cannot pass as inside `${TESTROOT}` either.
+rekol_bats_canonical_path() {
+    # Resolves `.`, `..` and symlinks. The path need NOT exist yet: the deepest
+    # existing ancestor is resolved with `pwd -P` and the remainder appended,
+    # which is what a destructive call against a not-yet-created path needs.
+    local path="$1" existing trailing="" resolved parent
+    [[ -n "$path" ]] || return 1
+    [[ "$path" == /* ]] || path="${PWD}/${path}"
+    existing="$path"
+    while [[ ! -e "$existing" ]]; do
+        trailing="$(basename -- "$existing")${trailing:+/${trailing}}"
+        parent="$(dirname -- "$existing")"
+        [[ "$parent" != "$existing" ]] || return 1
+        existing="$parent"
+    done
+    resolved="$(cd -- "$existing" 2>/dev/null && pwd -P)" || return 1
+    printf '%s' "${resolved}${trailing:+/${trailing}}"
+}
+
 rekol_bats_path_is_sandboxed() {
-    local candidate="$1" root
+    local candidate="$1" root canonical_candidate canonical_root
     [[ -n "$candidate" ]] || return 1
+    canonical_candidate="$(rekol_bats_canonical_path "$candidate")" || return 1
     for root in "${TESTROOT:-}" "${BATS_TEST_TMPDIR:-}" \
                 "${BATS_FILE_TMPDIR:-}" "${BATS_RUN_TMPDIR:-}"; do
         [[ -n "$root" ]] || continue
-        case "$candidate" in
-            "$root"|"$root"/*|/private"$root"|/private"$root"/*) return 0 ;;
-        esac
+        canonical_root="$(rekol_bats_canonical_path "$root")" || continue
+        # Equal, or genuinely inside: the trailing slash is the component
+        # boundary that stops `${root}-evil` matching.
+        if [[ "$canonical_candidate" == "$canonical_root" ]] ||
+           [[ "$canonical_candidate" == "$canonical_root"/* ]]; then
+            return 0
+        fi
     done
     return 1
 }

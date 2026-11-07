@@ -137,6 +137,26 @@ run_uninstall_with_archive() {
         "${COMPONENT_DIR}/uninstall.sh" "$@"
 }
 
+# Custom-paths variant: points the uninstaller at paths that do not exist, to
+# exercise the manifest-less path. Still a wrapper, because the rule is that
+# NOTHING invokes uninstall.sh outside a run_uninstall* function.
+run_uninstall_with_custom_paths() {
+    assert_destructive_targets_sandboxed || return 1
+    run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+        "${COMPONENT_DIR}/uninstall.sh" "$@"
+}
+
+# Hermetic-PATH dry-run variant: $1 is the dir to put first on PATH.
+run_uninstall_dry_run_with_path() {
+    assert_destructive_targets_sandboxed || return 1
+    local path_dir="$1"; shift
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
+        PATH="$(_hermetic_path "$path_dir")" \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" "$@"
+}
+
 # Reads the local-only INDEX_DIR install recorded in the manifest. The index now
 # lives in a cache OUTSIDE $REKOL_HOME (under the sandbox HOME's .cache), so the
 # tests resolve it from the same path install wrote rather than hard-coding the
@@ -702,9 +722,8 @@ JSON
   REKOLH="$TESTROOT/rekolhome-scope"
   mkdir -p "$REKOLH"
 
-  assert_destructive_targets_sandboxed
-  run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
-    "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
+  run_uninstall_with_custom_paths --yes \
+    --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
   [ "$status" -eq 0 ]
 
   # No rekol hook survives, in ANY event.
@@ -727,9 +746,8 @@ JSON
   [ "$status" -eq 0 ]
 
   # And the claim is now confirmable: a SECOND uninstall must find nothing to strip.
-  assert_destructive_targets_sandboxed
-  run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
-    "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
+  run_uninstall_with_custom_paths --yes \
+    --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to strip"* ]] || { echo "second run did not report a clean no-op"; echo "$output" | grep -i strip; false; }
 }
@@ -775,7 +793,7 @@ from rekol.cli import main
     chmod 755 "$orphan_dir/rekol"
     assert_destructive_targets_sandboxed
 
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$orphan_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run_uninstall_dry_run_with_path "$orphan_dir"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"stale 'rekol' on PATH"* ]]
@@ -795,7 +813,7 @@ exec rekol-real "$@"
     chmod 755 "$shim_dir/rekol"
     assert_destructive_targets_sandboxed
 
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$shim_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run_uninstall_dry_run_with_path "$shim_dir"
 
     [ "$status" -eq 0 ]
     [[ "$output" != *"stale 'rekol' on PATH"* ]]
@@ -806,12 +824,7 @@ exec rekol-real "$@"
     empty_dir="$TESTROOT/no-rekol/bin"
     mkdir -p "$empty_dir"
 
-    assert_destructive_targets_sandboxed
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
-        PATH="$(_hermetic_path "$empty_dir")" \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run_uninstall_dry_run_with_path "$empty_dir"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"no other 'rekol' found on PATH"* ]]
@@ -833,12 +846,7 @@ exec rekol-real "$@"
     printf '#!%s\nfrom rekol.cli import main\n' "$fake_interp" > "$undecided_dir/rekol"
     chmod 755 "$undecided_dir/rekol"
 
-    assert_destructive_targets_sandboxed
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
-        PATH="$(_hermetic_path "$undecided_dir")" \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run_uninstall_dry_run_with_path "$undecided_dir"
 
     [ "$status" -eq 0 ]
     [[ "$output" != *"no other 'rekol' found on PATH"* ]]
@@ -977,4 +985,60 @@ _guard_in_subshell() {
     echo "$output"
     [ "$status" -eq 0 ] \
         || { echo "an uninstall.sh invocation is not preceded by the guard"; false; }
+}
+
+@test "sandbox check tests CONTAINMENT, not spelling" {
+    # Codex: the first version compared strings, so a path carrying the right
+    # prefix but resolving elsewhere passed. `..` is the whole attack.
+    _guard_in_subshell 'assert_sandboxed "$TESTROOT/../../outside" "tools home"'
+    [ "$status" -ne 0 ] || { echo "a ../ escape was accepted as sandboxed"; false; }
+    [[ "$output" == *"OUTSIDE the sandbox"* ]]
+}
+
+@test "sandbox check requires a path COMPONENT boundary" {
+    # `${TESTROOT}-evil` shares the prefix but is a sibling, not a child.
+    _guard_in_subshell 'assert_sandboxed "${TESTROOT}-evil/tools" "tools home"'
+    [ "$status" -ne 0 ] || { echo "a prefix-sharing sibling was accepted"; false; }
+}
+
+@test "sandbox check still accepts a path that does not exist yet" {
+    # Destructive calls routinely name paths install has not created, so
+    # canonicalising must not require existence.
+    _guard_in_subshell 'assert_sandboxed "$TESTROOT/not/created/yet" "index dir"'
+    [ "$status" -eq 0 ] || { echo "a future sandbox path was refused: $output"; false; }
+}
+
+@test "sandbox check resolves a symlink into the sandbox" {
+    _guard_in_subshell '
+        mkdir -p "$TESTROOT/real"
+        ln -s "$TESTROOT/real" "$TESTROOT/link"
+        assert_sandboxed "$TESTROOT/link/inside" "tools home"
+    '
+    [ "$status" -eq 0 ] || { echo "a symlink inside the sandbox was refused: $output"; false; }
+}
+
+@test "sandbox check refuses a symlink pointing OUT of the sandbox" {
+    # The case string comparison could never have caught: the name is inside,
+    # the target is not.
+    _guard_in_subshell '
+        outside="$(mktemp -d)"
+        ln -s "$outside" "$TESTROOT/escape"
+        assert_sandboxed "$TESTROOT/escape" "tools home"
+        rc=$?
+        rmdir "$outside" 2>/dev/null || true
+        exit $rc
+    '
+    [ "$status" -ne 0 ] || { echo "a symlink out of the sandbox was accepted"; false; }
+}
+
+@test "test_install.bats CALLS the guard, not merely loads it" {
+    # Codex: that file loaded the guard and never invoked it -- including in
+    # setup_file, which performs a REAL install and `rekol index rebuild`, the
+    # exact path that rebuilt a developer's real index on 2026-08-18. It is the
+    # same defect this PR describes in the code it replaced: a guard that only
+    # existed.
+    run grep -c '^\s*rekol_bats_require_sandboxed_env' \
+        "${BATS_TEST_DIRNAME}/test_install.bats"
+    [ "$status" -eq 0 ] || { echo "test_install.bats never calls the guard"; false; }
+    [ "$output" -ge 2 ] || { echo "expected it in setup_file AND setup, got $output"; false; }
 }

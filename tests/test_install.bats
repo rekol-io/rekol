@@ -33,6 +33,12 @@ setup_file() {
     # days. The #183 fix added these unsets to setup() only and therefore missed
     # the one function that does the destructive work.
     rekol_bats_clear_path_overrides
+    # And REFUSE if the clearing above ever stops happening. This function runs a
+    # real install and `rekol index rebuild`, which is how a developer's real
+    # index was rebuilt with test vectors on 2026-08-18; loading the guard
+    # without calling it (as this file did until Codex pointed it out) protects
+    # nothing.
+    rekol_bats_require_sandboxed_env || return 1
 
     SHARED_TOOLS="${BATS_FILE_TMPDIR}/shared-tools"
     export SHARED_TOOLS
@@ -84,6 +90,7 @@ setup() {
     # rekol_bats_require_sandboxed_env permits; inherited outside ones are what
     # it refuses (#223).
     rekol_bats_clear_path_overrides
+    rekol_bats_require_sandboxed_env || return 1
     # Export MEMORY_HOME (the fallback) and unset REKOL_HOME so the resolver
     # exercises the fallback path; the missing-home test unsets both.
     export MEMORY_HOME="${TESTROOT}/mem"

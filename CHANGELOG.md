@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The new bats sandbox guard was loaded but never called in `test_install.bats` (#233).** That is
+  the same defect the guard was written to remove — the copy it replaced there was never called
+  either — and it mattered most in `setup_file`, which performs a real install and
+  `rekol index rebuild`: the exact path that rebuilt a developer's real index with test vectors on
+  2026-08-18. The refusal now runs in both `setup_file` and `setup`, with a test asserting the call
+  exists rather than merely that the file loads the guard.
+- **The sandbox check compared spelling, not containment (#233).** `$TESTROOT/../../outside` carries
+  the right prefix and resolves somewhere else entirely, so it passed. Both sides are now
+  canonicalized — resolving `..`, `.` and symlinks, and handling paths that do not exist yet by
+  resolving their deepest existing ancestor — and the comparison requires a path component
+  boundary, so a sibling named `${TESTROOT}-evil` cannot pass as inside the sandbox either. A
+  symlink whose name is inside the sandbox but whose target is outside is now refused, which the
+  string comparison could never have caught.
+- **The invocation checker accepted a comment as a guard (#233).** It matched the guard's name as a
+  substring within the eight lines above an invocation, so a comment mentioning it satisfied the
+  check — text proximity is not a rule. It is now structural: `uninstall.sh` may be invoked only
+  inside a `run_uninstall*` wrapper, every such wrapper must call the guard as an executable
+  statement, and no wrapper may invoke before that call. The five remaining hand-rolled invocations
+  were converted into wrappers, so there is no longer any path to the uninstaller that a new test
+  could take unguarded. Proven against three controls, each of which must fail and does:
+  a comment-as-guard, a direct invocation in a `@test` body, and a guard placed after the
+  invocation.
+
+### Fixed
 - **The bats suites' safety rested on one `unset` line continuing to exist.** QA measured that
   deleting it makes the suite delete the developer's real tools home — venv and hooks included —
   because `uninstall.sh` removes what it is pointed at and an inherited `REKOL_TOOLS_HOME` points
