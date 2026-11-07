@@ -6,6 +6,35 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The upgrade left the UNQUOTED fallback form behind, on three handlers in a real file (#203/#221,
+  QA).** `"$(command -v rekol || echo /abs/path/rekol)" _hook …` was not upgraded, while the same
+  command with `echo '<path>'` quoted was. The quotes were the only difference, and the hooks left
+  behind kept resolving PATH first — an orphaned `rekol` earlier on PATH running instead of the
+  install's own, which is the entire bug #203 exists to fix.
+  **Provenance, measured from git history rather than assumed:** no release tag ever wrote this
+  form. It existed in `21e6e8a` and `ec2f9db` (both 2026-08-12, contained in no tag); `faa834b`
+  added the quotes the same day, and `b0db220` is what v0.5.2, v0.5.4 and v0.5.13 contain. Every
+  tag from v0.5.2 on wrote `echo '${BIN_DIR}/rekol'`; v0.4.0 and earlier wrote a **bare** `rekol`
+  with no fallback at all, which is #159. So the unquoted form comes from installing an untagged
+  `main` — which is what anyone installing from a checkout gets, and is how it reached a real
+  `settings.json`.
+  The form is recognised now as a **literal absolute path only**, by #239's allowlist rule: unquoted
+  means the shell word-splits and expands it, so `echo $(…)/rekol`, a path containing a space, and
+  anything carrying an operator are **not** ours and are left byte-identical. The quoted form can
+  afford to be permissive because the quotes protect it, which is why the two forms get different
+  guards rather than one shared one.
+- **`doctor` now reports a hook that resolves PATH before the install's own binary (#221).** A form
+  the upgrade cannot reach must not also be silent: the upgrade only rewrites what it recognises,
+  and QA found a form it did not. The new check is keyed on the **absence** of the current
+  recorded-path-first rendering rather than on a list of legacy ones — the one direction that stays
+  correct when a form nobody anticipated turns up, which is exactly what happened here.
+  It is a separate finding from `hook executability`, which asks whether the recorded fallback is
+  *runnable* and says explicitly that it does not check which executable a hook resolves. These two
+  can disagree, and the disagreement is #203.
+  A negative control caught a real defect in the first attempt: keying on the handler name alone
+  reported `my-own-gate --strict _hook session-tasks` as a broken rekol hook, because it contains
+  `_hook session-tasks`. A command is reported only when a rekol **invocation** is recognisable in
+  it — the `command -v` substitution, or a bare `rekol` in command position.
 - **A recorded path containing `)` made `doctor` call a working hook broken (#203, Codex).** The
   parser bridged the `if [ -x … ]` preflight and `command -v rekol` with `[^)]*?`, which cannot
   cross a `)` — so for a path like `/Users/a)b/bin/rekol` the match failed, the parser returned

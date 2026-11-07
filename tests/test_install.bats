@@ -2153,3 +2153,138 @@ JSON
   [[ "$after" == *"|| true"* ]] || {
     echo "FAIL: the upgraded loader is not soft-failing"; false; }
 }
+
+@test "the UNQUOTED fallback form is upgraded, on every handler (#221)" {
+  # QA, 2026-11-07: this form was left behind while the same hook with
+  # `echo '<path>'` quoted was upgraded. The quotes were the only difference,
+  # and the hooks left behind kept resolving PATH first — the bug #203 exists
+  # to fix — on `session-tasks`, `update-check` and `capture-nudge`.
+  #
+  # MEASURED PROVENANCE: no release tag wrote this form. It was in 21e6e8a and
+  # ec2f9db (2026-08-12, untagged); faa834b added the quotes the same day and
+  # b0db220 is what v0.5.2/v0.5.4/v0.5.13 contain. So it comes from installing
+  # a checkout of main, which is how it reached a real file.
+  #
+  # GENERIC PATHS ONLY in this fixture (product's instruction): nothing here is
+  # from anyone's real settings.json.
+  SBHOME="$TESTROOT/sandhome-unquoted"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-unquoted"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  old="/opt/generic/bin/rekol"
+  # Three handlers in the unquoted form, one quoted as the control that already
+  # worked, and one command of the user's that must not be touched.
+  jq -n --arg o "$old" '{hooks:{
+      SessionStart:[{hooks:[
+        {type:"command",command:("\"$(command -v rekol || echo " + $o + ")\" _hook session-tasks 2>/dev/null || true")},
+        {type:"command",command:("\"$(command -v rekol || echo " + $o + ")\" _hook update-check 2>/dev/null || true")}]}],
+      UserPromptSubmit:[{hooks:[
+        {type:"command",command:("\"$(command -v rekol || echo " + $o + ")\" _hook capture-nudge 2>/dev/null || true")},
+        {type:"command",command:("\"$(command -v rekol || echo '"'"'" + $o + "'"'"')\" _hook time-context 2>/dev/null || true")},
+        {type:"command",command:"my-own-gate --strict _hook session-tasks"}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # 1. NOT ONE command may still carry the old PATH-first `command -v` head.
+  #    Asserted across the whole file rather than per handler: the defect was
+  #    one form slipping through, so a per-handler check could pass on three of
+  #    four and still be the same bug.
+  left="$(jq -r '[.. | objects | .command? // empty
+          | select(test("command -v rekol \\|\\| echo"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$left" -eq 0 ] || {
+    echo "FAIL: $left hook(s) still resolve PATH first:"
+    jq -r '[.. | objects | .command? // empty
+            | select(test("command -v rekol \\|\\| echo"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+
+  # 2. All four rekol handlers are still present and now recorded-path-first.
+  for h in session-tasks update-check capture-nudge time-context; do
+    n="$(jq -r --arg h "$h" '[.. | objects | .command? // empty
+          | select(test("_hook " + $h)) | select(test("if \\[ -x"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+    [ "$n" -ge 1 ] || {
+      echo "FAIL: $h was not upgraded to the recorded-path-first form"
+      jq -r --arg h "$h" '[.. | objects | .command? // empty
+             | select(test("_hook " + $h))] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # 3. The generic path is gone from every rekol hook — the upgrade replaced the
+  #    invocation rather than merely prepending to it.
+  stale="$(jq -r --arg o "$old" '[.. | objects | .command? // empty
+           | select(test("_hook ")) | select(contains($o))] | length' \
+           "$SBHOME/.claude/settings.json")"
+  [ "$stale" -eq 0 ] || { echo "FAIL: $stale hook(s) still name the old path"; false; }
+
+  # 4. And the user's own command is byte-identical. It mentions `_hook
+  #    session-tasks`, so a handler-keyed rewrite would have eaten it.
+  mine="$(jq -r '[.. | objects | .command? // empty
+          | select(. == "my-own-gate --strict _hook session-tasks")] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$mine" -eq 1 ] || { echo "FAIL: rekol rewrote a hook it does not own"; false; }
+}
+
+@test "an unquoted fallback that is not a literal path is left alone (#221)" {
+  # The allowlist rule from #239, applied here: unquoted means the shell will
+  # expand and word-split it, so anything but literal characters changes what
+  # runs. Those are not ours and must survive byte-identical.
+  SBHOME="$TESTROOT/sandhome-unquoted-notours"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-unquoted-notours"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  a='"$(command -v rekol || echo /opt/generic bin/rekol)" _hook session-tasks'
+  b='"$(command -v rekol || echo ${HOME}/bin/rekol)" _hook update-check'
+  c='"$(command -v rekol || echo /tmp/x;id)" _hook capture-nudge'
+  jq -n --arg a "$a" --arg b "$b" --arg c "$c" \
+    '{hooks:{SessionStart:[{hooks:[{type:"command",command:$a},
+                                   {type:"command",command:$b},
+                                   {type:"command",command:$c}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # ASSERTED ON THE INVOCATION, not on the whole string, and deliberately so.
+  # On this branch a separate step still softens by pattern (`test("rekol|REKOL")`
+  # at install.sh:1243), so it appends ` 2>/dev/null || true` to these commands.
+  # That is #235, it is fixed on #239's branch by whole-command equality, and it
+  # is not #221's to fix here — asserting byte-identity would make this test fail
+  # for someone else's defect and pass only once #239 merges. #221's claim is
+  # narrower and is what is checked: the MIGRATION does not rewrite an
+  # invocation whose unquoted path is not a literal path.
+  for want in "$a" "$b" "$c"; do
+    head="${want%%\" _hook\"*}"
+    got="$(jq -r --arg h "$head" '[.. | objects | .command? // empty
+            | select(startswith($h))] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 1 ] || {
+      echo "FAIL: the migration rewrote an invocation that is not ours:"
+      echo "  expected this invocation intact: $head"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # NOT asserting that no recorded-path-first command exists for these handlers:
+  # the installer legitimately wires its OWN session-tasks, update-check and
+  # capture-nudge hooks in that form. It cannot upgrade a command it does not
+  # own, so the correct outcome is the user's command surviving intact AND
+  # rekol's own being added alongside — which is what the loop above checks and
+  # what my first attempt at this assertion got wrong by counting both.
+}

@@ -1029,6 +1029,21 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
   REKOL_SQ="'"
   REKOL_OLD_HEAD="\"\$(command -v rekol || echo ${REKOL_SQ}"
   REKOL_OLD_FOOT="${REKOL_SQ})\" "
+  # THE UNQUOTED FALLBACK, which this step used to leave behind (QA, 2026-11-07).
+  # Same rendering with no quotes around the path:
+  #   "$(command -v rekol || echo /abs/path/rekol)" _hook session-tasks …
+  # The quotes were the only difference, and the quoted one was upgraded while
+  # this one kept resolving PATH first — the bug #203 exists to fix — on three
+  # handlers in a real file.
+  #
+  # MEASURED PROVENANCE (git history, 2026-11-07): no RELEASE TAG ever wrote
+  # this form. It existed in 21e6e8a and ec2f9db (both 2026-08-12, `git tag
+  # --contains` reports none), and faa834b later the same day added the quotes;
+  # b0db220 is what v0.5.2/v0.5.4/v0.5.13 contain. So this is a form written by
+  # an installer built from an untagged main — which is what anyone installing
+  # from a checkout gets, and is how it reached a real settings.json.
+  REKOL_UQ_HEAD="\"\$(command -v rekol || echo "
+  REKOL_UQ_FOOT=")\" "
 
   # `|| true` matters: under `set -e` a failing command substitution ABORTS the
   # install. A migration that cannot run must be skipped, never fatal — repairing
@@ -1043,6 +1058,8 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
        --arg sq "${REKOL_SQ}" \
        --arg oldhead "${REKOL_OLD_HEAD}" \
        --arg oldfoot "${REKOL_OLD_FOOT}" \
+       --arg uqhead "${REKOL_UQ_HEAD}" \
+       --arg uqfoot "${REKOL_UQ_FOOT}" \
        --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
       # Every WHOLE-STRING rendering rekol has ever written for each handler.
       #
@@ -1067,8 +1084,29 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
             bare: ($pre + "rekol " + $e.argtail + $tail),
             # #159…#203: exact either side of the recorded path.
             head: ($pre + $oldhead),
-            foot: ($oldfoot + $e.argtail + $tail)
+            foot: ($oldfoot + $e.argtail + $tail),
+            # The same, UNQUOTED (QA, 2026-11-07). Note the quoted head is this
+            # head plus an apostrophe, so a quoted command also startswith this
+            # one -- what keeps them apart is that the path extracted under this
+            # form would then still carry its apostrophes, and the literal-path
+            # allowlist below refuses those. The guard is what disambiguates,
+            # not the order of the alternatives.
+            uqhead: ($pre + $uqhead),
+            uqfoot: ($uqfoot + $e.argtail + $tail)
           };
+
+      # IS THIS A PATH WE WROTE, UNQUOTED? A positive allowlist of the one form
+      # the renderer produces, by the same rule as Step 6.94 (product, #239):
+      # an absolute path of LITERAL components. The renderer expands ${BIN_DIR}
+      # in bash before writing, so the text on disk is always absolute and plain.
+      #
+      # Unquoted means the shell will word-split and expand it, so anything but
+      # literal characters changes what runs: `echo $(curl x)/rekol` or
+      # `echo /a b/rekol` are not ours and must be left exactly alone. The quoted
+      # form can afford to be permissive -- the quotes protect it -- and that is
+      # why these two forms get different guards rather than one shared one.
+      def is_our_literal_path($p):
+        $p | test("^(/[A-Za-z0-9._-]+)+$");
 
       # Does this command equal one of those renderings? The recorded path is the
       # only part allowed to vary, and it is read by SPLITTING on the literal text
@@ -1086,6 +1124,7 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
             # input is the COMMAND, so `.head` there indexes a string and jq dies
             # with "Cannot index string with string".
             | .head as $h | .foot as $f | .bare as $bare | .new as $new
+            | .uqhead as $uh | .uqfoot as $uf
             | select(
                 ($c == $bare)
                 or (($c | startswith($h))
@@ -1093,6 +1132,11 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
                     and (($c | length) > (($h | length) + ($f | length)))
                     and (($c[($h | length):(($c | length) - ($f | length))]) as $path
                          | ($path | length) > 0 and ($path | contains($sq) | not)))
+                or (($c | startswith($uh))
+                    and ($c | endswith($uf))
+                    and (($c | length) > (($uh | length) + ($uf | length)))
+                    and (($c[($uh | length):(($c | length) - ($uf | length))]) as $path
+                         | is_our_literal_path($path)))
               )
             | $new
           ) // $c);
