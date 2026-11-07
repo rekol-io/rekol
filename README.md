@@ -75,6 +75,9 @@ sensitive projects with `exclude_paths` / `.rekolignore`.
 - `--tools-home PATH` — override the venv + tools home (default `~/.local/share/rekol`).
 - `--bin-dir PATH` — override where the `rekol` shim lives (default `~/bin`).
 - `--migrate` — opt in to importing legacy `~/.claude/projects/*/memory/` content.
+  Nothing is deleted: imported files move to `old-memory-archive/`, and a `MEMORY.md`
+  found there is moved to the same archive rather than imported (it is an index, not a
+  memory file) — the move is reported even with `--quiet`.
 - `--no-archive` — disable the durable transcript archive (seeds `archive_enabled: false`).
 - `--archive-dir PATH` — set the durable archive location (default `~/.local/share/rekol/archive`).
 - `--help` — print usage and exit.

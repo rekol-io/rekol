@@ -14,7 +14,11 @@ import frontmatter
 import yaml
 
 from rekol.config import resolve_index_dir
-from rekol.migrate.archive import archive_file, write_retirement_pointer
+from rekol.migrate.archive import (
+    ARCHIVE_DIR_NAME,
+    archive_file,
+    write_retirement_pointer,
+)
 from rekol.migrate.classify import Classification, classify_file
 from rekol.migrate.discover import (
     discover_files_in_dir,
@@ -43,6 +47,12 @@ class MigrationReport:
     # is what let a total failure print as a successful migration.
     by_defaulted: int = 0
     archived: int = 0
+    # Where a legacy `MEMORY.md` was moved to, or WOULD be moved in dry-run.
+    # It needs its own field because `discover_files_in_dir` skips that name, so
+    # it is never one of `files` and never counted in `archived` — which is
+    # exactly how its deletion stayed invisible in both the dry-run preview and
+    # the final output (QA, 2026-11-06).
+    legacy_pointer_archived: Path | None = None
     skipped_retired: int = 0
     skipped_missing: int = 0
     skipped_duplicate: int = 0  # body-hash matched an already-migrated file
@@ -140,9 +150,17 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
 
     files = discover_files_in_dir(source_dir)
     if not files:
-        # Still write the retirement pointer so re-runs skip cleanly.
-        if not dry_run:
-            write_retirement_pointer(source_dir, memory_home=memory_home)
+        # Still write the retirement pointer so re-runs skip cleanly. A directory
+        # holding ONLY `MEMORY.md` lands here — which is how that file used to be
+        # deleted with nothing imported and exit 0.
+        legacy_pointer = source_dir / "MEMORY.md"
+        if dry_run:
+            if legacy_pointer.exists():
+                report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
+        else:
+            report.legacy_pointer_archived = write_retirement_pointer(
+                source_dir, memory_home=memory_home
+            )
         return report
 
     # INDEX.md now lives in the local-only cache (outside $REKOL_HOME); fall
@@ -251,7 +269,39 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     unimported = len(report.errors) > 0
     progressed = report.migrated > 0 or report.skipped_duplicate > 0
     retirable = progressed and not unimported
+    # F7 (QA, 2026-11-06): discovery is deliberately NON-recursive, but retirement
+    # is permanent — so a nested file was left on disk, never imported, and no
+    # later run looks, while the marker claimed "original files are in
+    # old-memory-archive/". That is the abandonment shape #166 set out to end,
+    # surviving because the retirement invariant is "every DISCOVERED file" and
+    # discovery defines what counts. Retire anyway (refusing would make
+    # `migrate auto` retry forever with no way to progress) but name them, so the
+    # user can act instead of silently losing track.
+    if retirable:
+        nested = [
+            path
+            for path in sorted(source_dir.rglob("*.md"))
+            if path.parent != source_dir and ARCHIVE_DIR_NAME not in path.parts
+        ]
+        if nested:
+            listed = ", ".join(str(path.relative_to(source_dir)) for path in nested)
+            report.warnings.append(
+                f"{len(nested)} file(s) in subdirectories were NOT imported and are NOT in "
+                f"the archive — migration does not recurse: {listed}. They stay where they "
+                f"are, but this directory is now retired, so re-running will skip it. Move "
+                f"them up one level and re-run, or import them by hand."
+            )
+
     if not dry_run and retirable:
-        write_retirement_pointer(source_dir, memory_home=memory_home)
+        report.legacy_pointer_archived = write_retirement_pointer(
+            source_dir, memory_home=memory_home
+        )
+    elif dry_run and retirable:
+        # Preview it. Dry-run previously reported "would migrate N" and never
+        # mentioned MEMORY.md at all, so the one destructive step in the run was
+        # the one step a user could not preview.
+        legacy_pointer = source_dir / "MEMORY.md"
+        if legacy_pointer.exists():
+            report.legacy_pointer_archived = source_dir / ARCHIVE_DIR_NAME / legacy_pointer.name
 
     return report
