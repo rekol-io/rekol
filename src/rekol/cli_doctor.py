@@ -206,19 +206,33 @@ def _count_markdown_by_scope(
             return
         on_error(exc)
 
-    # The home itself first, which covers root-level markdown and every layer
-    # that is a real directory. The entry points then pick up exactly the ones
-    # the walk declined to follow.
-    indexable, outside = _count_tree(
-        memory_home, memory_home=memory_home, visited=visited, on_error=on_error
-    )
+    # THE ENTRY POINTS FIRST, THEN THE HOME, and the order is the fix for an
+    # ALIAS (QA, 2026-11-07). With `home/topics -> home/projects/shared`, the
+    # root walk reached `projects/shared/s.md` by its OTHER name, classified it
+    # as outside the layers (which `projects/shared/...` is), and marked the
+    # inode visited — so the `topics` entry-point walk was then pruned and the
+    # file was never counted as indexable. Doctor said OUTSIDE_THE_LAYERS while
+    # the indexer reached it through `topics`, and doctor's advice there was to
+    # move files that are already indexed.
+    #
+    # Walking the entry points first means the indexable NAME claims the inode,
+    # and the root walk skips the alias. That is the right precedence for the
+    # same reason the list exists: the entry points are what the indexer
+    # resolves, so when one inode has two names, the indexer's name wins.
+    indexable = 0
+    outside = 0
     for entry_point in _indexer_entry_points(memory_home, on_error):
         more_indexable, more_outside = _count_tree(
             entry_point, memory_home=memory_home, visited=visited, on_error=_ignore_absent
         )
         indexable += more_indexable
         outside += more_outside
-    return indexable, outside
+    # The home last: root-level markdown, and anything under `projects/` that no
+    # entry point already claimed.
+    more_indexable, more_outside = _count_tree(
+        memory_home, memory_home=memory_home, visited=visited, on_error=on_error
+    )
+    return indexable + more_indexable, outside + more_outside
 
 
 def _count_tree(

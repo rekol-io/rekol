@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **An alias inside the memory home read as outside the layers (#232, QA).** With
+  `home/topics -> home/projects/shared` — one inode, two names — doctor met the file by its
+  `projects/shared/...` name first, classified it correctly as outside the layers under *that* name,
+  and marked the inode visited; the `topics` entry-point walk was then pruned and the file was never
+  counted as indexable. So doctor reported OUTSIDE_THE_LAYERS while the indexer reached it through
+  `topics`, and the advice it gave was to move files that were already indexed.
+  Fixed by ordering: the entry points are walked **before** the root, so when one inode has two
+  names the name the indexer resolves claims it first. Added to the agreement table, and
+  revert-proved — restoring the old order fails that row alone.
 - **`doctor` disagreed with the indexer in three more places, all the same fault (#232, Codex).**
   Each was its own hat on "doctor's idea of what is indexed differs from the indexer's", so they are
   fixed together and checked by one **agreement table** — a set of shapes run through both the

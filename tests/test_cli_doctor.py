@@ -1824,6 +1824,25 @@ def build_linked_layer_in_slug(home: Path) -> None:
     (home / "projects" / "slug" / "always").symlink_to(external)
 
 
+def build_alias_inside_the_home(home: Path) -> None:
+    """A layer that is an ALIAS for another path INSIDE the home (QA, 2026-11-07).
+
+    `home/topics -> home/projects/shared`. One inode, two names: `topics/s.md`,
+    which the indexer reaches, and `projects/shared/s.md`, which it does not.
+
+    Doctor said OUTSIDE_THE_LAYERS/1 — it met the file by its `projects/` name
+    first, classified it correctly as outside the layers under THAT name, and
+    marked the inode visited, so the `topics` entry-point walk was pruned. The
+    advice it then gave was to move files that were already indexed.
+
+    The fix is an ordering one: walk the entry points before the root, so the
+    name the indexer resolves claims the inode first.
+    """
+    (home / "projects" / "shared").mkdir(parents=True)
+    (home / "projects" / "shared" / "s.md").write_text("---\nname: S\n---\n\nshared\n")
+    (home / "topics").symlink_to(home / "projects" / "shared")
+
+
 def build_linked_projects_root(home: Path) -> None:
     """`projects/` itself as a link: the indexer names it, so it follows it."""
     external = home.parent / f"{home.name}-projects"
@@ -1850,6 +1869,7 @@ def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
         "linked project slug": (build_linked_project_slug, _CuratedFiles.SOME),
         "linked layer in a slug": (build_linked_layer_in_slug, _CuratedFiles.SOME),
         "linked projects root": (build_linked_projects_root, _CuratedFiles.SOME),
+        "alias inside the home": (build_alias_inside_the_home, _CuratedFiles.SOME),
         "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
         "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
         "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),
