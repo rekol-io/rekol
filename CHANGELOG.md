@@ -5,6 +5,28 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **The bats suites' safety rested on one `unset` line continuing to exist.** QA measured that
+  deleting it makes the suite delete the developer's real tools home — venv and hooks included —
+  because `uninstall.sh` removes what it is pointed at and an inherited `REKOL_TOOLS_HOME` points
+  it at the live install. The suite still reports pass, so the failure is silent: every rekol hook
+  on the machine fails afterwards, the same reports-healthy-while-dead shape as #203 and #143.
+  Two guards existed and neither stopped it. Traced: `assert_sandboxed` was called at **2 of 20**
+  destructive sites and both calls passed the *index dir* — nothing ever asked it about the tools
+  home. It was not defeated, it was never consulted about the path that got deleted. A second copy
+  in `test_install.bats` was never called at all.
+  Both copies are replaced by `tests/sandbox_guard.bash`, shared so they cannot drift, and the
+  habit is replaced by a property: every destructive invocation now goes through a helper that
+  refuses when an override resolves outside the sandbox, and a test asserts no invocation in the
+  file can skip that check. The refusal sits at the destructive call rather than in `setup()` on
+  purpose — refusing merely because `REKOL_INDEX_DIR` is *set* would refuse on every ordinary
+  machine, since #164 exports it into every session, and a guard that cries wolf gets deleted.
+  The allowlist also no longer accepts a blanket `/tmp/*`, which reached any other suite's sandbox;
+  `mktemp -d` output was already covered by the `TESTROOT` branch, so it bought nothing.
+  Both halves are proven able to fail, not just to pass: with one guard call deleted the
+  invocation check reports the exact line, and with the clearing deleted the suite fails in clean
+  CI rather than only on a machine that happens to have a leaked override.
+
 ### Added
 - **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
   actually recorded (#203).** A console script can be left pointing at an interpreter where the

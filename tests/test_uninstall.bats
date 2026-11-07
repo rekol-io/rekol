@@ -11,6 +11,12 @@
 # inside the sandbox (HOME points at the sandbox), so .zshrc edits land on the
 # sandboxed file. The teardown rm -rf's the whole sandbox.
 
+# Sandbox guard (#223): shared with test_install.bats so the two cannot drift.
+# Provides rekol_bats_clear_path_overrides, rekol_bats_require_sandboxed_env and
+# assert_sandboxed. Read the header there for why the refusal sits at the
+# destructive call rather than in setup().
+load sandbox_guard
+
 setup() {
 
     # HERMETIC ENV (incident 2026-08-17): these tests run `uninstall.sh
@@ -23,8 +29,12 @@ setup() {
     # tests/conftest.py already clears these for pytest; bats never got the same
     # treatment, and hardening one harness is what made the gap in the other
     # dangerous. Clear every override so only the sandboxed XDG paths decide.
-    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
-    unset MEMORY_TOOLS_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+    #
+    # Losing this call no longer costs the machine its install: every destructive
+    # invocation calls rekol_bats_require_sandboxed_env, which refuses when an
+    # override survived (#223). That is why the clearing lives in the shared
+    # guard -- so the refusal and the thing it checks for cannot drift apart.
+    rekol_bats_clear_path_overrides
 
     command -v jq >/dev/null 2>&1 || skip "jq required for uninstall tests"
     TESTROOT="$(mktemp -d)"
@@ -50,18 +60,23 @@ setup() {
     export COMPONENT_DIR TOOLS_HOME BIN_DIR REKOLH SBHOME TESTROOT SHELL
 }
 
-# Refuses to let a destructive test run against a path outside the sandbox.
-# The unset above prevents the KNOWN leak; this catches the next one, whatever
-# shape it takes. Call before anything that deletes.
-assert_sandboxed() {
-    local resolved="$1" label="$2"
-    [[ -n "$resolved" ]] || return 0
-    case "$resolved" in
-        "$TESTROOT"/*|/private"$TESTROOT"/*|/tmp/*|/private/tmp/*) : ;;
-        *) printf 'REFUSING: %s resolved OUTSIDE the sandbox: %s\n' "$label" "$resolved" >&2
-           printf '  TESTROOT=%s\n' "$TESTROOT" >&2
-           return 1 ;;
-    esac
+# assert_sandboxed now lives in tests/sandbox_guard.bash (#223). The copy that
+# stood here allowed a blanket /tmp/* and was only ever called about the index
+# dir, at 2 of this file's 20 destructive sites.
+
+# Everything this suite points the uninstaller at, asserted before it deletes.
+# Call from any destructive invocation. The index dir is read from the manifest
+# because install.sh, not the test, decides where it goes; an absent manifest
+# yields an empty string, which assert_sandboxed treats as "nothing to delete".
+assert_destructive_targets_sandboxed() {
+    rekol_bats_require_sandboxed_env || return 1
+    assert_sandboxed "${TOOLS_HOME:-}" "tools home" || return 1
+    assert_sandboxed "${BIN_DIR:-}" "bin dir" || return 1
+    assert_sandboxed "${REKOLH:-}" "rekol home" || return 1
+    assert_sandboxed "$(manifest_index_dir)" "index dir" || return 1
+    # REKOL_ARCHIVE_DIR is covered by rekol_bats_require_sandboxed_env above --
+    # it refuses an outside value and permits a sandbox-internal one, which is
+    # what the archive tests deliberately set.
 }
 
 teardown() {
@@ -93,6 +108,7 @@ do_full_install() {
 # TOOLS_HOME/BIN_DIR on its own. This is what a user gets running `./uninstall.sh`
 # with no flags after a custom install.
 run_uninstall() {
+    assert_destructive_targets_sandboxed || return 1
     run env -u MEMORY_HOME -u TEST_MODE \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
         "${COMPONENT_DIR}/uninstall.sh" "$@"
@@ -102,10 +118,23 @@ run_uninstall() {
 # (e.g. asserting the flag-precedence path, or running against a machine that
 # never had an install/manifest).
 run_uninstall_with_flags() {
+    assert_destructive_targets_sandboxed || return 1
     run env -u MEMORY_HOME -u TEST_MODE \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
         "${COMPONENT_DIR}/uninstall.sh" \
         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" "$@"
+}
+
+# Archive variant — forwards REKOL_ARCHIVE_DIR so uninstall resolves the fake
+# archive the test built. Exists so the archive tests go through the same guard
+# as everything else: they were seven of this file's hand-rolled `run env …
+# uninstall.sh` invocations, and --purge-archive deletes irreversibly.
+run_uninstall_with_archive() {
+    assert_destructive_targets_sandboxed || return 1
+    run env -u MEMORY_HOME -u TEST_MODE \
+        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
+        REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
+        "${COMPONENT_DIR}/uninstall.sh" "$@"
 }
 
 # Reads the local-only INDEX_DIR install recorded in the manifest. The index now
@@ -556,9 +585,7 @@ manifest_index_dir() {
     export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
     mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
     printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes
+    run_uninstall_with_archive --yes
     [ "$status" -eq 0 ]
     # --yes must NOT purge the archive (mirrors --yes keeping the index).
     [ -f "${REKOL_ARCHIVE_DIR}/projA/s.jsonl" ]
@@ -578,9 +605,7 @@ manifest_index_dir() {
     printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
     [ -d "${TOOLS_HOME}/.venv" ]
 
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes
+    run_uninstall_with_archive --yes
     [ "$status" -eq 0 ]
 
     # The archive survives a default uninstall, as documented.
@@ -597,9 +622,7 @@ manifest_index_dir() {
     mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
     printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
 
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    run_uninstall_with_archive --yes --purge-archive
     [ "$status" -eq 0 ]
     [ ! -d "${REKOL_ARCHIVE_DIR}" ]
 }
@@ -609,9 +632,7 @@ manifest_index_dir() {
     export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
     mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
     printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    run_uninstall_with_archive --yes --purge-archive
     [ "$status" -eq 0 ]
     [ ! -d "${REKOL_ARCHIVE_DIR}" ]
 }
@@ -621,9 +642,7 @@ manifest_index_dir() {
     export REKOL_ARCHIVE_DIR="${TESTROOT}/archive"
     mkdir -p "${REKOL_ARCHIVE_DIR}/projA"
     printf '{"type":"user"}\n' > "${REKOL_ARCHIVE_DIR}/projA/s.jsonl"
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    run_uninstall_with_archive --yes --purge-archive
     [ "$status" -eq 0 ]
     [ ! -d "${REKOL_ARCHIVE_DIR}" ]
     # Markdown under $REKOL_HOME is never touched, even with --purge-archive.
@@ -639,9 +658,7 @@ manifest_index_dir() {
     do_full_install
     # Point the archive AT the markdown home itself (the worst overlap).
     export REKOL_ARCHIVE_DIR="${REKOLH}"
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    run_uninstall_with_archive --yes --purge-archive
     [ "$status" -eq 0 ]
     # The markdown home (and its contents) MUST still exist.
     [ -d "${REKOLH}" ]
@@ -654,9 +671,7 @@ manifest_index_dir() {
 @test "uninstall --purge-archive refuses when archive is inside REKOL_HOME" {
     do_full_install
     export REKOL_ARCHIVE_DIR="${REKOLH}/topics"
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" --yes --purge-archive
+    run_uninstall_with_archive --yes --purge-archive
     [ "$status" -eq 0 ]
     # The markdown subtree under the home must survive (never rm'd).
     [ -f "${REKOLH}/topics/sailing.md" ]
@@ -687,6 +702,7 @@ JSON
   REKOLH="$TESTROOT/rekolhome-scope"
   mkdir -p "$REKOLH"
 
+  assert_destructive_targets_sandboxed
   run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
     "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
   [ "$status" -eq 0 ]
@@ -711,6 +727,7 @@ JSON
   [ "$status" -eq 0 ]
 
   # And the claim is now confirmable: a SECOND uninstall must find nothing to strip.
+  assert_destructive_targets_sandboxed
   run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
     "$COMPONENT_DIR/uninstall.sh" --yes --tools-home "$TESTROOT/nope" --bin-dir "$TESTROOT/nobin"
   [ "$status" -eq 0 ]
@@ -756,6 +773,7 @@ _hermetic_path() {
 from rekol.cli import main
 ' "$TESTROOT"         > "$orphan_dir/rekol"
     chmod 755 "$orphan_dir/rekol"
+    assert_destructive_targets_sandboxed
 
     run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$orphan_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
 
@@ -775,6 +793,7 @@ from rekol.cli import main
 exec rekol-real "$@"
 ' > "$shim_dir/rekol"
     chmod 755 "$shim_dir/rekol"
+    assert_destructive_targets_sandboxed
 
     run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR         PATH="$(_hermetic_path "$shim_dir")"         REKOL_HOME="${REKOLH}" HOME="${SBHOME}"         "${COMPONENT_DIR}/uninstall.sh" --dry-run         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
 
@@ -787,6 +806,7 @@ exec rekol-real "$@"
     empty_dir="$TESTROOT/no-rekol/bin"
     mkdir -p "$empty_dir"
 
+    assert_destructive_targets_sandboxed
     run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
         PATH="$(_hermetic_path "$empty_dir")" \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
@@ -813,6 +833,7 @@ exec rekol-real "$@"
     printf '#!%s\nfrom rekol.cli import main\n' "$fake_interp" > "$undecided_dir/rekol"
     chmod 755 "$undecided_dir/rekol"
 
+    assert_destructive_targets_sandboxed
     run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
         PATH="$(_hermetic_path "$undecided_dir")" \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
@@ -823,4 +844,137 @@ exec rekol-real "$@"
     [[ "$output" != *"no other 'rekol' found on PATH"* ]]
     [[ "$output" == *"not assessed here"* ]]
     [[ "$output" == *"rekol doctor"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# The guard itself (#223)
+# ---------------------------------------------------------------------------
+# These exist because the failure they protect against is SILENT. QA measured
+# that deleting setup()'s one `unset` line makes this suite delete the real
+# tools home — venv and hooks included — and the suite still reports pass. A
+# guard verified only by "the suite is green" would be indistinguishable from no
+# guard at all, which is the same reports-healthy-while-dead shape as #203 and
+# #143.
+#
+# Each runs the guard in a SUBSHELL and never invokes the uninstaller: the point
+# is that the refusal happens before anything destructive is reached.
+
+_guard_in_subshell() {
+    # $1 = shell code to run after sourcing the guard with this run's TESTROOT.
+    run bash -c "
+        TESTROOT=$(printf '%q' "$TESTROOT")
+        source $(printf '%q' "${BATS_TEST_DIRNAME}/sandbox_guard.bash")
+        $1
+    "
+}
+
+@test "guard REFUSES when a cleared override survived, and names the variable" {
+    # Exactly the shape QA measured: setup()'s clearing is gone, so the
+    # inherited value still points at the live install.
+    _guard_in_subshell '
+        export REKOL_TOOLS_HOME="$HOME/.local/share/rekol"
+        rekol_bats_require_sandboxed_env
+    '
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"REFUSING TO RUN"* ]] \
+        || { echo "no refusal printed; got: $output"; false; }
+    # Naming the variable is the whole remedy — a refusal that does not say
+    # WHICH override leaked leaves the reader to guess.
+    [[ "$output" == *"REKOL_TOOLS_HOME"* ]] \
+        || { echo "refusal did not name the variable: $output"; false; }
+}
+
+@test "guard REFUSES a leaked index dir, the variable that caused the 2026-08 loss" {
+    _guard_in_subshell '
+        export REKOL_INDEX_DIR="$HOME/.cache/rekol/index"
+        rekol_bats_require_sandboxed_env
+    '
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"REKOL_INDEX_DIR"* ]]
+}
+
+@test "guard reports EVERY leaked override, not just the first" {
+    # A guard that stops at the first offender teaches you to fix one variable,
+    # re-run, and meet the next one.
+    _guard_in_subshell '
+        export REKOL_TOOLS_HOME="$HOME/.local/share/rekol"
+        export REKOL_INDEX_DIR="$HOME/.cache/rekol/index"
+        rekol_bats_require_sandboxed_env
+    '
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"REKOL_TOOLS_HOME"* ]]
+    [[ "$output" == *"REKOL_INDEX_DIR"* ]]
+}
+
+@test "guard PERMITS a sandbox-internal override (the archive tests rely on it)" {
+    # The negative control. Without this, a guard that refused unconditionally
+    # would pass every test above while making the suite unrunnable.
+    _guard_in_subshell '
+        export REKOL_ARCHIVE_DIR="$TESTROOT/archive"
+        rekol_bats_require_sandboxed_env
+    '
+    [ "$status" -eq 0 ] \
+        || { echo "guard refused a sandbox path: $output"; false; }
+    [[ "$output" != *"REFUSING"* ]]
+}
+
+@test "guard PERMITS a cleared environment, so an ordinary run prints nothing" {
+    # The other half of the control: on a healthy machine the guard must be
+    # silent, or it gets deleted for crying wolf.
+    _guard_in_subshell 'rekol_bats_clear_path_overrides; rekol_bats_require_sandboxed_env'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || { echo "guard was not silent: $output"; false; }
+}
+
+@test "assert_sandboxed no longer accepts a bare /tmp path" {
+    # The old copies allowed a blanket /tmp/* and /private/tmp/*, which reached
+    # any other suite's sandbox or anything parked there. TESTROOT already
+    # covers mktemp's output on both platforms, so the allowance bought nothing.
+    _guard_in_subshell 'assert_sandboxed /tmp/somebody-elses-sandbox "index dir"'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"OUTSIDE the sandbox"* ]]
+}
+
+@test "assert_sandboxed accepts this run's TESTROOT and bats' own tmpdirs" {
+    _guard_in_subshell 'assert_sandboxed "$TESTROOT/tools" "tools home"'
+    [ "$status" -eq 0 ]
+    _guard_in_subshell "BATS_TEST_TMPDIR=$(printf '%q' "${BATS_TEST_TMPDIR}")
+        assert_sandboxed \"\$BATS_TEST_TMPDIR/x\" 'tools home'"
+    [ "$status" -eq 0 ]
+}
+
+@test "assert_sandboxed treats an empty value as nothing-to-delete, not as /" {
+    # manifest_index_dir echoes nothing when there is no manifest; that must not
+    # read as a path outside the sandbox, or every pre-install test fails.
+    _guard_in_subshell 'assert_sandboxed "" "index dir"'
+    [ "$status" -eq 0 ]
+}
+
+@test "setup() still clears the path overrides" {
+    # QA's exact scenario was the deletion of this one call. The refusal at each
+    # destructive site already catches it, but only on a machine that HAS a
+    # leaked override -- in clean CI the suite would stay green while the
+    # protection was gone. So assert the call itself is present: this fails on
+    # the deletion everywhere, including CI.
+    run grep -c '^\s*rekol_bats_clear_path_overrides\s*$' \
+        "${BATS_TEST_DIRNAME}/test_uninstall.bats"
+    [ "$status" -eq 0 ] \
+        || { echo "setup() no longer clears the path overrides (#223)"; false; }
+    [ "$output" -ge 1 ]
+}
+
+@test "every uninstall.sh invocation in this file is guarded" {
+    # The property, asserted against the file itself: adding a 21st destructive
+    # test must not be able to skip the check. Every line that invokes the
+    # uninstaller must have assert_destructive_targets_sandboxed within the few
+    # lines above it -- either because it sits in one of the run_uninstall*
+    # helpers, or because the test calls the assertion directly.
+    #
+    # This is the check that survives a refactor. The individual guard calls can
+    # each be deleted without any other test noticing; this one notices.
+    run python3 "${BATS_TEST_DIRNAME}/assert_invocations_guarded.py" \
+        "${BATS_TEST_DIRNAME}/test_uninstall.bats"
+    echo "$output"
+    [ "$status" -eq 0 ] \
+        || { echo "an uninstall.sh invocation is not preceded by the guard"; false; }
 }

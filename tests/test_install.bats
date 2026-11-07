@@ -7,6 +7,11 @@
 #
 # On a machine without bats, this file documents manual test steps.
 #
+# Sandbox guard (#223): shared with test_uninstall.bats so the two cannot drift.
+# Provides rekol_bats_clear_path_overrides, rekol_bats_require_sandboxed_env and
+# assert_sandboxed.
+load sandbox_guard
+#
 # These tests deliberately export MEMORY_HOME (not REKOL_HOME) so the installer's
 # MEMORY_HOME-fallback path stays exercised — that path guards existing installs.
 
@@ -27,8 +32,7 @@ setup_file() {
     # happened on 2026-08-18: search over curated memory returned nothing for two
     # days. The #183 fix added these unsets to setup() only and therefore missed
     # the one function that does the destructive work.
-    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
-    unset MEMORY_TOOLS_HOME MEMORY_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+    rekol_bats_clear_path_overrides
 
     SHARED_TOOLS="${BATS_FILE_TMPDIR}/shared-tools"
     export SHARED_TOOLS
@@ -74,6 +78,12 @@ setup_file() {
 
 setup() {
     TESTROOT="$(mktemp -d)"
+    # Clear the path overrides BEFORE anything below sets one deliberately --
+    # MEMORY_HOME is exported to a sandbox path two lines down, and clearing
+    # after that would undo it. Sandbox-internal values are what
+    # rekol_bats_require_sandboxed_env permits; inherited outside ones are what
+    # it refuses (#223).
+    rekol_bats_clear_path_overrides
     # Export MEMORY_HOME (the fallback) and unset REKOL_HOME so the resolver
     # exercises the fallback path; the missing-home test unsets both.
     export MEMORY_HOME="${TESTROOT}/mem"
@@ -92,9 +102,8 @@ setup() {
     #
     # tests/conftest.py already clears these for pytest; bats never got the same
     # treatment, and hardening one harness is what made the gap in the other
-    # dangerous. Clear every override so only the sandboxed XDG paths decide.
-    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
-    unset MEMORY_TOOLS_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+    # dangerous. The clearing itself now happens at the top of this function, in
+    # the shared guard, so it cannot sit below a line that depends on it.
     export REKOL_INSTALL_SKIP_DEPS=1
     export BATS_TEST_TIMEOUT=300
     BIN_DIR="${TESTROOT}/bin"
@@ -116,19 +125,8 @@ setup() {
     export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME XDG_DATA_HOME
 }
 
-# Refuses to let a destructive test run against a path outside the sandbox.
-# The unset above prevents the KNOWN leak; this catches the next one, whatever
-# shape it takes. Call before anything that deletes.
-assert_sandboxed() {
-    local resolved="$1" label="$2"
-    [[ -n "$resolved" ]] || return 0
-    case "$resolved" in
-        "$TESTROOT"/*|/private"$TESTROOT"/*|/tmp/*|/private/tmp/*) : ;;
-        *) printf 'REFUSING: %s resolved OUTSIDE the sandbox: %s\n' "$label" "$resolved" >&2
-           printf '  TESTROOT=%s\n' "$TESTROOT" >&2
-           return 1 ;;
-    esac
-}
+# assert_sandboxed lives in tests/sandbox_guard.bash (#223). The copy that stood
+# here was never called by this file at all -- a guard that only existed.
 
 teardown() {
     rm -rf "${TESTROOT}"
