@@ -29,6 +29,7 @@ from pathlib import Path
 
 import click
 
+from rekol.atomic_write import write_text_atomically
 from rekol.cli_common import guard_curated_schema
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.corpus_propose import (
@@ -134,7 +135,7 @@ def _propose_from_notes(cfg, input_file: str | None, quiet: bool) -> None:
     finally:
         store.close()
 
-    proposal.write_text("\n".join(lines))
+    write_text_atomically(proposal, "\n".join(lines))
 
     if not quiet:
         click.echo(f"wrote {proposal} ({new_count} new, {dup_count} already-captured)")
@@ -201,7 +202,9 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
             memory_store.close()
 
     proposal, ts = _pending_proposal_path(cfg)
-    proposal.write_text(render_corpus_proposal(new_candidates, already_captured, timestamp=ts))
+    write_text_atomically(
+        proposal, render_corpus_proposal(new_candidates, already_captured, timestamp=ts)
+    )
     if not quiet:
         click.echo(
             f"wrote {proposal} ({len(new_candidates)} new, "

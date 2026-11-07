@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Editing a memory destroyed it first, then wrote the replacement (#238).** `Path.write_text`
+  and `open(path, "w")` **truncate before writing**, and that is how `confirm`, `flag-suspect`,
+  `invalidate` and `review --confirm` all edited a memory in place. A fault between the truncation
+  and the write — ENOSPC, a kill, a full disk on a synced home — left the file truncated or empty,
+  and the truncated copy was the only one. `capture` had the same shape with a different
+  consequence: an interrupted write left a 0-byte or half-written `.md` under a real name, which
+  the indexer reads as a memory.
+  There is now one way rekol writes such a file (`rekol.atomic_write`): stage a temporary in the
+  same directory, `fsync` it, then `os.replace` it over the target. The name holds the old content
+  or the new content, never a partial write, and a failure says **"the file is UNCHANGED"** in one
+  sentence instead of raising a traceback that leaves the user unable to tell whether their memory
+  survived. The retry after a failure works, and leaves one file rather than two.
+  **Keyed on the rule, not on the call sites.** A property test parses each module that writes
+  into the memory home and fails on any `write_text` / `open(…, "w")`, so a new command that
+  writes a memory the old way fails CI even though nobody thought to add a test for it — which is
+  the point, since each of the sites this fixed was added by someone who did not know the rule
+  existed. The detector has its own control, because a property test that cannot fail is worse
+  than no test. It found two sites beyond the ones in the original report, in `propose`.
+  The staged name is `.partial-<random>.md.tmp`: a leading dot is **not** enough on its own, since
+  `Path.glob("**/*.md")` matches dotfiles and that glob *is* the indexer's walk. The test proves
+  that premise rather than asserting it. The replaced file's mode is preserved too — `mkstemp`
+  creates `0600`, so a naive replace silently tightened permissions on every edit.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
