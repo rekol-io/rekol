@@ -22,6 +22,23 @@ follow [Semantic Versioning](https://semver.org/).
   the directory predated the rekol install by nearly three months, so the ordinary case is that it
   already exists; the gap is narrow, and a first impression is a bad place to be wrong. `doctor`
   being red out of the box has shipped twice, and each time it taught people to ignore the report.
+- **First-run neutrality hid a real failure: transcript storage that vanished.** The new INFO
+  line was returned for any absent default directory, before looking at the index — so a machine
+  that had indexed transcripts and then lost its `~/.claude/projects` was told "does not exist yet
+  … nothing to index until a session has ended" over a populated database (Codex measured this
+  against a real fixture). Those two states look identical on the filesystem; the index is what
+  tells them apart. A populated sessions DB now means **lost storage**, with a PROBLEM, the message
+  count as evidence, and a remedy. A machine that has never indexed anything keeps the neutral
+  line, which is the point of the change.
+- **`is_dir()` proves type, not access, and its False result covered three different states.**
+  Both of these were pre-existing, and both were made invisible by the neutral line, so they are
+  fixed with it rather than filed:
+  a **regular file** at the projects-dir path entered the "does not exist yet" branch, and an
+  **unreadable** directory was not detected at all — `doctor` reported embeddings and FTS as fine
+  while enumeration raised `PermissionError` on every `session-index` run, into discarded output.
+  Enumeration is what `session-index` actually does, so that is now what is tested, with the
+  failure classified rather than read as "empty".
+
 - **`doctor`'s own tests could fail from a stray `rekol` on the developer's PATH.** Since the
   console-script check walks PATH (#203), a leftover build shim made five tests in
   `test_cli_doctor.py` fail — Codex hit this under `uv run` and the suite only passed with a

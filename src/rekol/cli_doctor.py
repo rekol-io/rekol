@@ -475,6 +475,135 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
     ]
 
 
+def _indexed_message_count(cfg: Config, embedder: BaseEmbedder) -> int:
+    """Messages already in the sessions DB, or 0 when there is no readable DB.
+
+    Prior-index evidence: it distinguishes a machine that has never indexed
+    anything from one whose transcript storage has DISAPPEARED. Without it, the
+    two look identical from the filesystem, and the first-run neutrality added
+    for #231 hid the second case (Codex, 2026-11-06).
+    """
+    db_path = cfg.sessions_db_path
+    if not db_path.exists():
+        return 0
+    try:
+        store = SessionStore(db_path=db_path, dim=embedder.dim)
+        store.init_schema()
+        return store.count_messages()
+    except (sqlite3.DatabaseError, OSError):
+        # An unreadable DB is reported by the checks further down; here it just
+        # means "no evidence either way", and must not be mistaken for evidence
+        # that nothing was ever indexed.
+        return 0
+
+
+def _transcript_source_finding(
+    projects_root: Path, cfg: Config, embedder: BaseEmbedder
+) -> Finding | None:
+    """A problem with the transcript SOURCE itself, or None when it looks usable.
+
+    ``is_dir()`` alone proves type, not access, and its False result conflates
+    three very different states — absent, present-but-not-a-directory, and
+    present-but-unreadable. Reporting all of them as "does not exist yet" is how
+    a real failure hid behind first-run neutrality.
+    """
+    if projects_root.exists() and not projects_root.is_dir():
+        return Finding(
+            label="transcript source",
+            status=Status.PROBLEM,
+            detail=(
+                f"claude_projects_dir is not a directory: {projects_root} — "
+                "session-index cannot enumerate transcripts, so the index can "
+                "never build"
+            ),
+            remedy=(
+                f"remove or rename {projects_root}, or point claude_projects_dir "
+                "at Claude Code's projects directory"
+            ),
+        )
+
+    if not projects_root.is_dir():
+        # AT THE DEFAULT LOCATION, absent usually means Claude Code has not
+        # created it yet: it does so on first use, and rekol can be installed
+        # before that happens. (Measured on a live machine: the directory
+        # predated the rekol install by nearly three months, so the ordinary
+        # case is that it already exists — but a brand-new machine legitimately
+        # hits the gap.) Reporting that as a PROBLEM made `doctor` red out of the
+        # box, which this project has shipped twice and which teaches people to
+        # ignore the report.
+        #
+        # Compared against the RESOLVED default, so a relocated
+        # `CLAUDE_CONFIG_DIR` counts as the default too.
+        at_default_location = projects_root == resolve_claude_config_dir() / "projects"
+        if not at_default_location:
+            # The user said where it is and it is not there, so `session-index`
+            # exits 2 on every SessionEnd — into `>/dev/null 2>&1`, where nobody
+            # ever sees it — and the index can NEVER be built. That is #165.
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir is set to a path that does not exist: "
+                    f"{projects_root} — session-index fails on every session end "
+                    "and the index can never build"
+                ),
+                remedy=(
+                    "correct claude_projects_dir in rekol.config.yaml, or unset it "
+                    "to use Claude Code's default location"
+                ),
+            )
+
+        # First use and LOST STORAGE are both "absent at the default location",
+        # and only the index can tell them apart. A populated sessions DB proves
+        # transcripts were being read from here, so the directory did not fail to
+        # appear — it went away, and everything indexed from it is now orphaned.
+        indexed = _indexed_message_count(cfg, embedder)
+        if indexed > 0:
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir has GONE: {projects_root} does not "
+                    f"exist, but {indexed} message(s) were indexed from it — so "
+                    "it existed and has since been moved, renamed or deleted. No "
+                    "new session can be indexed, and searches still return the "
+                    "orphaned old results"
+                ),
+                remedy=(
+                    "restore the directory, or set claude_projects_dir to its new "
+                    "location and run rekol session-index --full"
+                ),
+            )
+        return Finding(
+            label="transcript source",
+            status=Status.INFO,
+            detail=(
+                f"claude_projects_dir does not exist yet: {projects_root} — "
+                "Claude Code creates it on first use, so there is nothing to "
+                "index until a session has ended"
+            ),
+        )
+
+    # Present and a directory, but access is a separate question: enumeration is
+    # what `session-index` actually does, so that is what gets tested. Treating a
+    # PermissionError as "empty" would report a locked-out source as first use.
+    try:
+        next(projects_root.iterdir(), None)
+    except OSError as exc:
+        return Finding(
+            label="transcript source",
+            status=Status.PROBLEM,
+            detail=(
+                f"claude_projects_dir cannot be read: {projects_root} ({exc}) — "
+                "session-index fails on every session end, and the failure is "
+                "discarded, so nothing reports it"
+            ),
+            remedy=f"fix the permissions on {projects_root} (it must be readable and traversable)",
+        )
+
+    return None
+
+
 def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Inspect ``sessions.db``: embedding coverage and FTS sync."""
     findings: list[Finding] = []
@@ -495,56 +624,13 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     # healthy" and exit 0 for an install that had never indexed one transcript
     # (#165). It is a PROBLEM, and a distinct one from "nothing to index yet".
     projects_root = cfg.claude_projects_dir
-    if not projects_root.is_dir():
-        # An absent projects dir has two causes with opposite meanings, and
-        # reporting both as PROBLEM made `doctor` red out of the box on a first
-        # run — which this project has shipped twice, and which teaches people to
-        # ignore the report.
-        #
-        # AT THE DEFAULT LOCATION it simply has not been created yet: Claude Code
-        # creates it on first use, and rekol can be installed before that happens.
-        # (Measured on a live machine: the directory predated the rekol install by
-        # nearly three months, so the ordinary case is that it already exists —
-        # but a brand-new machine legitimately hits the gap.) Nothing is wrong,
-        # there is just nothing to index. Neutral.
-        #
-        # AT AN EXPLICITLY CONFIGURED LOCATION the user said where it is and it is
-        # not there, so `session-index` exits 2 on every SessionEnd — into
-        # `>/dev/null 2>&1`, so nobody ever sees it — and the index can NEVER be
-        # built. That is #165 and it stays a PROBLEM.
-        #
-        # Compared against the resolved default rather than the raw config value,
-        # so a relocated `CLAUDE_CONFIG_DIR` is treated as the default too: there
-        # the path is correct and merely not yet populated.
-        at_default_location = projects_root == resolve_claude_config_dir() / "projects"
-        if at_default_location:
-            findings.append(
-                Finding(
-                    label="transcript source",
-                    status=Status.INFO,
-                    detail=(
-                        f"claude_projects_dir does not exist yet: {projects_root} — "
-                        "Claude Code creates it on first use, so there is nothing to "
-                        "index until a session has ended"
-                    ),
-                )
-            )
-        else:
-            findings.append(
-                Finding(
-                    label="transcript source",
-                    status=Status.PROBLEM,
-                    detail=(
-                        f"claude_projects_dir is set to a path that does not exist: "
-                        f"{projects_root} — session-index fails on every session end and "
-                        "the index can never build"
-                    ),
-                    remedy=(
-                        "correct claude_projects_dir in rekol.config.yaml, or unset it to "
-                        "use Claude Code's default location"
-                    ),
-                )
-            )
+    source_finding = _transcript_source_finding(projects_root, cfg, embedder)
+    if source_finding is not None:
+        findings.append(source_finding)
+        # An INFO here means "nothing to index yet", which is a complete answer:
+        # there is no point inspecting an index of a source that has nothing in
+        # it. A PROBLEM means the source is unusable, so the downstream checks
+        # would only add noise about a cause already reported.
         return findings
 
     db_path = cfg.sessions_db_path

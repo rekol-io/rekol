@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1518,3 +1519,127 @@ def test_an_explicitly_configured_missing_projects_dir_is_still_a_problem(
     assert source[0].status is Status.PROBLEM, source[0].detail
     assert source[0].remedy is not None
     assert str(missing) in source[0].detail
+
+
+# ---------------------------------------------------------------------------
+# The source itself: absent, gone, wrong type, unreadable (Codex, 2026-11-06)
+# ---------------------------------------------------------------------------
+# `is_dir()` returning False conflates three different states, and the first-run
+# neutrality above turned the dangerous one into a reassuring line. Keep the
+# neutrality for a genuinely unused machine; never let it cover a real failure.
+
+
+def _default_location_home(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A sandboxed home whose projects dir is the RESOLVED DEFAULT, and exists.
+
+    Returns ``(home, projects_root)``. The shared fixture sets
+    ``claude_projects_dir`` explicitly, which is the *configured* case — the
+    opposite of what these tests need.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    claude_dir = tmp_path / "claude"
+    projects_root = claude_dir / "projects"
+    (projects_root / "proj").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    return home, projects_root
+
+
+def test_a_default_projects_dir_that_vanished_after_indexing_is_a_problem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Indexed, then the directory went away. That is lost storage, not first use.
+
+    Codex indexed a real transcript, confirmed healthy embeddings and FTS, then
+    moved the default projects directory aside — and `doctor` said "does not
+    exist yet … nothing to index until a session has ended" over a populated
+    database. The populated index is the evidence that distinguishes the two:
+    transcripts were being read from there, so the directory did not fail to
+    appear, it disappeared.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    (projects_root / "proj" / "session.jsonl").write_text(
+        '{"parentUuid":null,"type":"user","message":{"role":"user",'
+        '"content":"how do I uninstall the rekol thing"},'
+        '"uuid":"u-1","timestamp":"2026-04-24T01:29:01.303Z",'
+        '"sessionId":"s-1","cwd":"/tmp/repoA"}\n'
+    )
+    _build_curated_index(home)
+    assert CliRunner().invoke(session_index_main, ["--full"]).exit_code == 0
+
+    cfg = load_config()
+    indexed = SessionStore(db_path=cfg.sessions_db_path, dim=384)
+    indexed.init_schema()
+    assert indexed.count_messages() > 0, "precondition: nothing was indexed"
+    indexed.close()
+
+    # The storage goes away, exactly as Codex's probe did it.
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "GONE" in source[0].detail
+    assert source[0].remedy is not None
+    # The count is what makes the claim checkable rather than a guess.
+    assert "message(s) were indexed from it" in source[0].detail
+
+
+def test_an_unused_default_projects_dir_is_still_neutral_with_an_empty_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The negative control: without it, reporting every absence would pass above.
+
+    A machine that has never indexed anything must keep the neutral line, which
+    is the whole point of #231.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.rename(tmp_path / "never-used")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert "does not exist yet" in source[0].detail
+    assert source[0].remedy is None
+
+
+def test_a_regular_file_at_the_projects_dir_path_is_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """It entered the "does not exist yet" branch, because `is_dir()` is False."""
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    shutil.rmtree(projects_root)
+    projects_root.write_text("not a directory\n")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "not a directory" in source[0].detail
+    assert source[0].remedy is not None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_projects_dir_is_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """`is_dir()` proves type, not access.
+
+    Codex chmodded the directory to 000 after indexing and confirmed enumeration
+    raises PermissionError, while `doctor` still reported embeddings and FTS as
+    OK with no source warning at all. Enumeration is what `session-index`
+    actually does, so that is what gets tested.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.chmod(0o000)
+    try:
+        findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    finally:
+        projects_root.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be read" in source[0].detail
+    assert source[0].remedy is not None
