@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **An ordinary v0.5.13 upgrade is free of duplicate handlers, measured on a real install (#236).**
+  That issue was filed as no-hold because the duplicates had only been seen on a hand-edited
+  `settings.json`. Measured properly: a **real v0.5.13 install**, upgraded twice with this branch
+  plus #235's fix, ends with **exactly one of every handler on both runs**, no `command -v rekol`
+  text left, and the memory loader marked and soft-failing. One of each: loader, `session-confidence`,
+  `session-coverage`, `session-tasks`, `update-check`, `auto-reindex`, the SessionEnd notice,
+  `session-index`, `review --nudge`, `time-context`, `capture-nudge`, `record-stop`.
+  Pinned by a test built from the v0.5.13 *rendering* read out of that tag's snippets rather than a
+  hand-edited file. Against the pre-rework matcher it fails on the first run with seven old-form
+  invocations left — which is the state that makes a later run append a second handler.
 - **The hook migration rewrote commands rekol does not own, and now matches exactly.** This step
   writes to the user's `settings.json`, and three successive versions of its matcher each rewrote
   something that was not rekol's: a `gsub` of the old invocation anywhere in a command string, then

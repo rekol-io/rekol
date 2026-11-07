@@ -2058,3 +2058,98 @@ JSON
       false; }
   done <<< "$written"
 }
+
+@test "a v0.5.13-shaped upgrade leaves exactly one of every handler, twice (#236)" {
+  # #236 was filed as no-hold because the duplicates had only been measured on a
+  # hand-edited settings.json. Product asked whether an ORDINARY upgrade produces
+  # them, which matters because duplicate memory injection would meet the bar.
+  #
+  # Measured on a real v0.5.13 install upgraded with this branch (plus #239):
+  # one of every handler on the first run and on the second, no old-form text
+  # left. This test pins that at the shape level so a regression in the exact
+  # matcher shows up as duplicates rather than as a silent no-op.
+  #
+  # The fixture is the v0.5.13 RENDERING, read out of that tag's snippets, not a
+  # hand-edited file: the PATH-first invocation, the loader without its
+  # `: rekol:backend=` marker, and the old auto-reindex path.
+  SBHOME="$TESTROOT/sandhome-upgrade-dupes"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-upgrade-dupes"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  old_inv="\"\$(command -v rekol || echo '/old/bin/rekol')\""
+  loader="HOME_DIR=\"\${REKOL_HOME:-\$MEMORY_HOME}\"; IDX=\"\$HOME_DIR/REKOL.md\"; if [ -n \"\$HOME_DIR\" ] && [ -f \"\$IDX\" ]; then cat \"\$IDX\"; fi; ${old_inv} _hook session-confidence 2>/dev/null || true"
+  jq -n --arg loader "$loader" \
+        --arg cov "${old_inv} _hook session-coverage 2>/dev/null || true" \
+        --arg tasks "${old_inv} _hook session-tasks 2>/dev/null || true" \
+        --arg upd "${old_inv} _hook update-check 2>/dev/null || true" \
+        --arg reindex '$HOME/.local/share/rekol/hooks/auto-reindex.sh 2>/dev/null || true' \
+        --arg notice 'if [ -n "${REKOL_HOME:-$MEMORY_HOME}" ]; then echo '"'"'[rekol] session ended'"'"'; fi 2>/dev/null || true' \
+        --arg idx "nohup ${old_inv} session-index --incremental >/dev/null 2>&1 &" \
+        --arg nudge "${old_inv} review --nudge 2>/dev/null || true" \
+        --arg tc "${old_inv} _hook time-context 2>/dev/null || true" \
+        --arg cn "${old_inv} _hook capture-nudge 2>/dev/null || true" \
+        --arg rs "${old_inv} _hook record-stop 2>/dev/null || true" \
+    '{hooks:{
+      SessionStart:[{matcher:"",hooks:[{type:"command",command:$loader},
+                                       {type:"command",command:$cov},
+                                       {type:"command",command:$tasks},
+                                       {type:"command",command:$upd}]}],
+      PostToolUse:[{matcher:"Edit|Write|MultiEdit",hooks:[{type:"command",command:$reindex}]}],
+      SessionEnd:[{matcher:"",hooks:[{type:"command",command:$notice},
+                                      {type:"command",command:$idx},
+                                      {type:"command",command:$nudge}]}],
+      UserPromptSubmit:[{matcher:"",hooks:[{type:"command",command:$tc},
+                                            {type:"command",command:$cn}]}],
+      Stop:[{matcher:"",hooks:[{type:"command",command:$rs}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  jq -e . "$SBHOME/.claude/settings.json" >/dev/null || { echo "bad fixture"; false; }
+
+  handler_counts() {
+    jq -r '[.. | objects | .command? // empty]
+           | map(if test("_hook [a-z-]+") then (capture("_hook (?<h>[a-z-]+)").h)
+                 elif test("review --nudge") then "review-nudge"
+                 elif test("session-index --incremental") then "session-index"
+                 elif test("auto-reindex") then "auto-reindex"
+                 else empty end)
+           | group_by(.) | map("\(.[0])=\(length)") | sort | join(" ")' \
+      "$SBHOME/.claude/settings.json"
+  }
+
+  for run in 1 2; do
+    run env -u MEMORY_HOME -u TEST_MODE \
+      REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+      "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+        --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+    [ "$status" -eq 0 ] || { echo "run $run failed"; echo "$output"; false; }
+
+    counts="$(handler_counts)"
+    # EXACTLY ONE of each. A duplicated memory loader would cat REKOL.md into
+    # every session twice; a duplicated handler runs it twice per event.
+    dupes="$(printf '%s\n' "$counts" | tr ' ' '\n' | grep -v '=1$' || true)"
+    [ -z "$dupes" ] || {
+      echo "FAIL: run $run produced duplicate handlers: $dupes"
+      echo "  all: $counts"
+      false; }
+
+    # And nothing is left in the old rendering, or a later run would append.
+    stale="$(grep -c "command -v rekol || echo" "$SBHOME/.claude/settings.json" || true)"
+    [ "${stale:-0}" -eq 0 ] || {
+      echo "FAIL: run $run left $stale old-form invocation(s)"
+      jq -r '[.. | objects | .command? // empty | select(test("command -v rekol"))] | .[]' \
+        "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # The loader ends marked AND soft-failing, which is what makes the second run
+  # recognise it instead of appending a second one.
+  after="$(jq -r '[.. | objects | .command? // empty | select(test("REKOL.md"))] | .[0]' \
+          "$SBHOME/.claude/settings.json")"
+  [[ "$after" == *": rekol:backend=install.sh"* ]] || {
+    echo "FAIL: the loader was not upgraded to the marked form"; false; }
+  [[ "$after" == *"|| true"* ]] || {
+    echo "FAIL: the upgraded loader is not soft-failing"; false; }
+}
