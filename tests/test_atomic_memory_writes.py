@@ -22,16 +22,55 @@ import pytest
 
 from rekol.atomic_write import AtomicWriteError, write_text_atomically
 
-# Modules that write files inside the memory home. The rule applies to these;
-# writes into the index dir or the config are a different question (those are
-# rebuildable, and tasks.py/bootstrap_state.py already stage + replace).
-MEMORY_WRITING_MODULES = (
-    "cli_capture.py",
-    "cli_confidence.py",
-    "cli_invalidate.py",
-    "cli_review.py",
-    "cli_propose.py",
-)
+# EVERY module under src/rekol is scanned, with an explicit reviewed exemption
+# below (product, 2026-11-07). The first version listed five modules and the PR
+# text claimed a new command would be caught automatically — a claim wider than
+# the check, which is the habit this project is trying to break.
+#
+# A module absent from both the clean set and the exemptions FAILS, so a new one
+# has to be looked at before it passes. That is the whole mechanism: the list is
+# a record of decisions, not a way to get green.
+#
+# WHAT THIS STILL CANNOT SEE, stated because nothing should claim more than it
+# checks: a mode held in a variable (`open(p, mode)`), `os.open`, `os.fdopen`,
+# `shutil.copy` onto a memory path, a write through a helper this test does not
+# know about, and anything in a dependency. It reads the source, so it also
+# cannot see a path computed at runtime — a `write_text` on a path that only
+# sometimes lands in the memory home is reported either way.
+EXEMPT_MODULES: dict[str, str] = {
+    # Already stage-then-replace, which is the rule this test enforces; they
+    # just do it inline rather than through the helper.
+    "bootstrap.py": "stages a temporary and os.replaces it",
+    "bootstrap_state.py": "stages a temporary and os.replaces it",
+    "cli_resume.py": "settings.json is staged and replaced; the marker is in the cache",
+    # Writes into the local-only index/cache directory. Rebuildable by
+    # definition: losing one costs a reindex, not a memory.
+    "include_indexer.py": "marker file in the index cache",
+    "indexer.py": "INDEX.md and the skip manifest, both in the index cache",
+    "release.py": "release-check state in the index cache",
+    "cli_hooks.py": "per-session scratch files in the index cache",
+    # Append-only journals. `open(..., "a")` does not truncate, so the hazard
+    # this test exists for does not apply.
+    "resume.py": "append-only freeze journal",
+    # The transcript archive, which is rekol's own durable copy of session
+    # JSONL rather than curated memory. Worth the same treatment eventually;
+    # not this change.
+    "sessions/archive.py": "transcript archive, not curated memory",
+    # Writes the file the user asked for, at a path they named.
+    "docs_convert/writer.py": "writes its explicit output path",
+    # KNOWN GAP, and the one exemption here that is a real hazard: this
+    # truncates rekol.config.yaml inside the memory home. It is config rather
+    # than memory, and it is written at install/init time where a fault is
+    # visible, but a destroyed config is still a destroyed user file. Left out
+    # of this change deliberately to keep it small.
+    "config.py": "KNOWN GAP: truncates rekol.config.yaml in the memory home",
+    # The migration's own writes, which #224 made staged-and-replaced; these
+    # two line numbers are prose in docstrings, not calls. Exempt so a reader
+    # does not go looking for a defect that is not there.
+    "migrate/archive.py": "its publication is staged and replaced (#224)",
+    "migrate/migrator.py": "imports are published through claim_free_name (#224)",
+}
+
 
 SOURCE_DIR = Path(__file__).resolve().parent.parent / "src" / "rekol"
 
@@ -46,36 +85,115 @@ def _truncating_writes(tree: ast.AST) -> list[tuple[int, str]]:
         if isinstance(func, ast.Attribute) and func.attr in ("write_text", "write_bytes"):
             found.append((node.lineno, f".{func.attr}(...)"))
             continue
-        if isinstance(func, ast.Name) and func.id == "open":
+        # `Path.open("w")` as well as the builtin, and `r+` as well as `w`:
+        # both can shorten or rewrite an existing file in place. Added because
+        # the control for this scan caught `p.open("w")` going unseen.
+        is_builtin = isinstance(func, ast.Name) and func.id == "open"
+        is_path_open = isinstance(func, ast.Attribute) and func.attr == "open"
+        if is_builtin or is_path_open:
             mode = ""
-            if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
-                mode = str(node.args[1].value)
+            mode_arg = 1 if is_builtin else 0
+            if len(node.args) > mode_arg and isinstance(node.args[mode_arg], ast.Constant):
+                mode = str(node.args[mode_arg].value)
             for keyword in node.keywords:
                 if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
                     mode = str(keyword.value.value)
-            if "w" in mode or "a" in mode:
-                found.append((node.lineno, f"open(..., {mode!r})"))
+            if any(flag in mode for flag in ("w", "a", "+")):
+                label = "open" if is_builtin else "Path.open"
+                found.append((node.lineno, f"{label}(..., {mode!r})"))
     return found
 
 
-@pytest.mark.parametrize("module_name", MEMORY_WRITING_MODULES)
-def test_no_module_writes_a_memory_by_truncation(module_name: str) -> None:
-    """THE RULE, as a property of the source rather than a list of call sites.
+def _modules_with_truncating_writes() -> dict[str, list[tuple[int, str]]]:
+    """Every module under ``src/rekol`` that opens a path by truncation."""
+    found: dict[str, list[tuple[int, str]]] = {}
+    for source_file in sorted(SOURCE_DIR.rglob("*.py")):
+        offenders = _truncating_writes(ast.parse(source_file.read_text()))
+        if offenders:
+            found[str(source_file.relative_to(SOURCE_DIR))] = offenders
+    return found
 
-    A new command that writes a memory with ``write_text`` fails here even
-    though nobody thought to add a test for it — which is the point, because the
-    five sites this fixed were each added by someone who did not know the rule
+
+def test_no_unreviewed_module_writes_a_file_by_truncation() -> None:
+    """THE RULE, over the whole package rather than a list of five modules.
+
+    A module that truncates has to be either fixed or added to
+    ``EXEMPT_MODULES`` with a reason — so a new command that writes a memory the
+    old way fails here even though nobody thought to test it, which is the point:
+    each of the sites this fixed was added by someone who did not know the rule
     existed.
     """
-    source_file = SOURCE_DIR / module_name
-    assert source_file.is_file(), f"{module_name} has moved; update MEMORY_WRITING_MODULES"
-    offenders = _truncating_writes(ast.parse(source_file.read_text()))
-    assert not offenders, (
-        f"{module_name} writes a file by truncation, which destroys the existing "
-        f"content before the replacement is written:\n"
-        + "\n".join(f"  line {line}: {what}" for line, what in offenders)
-        + "\n  Use rekol.atomic_write.write_text_atomically instead."
+    offending = _modules_with_truncating_writes()
+    unreviewed = {m: hits for m, hits in offending.items() if m not in EXEMPT_MODULES}
+    assert not unreviewed, (
+        "these modules write a file by truncation, which destroys the existing "
+        "content before the replacement is written:\n"
+        + "\n".join(
+            f"  {module}: " + ", ".join(f"line {line} {what}" for line, what in hits)
+            for module, hits in sorted(unreviewed.items())
+        )
+        + "\n  Use rekol.atomic_write.write_text_atomically, or add the module to "
+        "EXEMPT_MODULES with the reason it is safe."
     )
+
+
+def test_every_exemption_still_describes_a_real_module() -> None:
+    """An exemption for a module that no longer truncates is a stale decision.
+
+    Left in place it silently licenses a future write, which is how an allowlist
+    turns into a hole.
+    """
+    offending = _modules_with_truncating_writes()
+    for module, reason in EXEMPT_MODULES.items():
+        assert (SOURCE_DIR / module).is_file(), f"{module} has moved; EXEMPT_MODULES is stale"
+        assert reason.strip(), f"{module} is exempt with no reason given"
+    stale = sorted(set(EXEMPT_MODULES) - set(offending))
+    assert not stale, (
+        "these modules no longer truncate anything, so their exemption is dead "
+        f"and should be removed: {stale}"
+    )
+
+
+def test_the_commands_that_write_memories_are_not_exempt() -> None:
+    """The five that #238 fixed must be clean, not excused.
+
+    Without this, someone could make the suite pass by exempting them.
+    """
+    for module in (
+        "cli_capture.py",
+        "cli_confidence.py",
+        "cli_invalidate.py",
+        "cli_review.py",
+        "cli_propose.py",
+    ):
+        assert module not in EXEMPT_MODULES, f"{module} must not be exempt"
+        assert not _truncating_writes(ast.parse((SOURCE_DIR / module).read_text())), (
+            f"{module} truncates again"
+        )
+
+
+def test_a_new_module_is_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control for the scan: a module nobody has reviewed must FAIL.
+
+    Points the scan at a throwaway package containing one new module with one
+    `write_text`, and requires it to be reported. Without this the scan could be
+    passing because it walks nothing.
+    """
+    fake = tmp_path / "rekol"
+    (fake / "sub").mkdir(parents=True)
+    (fake / "brand_new_command.py").write_text(
+        "from pathlib import Path\ndef run(p: Path) -> None:\n    p.write_text('x')\n"
+    )
+    (fake / "sub" / "nested.py").write_text(
+        'def run(p):\n    with p.open("w") as h:\n        h.write("x")\n'
+    )
+    monkeypatch.setattr("tests.test_atomic_memory_writes.SOURCE_DIR", fake, raising=False)
+    import tests.test_atomic_memory_writes as module_under_test
+
+    monkeypatch.setattr(module_under_test, "SOURCE_DIR", fake)
+    found = module_under_test._modules_with_truncating_writes()
+    assert "brand_new_command.py" in found, found
+    assert "sub/nested.py" in found, "a module in a subpackage was not walked"
 
 
 def test_the_rule_check_actually_catches_a_violation(tmp_path: Path) -> None:
@@ -340,3 +458,67 @@ def test_a_read_only_directory_fails_with_the_message_not_a_traceback(tmp_path: 
 
     assert "UNCHANGED" in str(caught.value), str(caught.value)
     assert target.read_text() == "original"
+
+
+@pytest.mark.parametrize(("umask_value", "expected"), [(0o077, 0o600), (0o022, 0o644)])
+def test_a_new_file_follows_the_users_umask(
+    tmp_path: Path, umask_value: int, expected: int
+) -> None:
+    """Forcing 0644 on a new memory was a security regression.
+
+    Under umask 077 `Path.write_text` produces 0600, so `capture` kept a new
+    memory private to the user. Staging with `mkstemp` and then `chmod 0644`
+    made every new memory readable by every local account on the machine
+    (product, 2026-11-07). The mode is the kernel's business now: the stage is
+    created with 0666 and the umask is applied to it.
+
+    Three shapes, because all three create a file that did not exist: a new
+    memory (`capture`), a new proposal, and a dangling symlink's target. They
+    are tested here rather than through each CLI because the scan above proves
+    those commands have no other way to write — if one grows a second path, that
+    test fails, not this one.
+    """
+    home = tmp_path / "home" / "topics"
+    home.mkdir(parents=True)
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    dangling_target = external / "linked.md"
+    (home / "link.md").symlink_to(dangling_target)
+
+    previous = os.umask(umask_value)
+    try:
+        write_text_atomically(home / "new-memory.md", "---\nname: N\n---\n\nbody\n")
+        write_text_atomically(tmp_path / "proposal.md", "- [ ] a candidate\n")
+        write_text_atomically(home / "link.md", "---\nname: L\n---\n\nbody\n")
+    finally:
+        os.umask(previous)
+
+    for created in (home / "new-memory.md", tmp_path / "proposal.md", dangling_target):
+        assert created.exists(), created
+        assert created.stat().st_mode & 0o777 == expected, (
+            f"{created.name} is {oct(created.stat().st_mode & 0o777)}, "
+            f"expected {oct(expected)} under umask {oct(umask_value)}"
+        )
+
+
+@pytest.mark.parametrize("umask_value", [0o077, 0o022])
+def test_an_existing_file_keeps_its_mode_whatever_the_umask(
+    tmp_path: Path, umask_value: int
+) -> None:
+    """The counterpart: the umask must not silently re-permission an edit.
+
+    Without this, following the umask everywhere would quietly tighten or
+    loosen an existing memory the user had deliberately chmod'ed.
+    """
+    target = tmp_path / "existing.md"
+    target.write_text("original")
+    target.chmod(0o640)
+
+    previous = os.umask(umask_value)
+    try:
+        write_text_atomically(target, "replacement")
+    finally:
+        os.umask(previous)
+
+    assert target.stat().st_mode & 0o777 == 0o640, oct(target.stat().st_mode & 0o777)
+    assert target.read_text() == "replacement"

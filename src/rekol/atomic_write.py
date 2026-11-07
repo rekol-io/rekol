@@ -35,11 +35,29 @@ that filters on hidden names instead.
 
 from __future__ import annotations
 
+import errno
 import os
-import tempfile
 from pathlib import Path
 
+_STAGE_NAME_ATTEMPTS = 100
+
 __all__ = ["AtomicWriteError", "write_text_atomically"]
+
+
+# DOCUMENTED LIMITS of this publication (product, 2026-11-07; filed, not fixed
+# here, because widening them is a filesystem project rather than this change):
+#
+#   * HARD LINKS to the target are broken. `os.replace` swaps the name, so a
+#     second name for the old inode keeps the OLD content. `write_text` wrote
+#     through the link and kept both in step.
+#   * EXTENDED ATTRIBUTES and ACLs are not copied from the target; the published
+#     file carries whatever the staged one had.
+#   * OWNERSHIP comes from the staged file, i.e. the writing user. Replacing a
+#     file owned by someone else changes its owner.
+#   * DURABILITY of the directory entry is not claimed. The file's bytes are
+#     fsynced before the rename, so a crash leaves the old content or the new
+#     content -- never a fragment -- but the rename itself is not fsynced, so
+#     which of the two survives a power loss is up to the filesystem.
 
 
 class AtomicWriteError(Exception):
@@ -50,6 +68,31 @@ class AtomicWriteError(Exception):
     way to tell from it whether their file survived, and that is the only thing
     they want to know.
     """
+
+
+def _create_stage(directory: Path) -> tuple[int, Path]:
+    """Create an exclusive temporary in ``directory`` and return ``(fd, path)``.
+
+    ``os.open`` with ``0o666`` rather than ``tempfile.mkstemp``, which forces
+    ``0o600``. The mode argument is what the KERNEL masks with the process
+    umask, so a new memory ends up exactly as private as anything else the user
+    creates -- ``0600`` under umask 077, ``0644`` under 022 -- and nothing here
+    has to read, set or restore the umask, which would be racy in a library.
+
+    The name is random rather than counted so two concurrent writers cannot
+    collide, and ``O_EXCL`` means a collision fails rather than truncating.
+    """
+    for _ in range(_STAGE_NAME_ATTEMPTS):
+        candidate = directory / f".partial-{os.urandom(8).hex()}.md.tmp"
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            continue
+        return fd, candidate
+    raise OSError(
+        errno.EEXIST,
+        f"no free staging name in {directory} after {_STAGE_NAME_ATTEMPTS} attempts",
+    )
 
 
 def write_text_atomically(path: Path, text: str) -> None:
@@ -83,16 +126,12 @@ def write_text_atomically(path: Path, text: str) -> None:
     # raw OSError traceback -- which breaks the one promise this module makes,
     # that a failure says in one sentence whether the file survived.
     try:
-        staged_fd, staged_name = tempfile.mkstemp(
-            dir=directory, prefix=".partial-", suffix=".md.tmp"
-        )
+        staged_fd, staged_path = _create_stage(directory)
     except OSError as exc:
         raise AtomicWriteError(
             f"could not prepare a temporary file in {directory} to write "
             f"{path}: {exc}. The file is UNCHANGED — nothing was written to it."
         ) from exc
-
-    staged_path = Path(staged_name)
     try:
         with os.fdopen(staged_fd, "w", encoding="utf-8") as staged:
             staged.write(text)
@@ -102,14 +141,21 @@ def write_text_atomically(path: Path, text: str) -> None:
             # leave the published name pointing at blocks that were never
             # written.
             os.fsync(staged.fileno())
-        # Preserve the mode of the file being replaced, if there is one. Without
-        # this an edit silently resets permissions to the 0600 mkstemp gives,
-        # which for a memory home shared over a network mount is a real change.
-        # Read from the TARGET, since that is the file whose mode survives.
+        # An EXISTING target keeps its own mode: without this, an edit silently
+        # reset permissions to whatever the staging created, which on a memory
+        # home shared over a network mount is a real change.
+        #
+        # A NEW file gets whatever the umask says, and nothing is forced here.
+        # Forcing 0644 was a security regression (product, 2026-11-07): under
+        # umask 077 `write_text` produces 0600, so `capture` used to keep a new
+        # memory private to the user and this made it readable by every local
+        # account. The umask is applied by the KERNEL at creation in
+        # `_create_stage`, which is why there is no `os.chmod` on this branch --
+        # reading and restoring the process umask would be racy in a library.
         try:
             os.chmod(staged_path, target.stat().st_mode & 0o7777)
         except FileNotFoundError:
-            os.chmod(staged_path, 0o644)  # a new file: the ordinary default
+            pass
         os.replace(staged_path, target)
     except OSError as exc:
         staged_path.unlink(missing_ok=True)

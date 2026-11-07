@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A new memory was forced to mode `0644`, exposing it to every local account (#238, Codex).**
+  Under `umask 077` `Path.write_text` produces `0600`, so `capture` kept a new memory private; the
+  atomic-write change staged with `mkstemp` and then `chmod 0644`, which made it world-readable. A
+  regression introduced by that change, and a security-relevant one.
+  The stage is created with `os.open(..., O_CREAT|O_EXCL, 0o666)` so the **kernel** applies the
+  umask — no reading or restoring of the process umask, which would be racy in a library. An
+  existing target still keeps its own mode, so an edit cannot silently re-permission a file the user
+  chmod'ed. Controls at umask 077 and 022, across a new memory, a new proposal and a dangling link's
+  target, plus the counterpart that an existing `0640` file stays `0640` under either umask.
+  `propose` now reports a write failure with the same one sentence as the other commands rather than
+  a traceback.
+- **The atomic-write property test claimed more than it checked (#238, Codex).** It scanned a fixed
+  five-module list while the change claimed a new command would be caught automatically. It now
+  scans **every** module under `src/rekol` with an explicit reviewed exemption list — each entry
+  carrying the reason it is safe — so a new module must be looked at before it can pass. It also
+  sees `Path.open("w")` and `r+`, which the control for the scan caught it missing, and the test
+  states the shapes it still cannot see (a mode in a variable, `os.open`, `shutil.copy`, a path
+  computed at runtime). Two further controls: an exemption for a module that no longer truncates is
+  reported as a dead decision, and the five commands this fixed cannot be made to pass by exempting
+  them.
+  One exemption is a **known gap** rather than a safe case, and is labelled as such: `config.py`
+  truncates `rekol.config.yaml` inside the memory home.
+- Documented limits of atomic publication, in the helper where they apply rather than in a commit
+  message: hard links to the target are broken, extended attributes and ACLs are not carried over,
+  ownership comes from the staged file, and durability of the directory entry is not claimed (the
+  bytes are fsynced before the rename; the rename is not).
 - **A symlinked memory would have been forked rather than edited (#238, product).** `os.replace`
   acts on the **name**, so publishing over a symlinked memory deleted the link, left a regular file
   in the home holding the new text, and left the **real file with the old text** — the user's edit
