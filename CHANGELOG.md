@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The sandbox guard never resolved the FINAL path component, and the checker could still be
+  blinded (#223, Codex).**
+  `cd -P` resolves every component of a *directory* path, so an escaping directory symlink was
+  caught — but the leaf was only ever examined by name. `$TESTROOT/external-link.json`, a symlink to
+  a file outside the sandbox, passed the check while the destructive call wrote or deleted the
+  target. The chain is now walked by hand (there is no `readlink -f` on macOS bash 3.2) and a loop
+  or an absurd chain **fails closed**, because the target is unknowable. A contained symlinked leaf
+  is still accepted, so the guard does not start crying wolf.
+  And **zero recognised invocations is now a violation.** Codex assembled the path across two
+  assignments — `exe="$COMPONENT_DIR"; exe="$exe/uninstall.sh"` — so no single line carried both
+  halves, the inventory came back empty, and the checker printed `guard violations: 0`: the same line
+  it prints when every invocation is correctly guarded. That is the second time a refactor blinded
+  it, the first being the indirect `${script}` form this PR itself introduced, so the empty
+  inventory is reported rather than passed. The fixture is in the suite.
 - **The bats sandbox guard: a `..` component is refused on sight, there is one invocation site, and
   an existing file target no longer false-refuses (#223, Codex).** Containment already caught an
   escape, but only by *reading the filesystem*, so its answer was true only for the instant it was

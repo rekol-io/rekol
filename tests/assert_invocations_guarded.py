@@ -178,6 +178,26 @@ def _validate_wrappers(wrappers: dict[str, _Wrapper]) -> list[Violation]:
                 )
             )
 
+    if not invoking:
+        # ZERO IS A VIOLATION, not a pass (Codex, 2026-11-07). A file that
+        # invokes nothing this checker recognises is a file the checker cannot
+        # see into, and "guard violations: 0" is the same line it prints when
+        # every invocation is correctly guarded. Codex assembled the path across
+        # two assignments -- `exe="$COMPONENT_DIR"; exe="$exe/uninstall.sh"` --
+        # so no single line carried both halves and the inventory came back
+        # empty. This is the second time a refactor blinded it; the first was
+        # the indirect `${script}` form.
+        violations.append(
+            Violation(
+                1,
+                "no invocation of a destructive script was recognised in this "
+                "file at all. Either it does not belong under this check, or the "
+                "checker cannot see the shape it uses — teach it the shape "
+                "rather than leaving it blind",
+            )
+        )
+        return violations
+
     required = [w for w in invoking if w.name == REQUIRED_WRAPPER]
     if not required:
         if REQUIRED_WRAPPER in wrappers:

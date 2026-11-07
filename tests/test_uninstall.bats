@@ -1183,3 +1183,58 @@ _guard_in_subshell() {
     # The glob must have matched something, or this test passes by doing nothing.
     [ "$rejected" -ge 7 ] || { echo "only $rejected rejection fixtures ran"; false; }
 }
+
+@test "sandbox check resolves a symlinked LEAF, not just its directory" {
+    # Codex: `cd -P` resolves every component of a DIRECTORY path, so an
+    # escaping directory symlink was caught — but the FINAL component was never
+    # resolved. `$TESTROOT/external-link.json`, a link to a file outside the
+    # sandbox, therefore passed: the name is inside, and only the name was ever
+    # examined. The destructive call then writes or deletes the target.
+    _guard_in_subshell '
+        outside="$(mktemp -d)"
+        printf "x\n" > "$outside/real.json"
+        ln -s "$outside/real.json" "$TESTROOT/external-link.json"
+        assert_sandboxed "$TESTROOT/external-link.json" "manifest"
+        rc=$?
+        rm -rf "$outside" 2>/dev/null || true
+        exit $rc
+    '
+    [ "$status" -ne 0 ] || { echo "a symlinked leaf pointing outside was accepted"; false; }
+}
+
+@test "sandbox check accepts a symlinked leaf that stays inside" {
+    # The counterpart: resolving the leaf must not refuse a contained link, or
+    # the guard starts crying wolf and gets deleted.
+    _guard_in_subshell '
+        mkdir -p "$TESTROOT/real"
+        printf "x\n" > "$TESTROOT/real/manifest.json"
+        ln -s "$TESTROOT/real/manifest.json" "$TESTROOT/inside-link.json"
+        assert_sandboxed "$TESTROOT/inside-link.json" "manifest"
+    '
+    [ "$status" -eq 0 ] || { echo "a contained symlinked leaf was refused: $output"; false; }
+}
+
+@test "sandbox check fails closed on a symlink loop" {
+    # No readlink -f on macOS bash 3.2, so the chain is walked by hand and has
+    # to stop. Refusing is the only safe answer: the target is unknowable.
+    _guard_in_subshell '
+        ln -s "$TESTROOT/loop-b" "$TESTROOT/loop-a"
+        ln -s "$TESTROOT/loop-a" "$TESTROOT/loop-b"
+        assert_sandboxed "$TESTROOT/loop-a" "tools home"
+    '
+    [ "$status" -ne 0 ] || { echo "a symlink loop was accepted as sandboxed"; false; }
+}
+
+@test "the guard checker treats ZERO recognised invocations as a violation" {
+    # Codex assembled the path across two assignments, so no single line carried
+    # both COMPONENT_DIR and the script name, the inventory came back empty, and
+    # the checker printed "guard violations: 0" — the same line it prints when
+    # everything is guarded. Second time a refactor blinded it; the first was the
+    # indirect `${script}` form, which my own wrapper collapse introduced.
+    run python3 "${BATS_TEST_DIRNAME}/assert_invocations_guarded.py" \
+        "${BATS_TEST_DIRNAME}/fixtures/guard/reject-split-variable-invocation.bats"
+    echo "$output"
+    [ "$status" -ne 0 ] || { echo "a blind inventory was accepted"; false; }
+    [[ "$output" == *"blind"* ]] || {
+        echo "rejected, but the message does not say the checker cannot see"; false; }
+}

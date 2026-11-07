@@ -103,24 +103,45 @@ rekol_bats_canonical_path() {
     # Resolves `.`, `..` and symlinks. The path need NOT exist yet: the deepest
     # existing ancestor is resolved with `pwd -P` and the remainder appended,
     # which is what a destructive call against a not-yet-created path needs.
-    local path="$1" existing trailing="" resolved parent
+    local path="$1" existing trailing="" resolved parent target hops=0
     [[ -n "$path" ]] || return 1
     [[ "$path" == /* ]] || path="${PWD}/${path}"
     existing="$path"
-    while [[ ! -e "$existing" ]]; do
-        trailing="$(basename -- "$existing")${trailing:+/${trailing}}"
-        parent="$(dirname -- "$existing")"
-        [[ "$parent" != "$existing" ]] || return 1
-        existing="$parent"
+    while true; do
+        # Climb to the deepest component that is there. `-L` as well as `-e`, so
+        # a DANGLING symlink stops the climb and gets resolved below rather than
+        # being treated as a missing name.
+        while [[ ! -e "$existing" && ! -L "$existing" ]]; do
+            trailing="$(basename -- "$existing")${trailing:+/${trailing}}"
+            parent="$(dirname -- "$existing")"
+            [[ "$parent" != "$existing" ]] || return 1
+            existing="$parent"
+        done
+        # RESOLVE A SYMLINKED LEAF (Codex, 2026-11-07). `cd -P` resolves every
+        # component of a DIRECTORY path, so an escaping directory symlink was
+        # caught -- but the final component was never resolved at all. So
+        # `$TESTROOT/external-link.json`, a link to a file outside the sandbox,
+        # passed: the name is inside, and only the name was ever examined. The
+        # destructive call then writes or deletes the target.
+        [[ -L "$existing" ]] || break
+        hops=$(( hops + 1 ))
+        # Fail closed on a loop or an absurd chain rather than guessing. There is
+        # no readlink -f on macOS bash 3.2, so this walks the chain by hand.
+        [[ "$hops" -le 40 ]] || return 1
+        target="$(readlink -- "$existing")" || return 1
+        if [[ "$target" == /* ]]; then
+            existing="$target"
+        else
+            existing="$(dirname -- "$existing")/${target}"
+        fi
     done
     # AN EXISTING FILE IS NOT A DIRECTORY TO cd INTO (Codex, 2026-11-06). The
-    # loop above stops as soon as the path exists, so a target that is a regular
+    # climb above stops as soon as the path exists, so a target that is a regular
     # file -- `$REKOL_HOME/REKOL.md`, a manifest, a recorded binary -- left
     # `existing` pointing at the file, `cd` failed, and this returned 1. The
     # caller reads that as "cannot canonicalise", which `assert_sandboxed`
     # reports as OUTSIDE the sandbox: a false REFUSAL on a perfectly contained
-    # file. Resolve through the containing directory instead, which is where the
-    # symlinks that matter live anyway.
+    # file. Resolve through the containing directory instead.
     if [[ ! -d "$existing" ]]; then
         trailing="$(basename -- "$existing")${trailing:+/${trailing}}"
         existing="$(dirname -- "$existing")"
