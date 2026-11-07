@@ -508,12 +508,12 @@ def test_the_nested_warning_does_not_claim_retirement_when_it_failed(
 
     real_publish = archive_module.publish_into_archive
 
-    def publish_except_memory_md(source_path: Path, archive_dir: Path) -> Path:
+    def publish_except_memory_md(source_path: Path, archive_dir: Path, **kwargs: object) -> Path:
         if source_path.name == "MEMORY.md":
             raise archive_module.ArchivePublishError(
                 f"could not archive {source_path}: simulated. Nothing was moved."
             )
-        return real_publish(source_path, archive_dir)
+        return real_publish(source_path, archive_dir, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(archive_module, "publish_into_archive", publish_except_memory_md)
 
@@ -1574,3 +1574,185 @@ def test_an_in_place_write_during_the_final_hash_is_caught(
     assert source.exists(), "the source was unlinked"
     assert source.read_bytes()[:4] == b"ZZZZ", "the in-place write was lost"
     assert "KEPT" in str(caught.value), str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# THE IMPORT/RETIRE CONTRACT (QA + product, 2026-11-07)
+# ---------------------------------------------------------------------------
+# The home never holds a version other than the one retired; a refused
+# retirement leaves no import and no archive entry from that file; a retry
+# leaves ONE memory with the current content. QA's walnut/copper fixture, run on
+# both publication paths because they fail for different reasons.
+
+_OLD = "# Staleness\n\nOLD deploy target is walnut.\n"
+_NEW = "# Staleness\n\nNEW deploy target is copper.\n"
+
+
+def _edit_in_place(path: Path, text: str) -> None:
+    """Rewrite through the SAME inode, which is what keeps the identity check happy."""
+    with open(path, "w") as handle:  # noqa: PTH123
+        handle.write(text)
+
+
+def _home_bodies(home: Path) -> list[str]:
+    return ["OLD" if "walnut" in p.read_text() else "NEW" for p in sorted(home.rglob("*.md"))]
+
+
+def _archive_bodies(root: Path) -> list[str]:
+    return [
+        "OLD" if "walnut" in p.read_text() else "NEW"
+        for p in sorted(root.rglob(f"{ARCHIVE_DIR_NAME}/*"))
+        if p.is_file()
+    ]
+
+
+@pytest.mark.parametrize("hard_links", [True, False], ids=["hard-link", "no-hard-link"])
+def test_an_edit_after_the_import_refuses_and_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hard_links: bool
+) -> None:
+    """MEASURED BEFORE THE FIX, on the ordinary hard-link path: the import read
+    OLD, the user edited in place, the hard link published NEW, the source was
+    unlinked and the directory retired — **exit 0**. The newest text existed
+    only in the archive, which is not searchable, and the home held a stale
+    memory with nothing to flag it. QA found the copy-path half; product asked
+    for this one measured, and it reproduced.
+
+    Identity is not content: an in-place write keeps the inode, so the check
+    added for Codex's P1a passed.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (legacy / "p-note.md").write_text(_OLD)
+
+    fired = {"edit": False}
+
+    def edit_before_publishing(*args, **kwargs):  # noqa: ANN002, ANN003
+        if not fired["edit"]:
+            fired["edit"] = True
+            _edit_in_place(legacy / "p-note.md", _NEW)
+        if not hard_links:
+            raise OSError(errno.EOPNOTSUPP, "no hard links here")
+        return real_link(*args, **kwargs)
+
+    real_link = archive_module.os.link
+    monkeypatch.setattr(archive_module.os, "link", edit_before_publishing)
+    report = migrator_module.migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    assert fired["edit"], "the probe never fired; this test proved nothing"
+    assert report.migrated == 0, report.migrated
+    assert report.errors, "the run reported nothing"
+    message = report.errors[0]
+
+    # 1. The home holds no version at all, rather than the stale one.
+    assert _home_bodies(home) == [], _home_bodies(home)
+    # 2. And no archive entry either: on the hard-link path that entry shares the
+    #    source's inode, so leaving it would track the user's later edits from
+    #    inside a directory called an archive, and a retry would add a second.
+    assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+    # 3. The source survives carrying the user's current content.
+    assert (legacy / "p-note.md").read_text() == _NEW
+    # 4. The message is true about everything, not only the source.
+    assert "was KEPT" in message and "not retired" in message, message
+    assert "archive entry was removed" in message, message
+    assert "import" in message and "was removed" in message, message
+
+
+@pytest.mark.parametrize("hard_links", [True, False], ids=["hard-link", "no-hard-link"])
+def test_a_retry_after_a_refusal_leaves_one_memory_with_the_current_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hard_links: bool
+) -> None:
+    """QA measured the retry leaving `p-note.md` (OLD) beside `p-note-1.md` (NEW).
+
+    Same name, same dates, nothing to tell them apart, and search returned the
+    stale one first — both came back as equals. Nothing was lost, and it was
+    silently wrong, which is the bar.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (legacy / "p-note.md").write_text(_OLD)
+
+    fired = {"edit": False}
+    real_link = archive_module.os.link
+
+    def edit_before_publishing(*args, **kwargs):  # noqa: ANN002, ANN003
+        if not fired["edit"]:
+            fired["edit"] = True
+            _edit_in_place(legacy / "p-note.md", _NEW)
+        if not hard_links:
+            raise OSError(errno.EOPNOTSUPP, "no hard links here")
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(archive_module.os, "link", edit_before_publishing)
+    migrator_module.migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+    assert fired["edit"], "the probe never fired; this test proved nothing"
+
+    retry = migrator_module.migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+
+    assert retry.errors == [], retry.errors
+    assert retry.migrated == 1, retry.migrated
+    # EXACTLY ONE memory, holding the current content. No `-1` twin.
+    assert _home_bodies(home) == ["NEW"], _home_bodies(home)
+    assert _archive_bodies(tmp_path) == ["NEW"], _archive_bodies(tmp_path)
+
+
+def test_a_kill_between_the_import_and_the_archive_ends_whole_after_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crash window the contract has to survive.
+
+    A `SystemExit` from the archive step bypasses the error handling entirely,
+    which is what a kill looks like: the import is on disk and the source is
+    untouched. The retry must end with one memory, not a twin.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (legacy / "p-note.md").write_text(_NEW)
+
+    def die(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise SystemExit("killed between the import and the archive")
+
+    monkeypatch.setattr(migrator_module, "archive_file", die)
+    with pytest.raises(SystemExit):
+        migrator_module.migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    # The import landed; the source is still there. That is the crash state.
+    assert _home_bodies(home) == ["NEW"], _home_bodies(home)
+    assert (legacy / "p-note.md").exists()
+
+    retry = migrator_module.migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    assert retry.errors == [], retry.errors
+    assert _home_bodies(home) == ["NEW"], _home_bodies(home)
+    assert _archive_bodies(tmp_path) == ["NEW"], _archive_bodies(tmp_path)
+
+
+def test_a_failed_undo_says_the_import_is_still_there(tmp_path: Path) -> None:
+    """Never claim a removal that did not happen (product, 2026-11-07).
+
+    Two ways the undo declines: the file is no longer what this run wrote, so it
+    is not ours to delete; or the unlink fails. Both have to name the file and
+    say it is still there.
+    """
+    published = tmp_path / "knowledge" / "note.md"
+    published.parent.mkdir(parents=True)
+    published.write_text("something else edited it")
+
+    message = migrator_module._undo_import(published, "what this run wrote")
+    assert "NOT removed" in message, message
+    assert str(published) in message, message
+    assert "still there" in message, message
+    assert published.exists(), "a file that was not ours was deleted anyway"
+
+    # And the ordinary case does remove it, so the guard is not refusing always.
+    published.write_text("what this run wrote")
+    ok = migrator_module._undo_import(published, "what this run wrote")
+    assert "was removed" in ok and "NOT removed" not in ok, ok
+    assert not published.exists()

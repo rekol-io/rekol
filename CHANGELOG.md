@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A migration could leave a STALE memory in the home while the newest text went only to the
+  archive (#224, QA + product).** Measured on the **ordinary hard-link path**, which is why this held
+  the tag: the import read the old bytes, the user edited the file in place, `os.link` published the
+  inode — now carrying the *new* bytes — the source was unlinked and the directory retired. **Exit
+  0, nothing reported.** The newest text survived only in `old-memory-archive/`, which search never
+  reads, and the home held an ordinary-looking memory with the old content.
+  The inode check added earlier passes here, because an in-place write keeps the inode: it proves
+  the file is the same *file* and says nothing about its *bytes*.
+  **The contract now is that the home only ever holds the bytes that were retired.** Each source is
+  hashed *before* classification reads it, and that digest is handed to the archive, which refuses
+  unless the bytes it is about to retire are still those bytes. The check sits immediately before the
+  unlink on **both** publication paths, so the only remaining interval is the last-check-to-unlink
+  one already accepted — not a wider one.
+  **A refused retirement now leaves nothing behind.** The import this run wrote is removed, guarded:
+  only a file this run created, and only while it still holds exactly what this run wrote. The
+  archive entry is removed too — on the hard-link path it shares the source's inode, so leaving it
+  would track the user's later edits from inside a directory called an archive, and a retry would
+  add a second entry beside it. If an undo cannot happen, or the file is no longer ours to touch,
+  the message **names the file and says it is still there** rather than claiming a removal.
+  This also closes what QA measured on the copy path: a retry used to leave `p-note.md` (old) beside
+  `p-note-1.md` (new) — same name, same dates, nothing to tell them apart, and search returning both
+  as equals with the stale one first. A retry now leaves one memory holding the current content.
+  Tested on both paths with QA's walnut/copper fixture, plus a kill between the import and the
+  archive ending whole after a retry. Each of the three parts is revert-proved and fails on its own
+  rows.
 - **An atomic save during the final verification hash was silently deleted (#224, Codex).** Hashing
   reads through an open descriptor, so an editor replacing the pathname mid-read left the descriptor
   returning the OLD inode's bytes to EOF. The comparison against the archived copy then *succeeded*

@@ -63,14 +63,20 @@ class ArchivePublishError(Exception):
 MAX_ARCHIVE_NAME_ATTEMPTS = 1000
 
 
-def archive_file(lf: LegacyFile) -> Path:
+def archive_file(lf: LegacyFile, *, expected_digest: str | None = None) -> Path:
     """Publish ``lf.source_path`` into ``<source_root>/old-memory-archive/``.
 
     Returns the new path. If the target name is taken, tries ``-1``, ``-2``, …
     Raises ``ArchivePublishError`` without touching the source if it cannot
     publish a complete copy.
+
+    ``expected_digest`` is the sha256 the caller has already IMPORTED from this
+    file. Pass it and the archive refuses unless the bytes it is about to retire
+    are still those bytes — see :func:`publish_into_archive`.
     """
-    return publish_into_archive(lf.source_path, lf.source_root / ARCHIVE_DIR_NAME)
+    return publish_into_archive(
+        lf.source_path, lf.source_root / ARCHIVE_DIR_NAME, expected_digest=expected_digest
+    )
 
 
 class _HardLinksUnsupportedError(Exception):
@@ -84,7 +90,9 @@ _NO_HARD_LINK_ERRNOS = frozenset(
 )
 
 
-def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
+def publish_into_archive(
+    source_path: Path, archive_dir: Path, *, expected_digest: str | None = None
+) -> Path:
     """Move ``source_path`` into ``archive_dir``, never overwriting anything.
 
     TWO GUARANTEES, DELIBERATELY NOT THE SAME ONE (product ruling, 2026-11-06).
@@ -156,14 +164,16 @@ def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
             ) from exc
     else:
         try:
-            return _publish_by_hard_link(source_path, archive_dir)
+            return _publish_by_hard_link(source_path, archive_dir, expected_digest=expected_digest)
         except _HardLinksUnsupportedError:
             pass  # fall through to the copy, with the weaker contract above
 
-    return _publish_by_verified_copy(source_path, archive_dir)
+    return _publish_by_verified_copy(source_path, archive_dir, expected_digest=expected_digest)
 
 
-def _publish_by_hard_link(source_path: Path, archive_dir: Path) -> Path:
+def _publish_by_hard_link(
+    source_path: Path, archive_dir: Path, *, expected_digest: str | None = None
+) -> Path:
     """Link the source's inode into the archive, then drop the source name."""
     for candidate in _candidate_archive_names(archive_dir, source_path.name):
         try:
@@ -204,6 +214,46 @@ def _publish_by_hard_link(source_path: Path, archive_dir: Path) -> Path:
                 f"were KEPT and the directory was not retired — re-run to "
                 f"archive the current content."
             )
+        # IDENTITY IS NOT CONTENT (QA + product, 2026-11-07). The check above
+        # proves this is the same FILE; an in-place write keeps the inode, so it
+        # says nothing about the bytes. Measured on this very path: the caller
+        # imported OLD, the user edited in place, the link published NEW, the
+        # source was unlinked, the directory was retired, and the run exited 0 —
+        # so the newest text existed only in the archive, which is not
+        # searchable, and the home held a stale memory with nothing to flag it.
+        #
+        # So when the caller tells us which bytes it imported, that is what has
+        # to be retired. The check sits as late as possible, immediately before
+        # the unlink, which leaves the same last-check-to-unlink interval
+        # product has already accepted on the copy path — and no wider one.
+        if expected_digest is not None:
+            current = _digest_of(source_path)
+            if current.digest != expected_digest:
+                # REMOVE THE ARCHIVE LINK, which is safe here precisely because
+                # it is a hard link to the still-present source: unlinking this
+                # name cannot destroy bytes while that name remains. Leaving it
+                # would be worse than untidy — it shares the inode, so it would
+                # keep tracking the user's later edits while sitting in a
+                # directory called an archive, and a retry would add a second
+                # entry beside it.
+                removed = True
+                try:
+                    os.unlink(candidate)
+                except OSError:
+                    removed = False
+                raise ArchivePublishError(
+                    f"{source_path} changed while it was being archived, so the "
+                    f"bytes already imported are not the bytes that would have "
+                    f"been retired. The source was KEPT, the directory was not "
+                    f"retired, and "
+                    + (
+                        "the archive entry was removed"
+                        if removed
+                        else f"the archive entry {candidate} could NOT be removed "
+                        f"and is still there"
+                    )
+                    + " — re-run to migrate the current content."
+                )
         # os.unlink removes the name, never a link target.
         os.unlink(source_path)
         return candidate
@@ -317,7 +367,9 @@ def _digest_of(path: Path) -> _HashedFile:
     )
 
 
-def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
+def _publish_by_verified_copy(
+    source_path: Path, archive_dir: Path, *, expected_digest: str | None = None
+) -> Path:
     """Copy, re-verify the source is unchanged, and only then remove it."""
     try:
         expected_size = source_path.stat().st_size  # follows symlinks on purpose
@@ -371,18 +423,45 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
     # that copy was lost with the check already behind us (Codex's P1b).
     # Verifying here covers everything up to the instant before the name goes.
     source_hash = _digest_of(source_path)
-    if (staged_hash.digest, staged_hash.size) != (source_hash.digest, source_hash.size):
-        # The published copy holds the bytes as they were; the source holds the
-        # new ones. Both are kept, so nothing is lost either way.
+    mismatch = (staged_hash.digest, staged_hash.size) != (source_hash.digest, source_hash.size)
+    # The caller's bytes too, not only our own copy's. Same reasoning as the
+    # hard-link path: what gets retired has to be what was imported.
+    not_what_was_imported = expected_digest is not None and source_hash.digest != expected_digest
+    if mismatch or not_what_was_imported:
+        # REMOVE THE PUBLISHED COPY (product, 2026-11-07). It holds the bytes as
+        # they were read, which on a torn write is neither version, and the
+        # source survives carrying the user's current content — so a refused run
+        # leaves no archive entry, and a retry cannot find a stale twin beside
+        # the real one. Guarded: this call created that name in this call.
+        removed = True
+        try:
+            os.unlink(published)
+        except OSError:
+            removed = False
         raise ArchivePublishError(
             f"{source_path} changed while it was being archived "
-            f"({source_hash.size} bytes now, {staged_hash.size} archived to {published}); "
-            f"the source was KEPT and the directory was not retired, so nothing "
-            f"is lost — re-run to archive the current content."
+            f"({source_hash.size} bytes now, {staged_hash.size} copied); the "
+            f"source was KEPT, the directory was not retired, and "
+            + (
+                "the archive entry was removed"
+                if removed
+                else f"the archive entry {published} could NOT be removed and is still there"
+            )
+            + " — re-run to migrate the current content."
         )
 
     os.unlink(source_path)
     return published
+
+
+def source_digest(path: Path) -> str:
+    """The sha256 of ``path``'s content, with its identity confirmed.
+
+    Exposed for the migrator, which has to hash a file BEFORE importing it so
+    the archive can refuse to retire anything else. One hashing function for
+    both, so the two cannot disagree about what a digest of a file means.
+    """
+    return _digest_of(path).digest
 
 
 def claim_free_name(staged_path: Path, directory: Path, name: str) -> Path:

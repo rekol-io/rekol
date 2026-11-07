@@ -18,9 +18,11 @@ import yaml
 from rekol.config import resolve_index_dir
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
+    ArchivePublishError,
     archive_file,
     claim_free_name,
     predict_archive_name,
+    source_digest,
     write_retirement_pointer,
 )
 from rekol.migrate.classify import Classification, classify_file
@@ -257,6 +259,34 @@ def _write_imported_file(
     return published
 
 
+def _undo_import(published: Path | None, expected_text: str) -> str:
+    """Remove an import this run just wrote, and SAY what happened either way.
+
+    Returns the sentence to append to the error. The guard is the whole point:
+    the file is removed only when it still holds exactly the text this run
+    wrote, so a memory that someone or something else has touched since is left
+    alone. When it cannot be removed, or is no longer ours to remove, the
+    message says the import is still there and names it — never that it was
+    removed (product, 2026-11-07).
+    """
+    if published is None:
+        return "No import was written, so there is nothing to undo."
+    try:
+        if published.read_text() != expected_text:
+            return (
+                f"The import {published} was NOT removed: it no longer holds what "
+                f"this run wrote, so it is not ours to delete. It is still there."
+            )
+        published.unlink()
+    except OSError as exc:
+        return (
+            f"The import {published} could NOT be removed ({exc}) and is still "
+            f"there — delete it by hand before re-running, or the retry will "
+            f"leave two memories."
+        )
+    return f"The import {published} was removed, so a re-run leaves one memory."
+
+
 def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separately
     source_dir: Path,
     *,
@@ -353,6 +383,15 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     # below.  Updated as we migrate so duplicates within this batch also skip.
     seen_hashes = _existing_body_hashes(memory_home)
 
+    # Hashed up front, before any classification reads a file. A digest taken
+    # after the read would straddle the very window this closes.
+    digests: dict[Path, str] = {}
+    for lf in files:
+        try:
+            digests[lf.source_path] = source_digest(lf.source_path)
+        except Exception as exc:  # noqa: BLE001 — an unreadable source is reported below
+            report.errors.append(f"could not hash {lf.source_path}: {exc}")
+
     for lf in files:
         try:
             c = classify_file(lf, index_context=index_context, allow_llm=allow_llm)
@@ -391,8 +430,30 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             continue
 
         try:
-            _write_imported_file(memory_home, c, _serialize_memory_file(c))
-            archive_file(lf)
+            # THE BYTES THAT GET RETIRED MUST BE THE BYTES THAT GOT IMPORTED
+            # (QA + product, 2026-11-07). Measured before this: the import read
+            # OLD, the user edited in place, the archive published NEW because a
+            # hard link publishes the inode, the source was unlinked and the
+            # directory retired — exit 0, with the newest text only in the
+            # archive and a stale memory in the home that nothing flagged.
+            #
+            # Hashed BEFORE classification reads the file, so an edit anywhere
+            # from here on is caught rather than straddled. The digest is handed
+            # to the archive, which checks it immediately before the unlink.
+            imported_text = _serialize_memory_file(c)
+            published = _write_imported_file(memory_home, c, imported_text)
+            try:
+                archive_file(lf, expected_digest=digests.get(lf.source_path))
+            except ArchivePublishError as exc:
+                # A REFUSED RETIREMENT LEAVES NO IMPORT FROM THIS FILE. Guarded
+                # exactly as ruled: only a file THIS run wrote, and only while
+                # it still holds what this run wrote. Anything else is somebody
+                # else's and is left alone, said out loud rather than assumed.
+                report.errors.append(
+                    f"archive refused for {lf.source_path}: {exc} "
+                    + _undo_import(published, imported_text)
+                )
+                continue
             report.moved.append(lf.source_path)
             seen_hashes.add(body_hash)
             report.migrated += 1
