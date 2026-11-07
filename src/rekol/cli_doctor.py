@@ -23,6 +23,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -34,10 +35,14 @@ from rekol.config import Config, load_config
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
 from rekol.indexer import (
+    INDEXED_DIRS,
+    NON_MEMORY_DIRS,
     NON_MEMORY_DIRS_DISPLAY,
     NON_MEMORY_FILES,
+    PROJECTS_DIR,
     _iter_memory_files,
     _skip_reason,
+    is_in_indexed_layer,
     is_non_memory,
     iter_all_markdown,
 )
@@ -104,17 +109,74 @@ class _CuratedFiles(Enum):
     stop making.
     """
 
-    NONE = "none"  # readable, and holds no curated memory files
-    SOME = "some"  # holds at least one
-    UNKNOWN = "unknown"  # could not be read, so neither of the above is known
+    NONE = "none"  # readable, and holds nothing the indexer would index
+    SOME = "some"  # holds at least one file the indexer would index
+    # Markdown IS there, but all of it outside the layers the indexer walks, so
+    # a rebuild would produce an empty index. Reporting this as NONE would be
+    # true about the index and useless to the user, who has written memory that
+    # nothing will ever read (Codex, 2026-11-06).
+    OUTSIDE_THE_LAYERS = "outside"
+    UNKNOWN = "unknown"  # could not be read, so none of the above is known
+
+
+def _count_markdown_by_scope(
+    memory_home: Path, on_error: Callable[[OSError], None]
+) -> tuple[int, int]:
+    """``(indexable, outside)`` markdown counts under ``memory_home``.
+
+    Split out of :func:`_curated_memory_file_state` only to keep that function
+    under the complexity limit; the reasoning lives in its docstring.
+    """
+    indexable = 0
+    outside = 0
+    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=on_error):
+        if Path(dirpath) == memory_home:
+            # PRUNE WHAT THE INDEXER NEVER READS, BEFORE DESCENDING (Codex).
+            # `tasks/` is the machine-managed task layer, excluded by design —
+            # but an unreadable one still tripped `onerror`, so a home whose
+            # curated memory is perfectly fine reported UNKNOWN because of a
+            # directory the answer does not depend on. Pruned only at the root,
+            # which is where the exclusion applies (`rel.parts[0]`).
+            #
+            # Only the layer dirs and `projects/` can hold anything indexable,
+            # so nothing else is descended into — markdown sitting at the root
+            # is still seen by the file loop at this level, and counted as
+            # OUTSIDE. A hidden directory INSIDE a layer is kept: the indexer's
+            # globs match there, so `always/.old/x.md` really is indexed.
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in NON_MEMORY_DIRS and (d in INDEXED_DIRS or d == PROJECTS_DIR)
+            ]
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            path = Path(dirpath) / filename
+            if is_non_memory(path, memory_home):
+                continue
+            if is_in_indexed_layer(path, memory_home):
+                indexable += 1
+            else:
+                outside += 1
+    return indexable, outside
 
 
 def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
-    """``(state, count)``; the count is meaningful only for ``SOME``.
+    """``(state, count)``; the count is meaningful for ``SOME``/``OUTSIDE_THE_LAYERS``.
 
-    Uses the indexer's FILESYSTEM walk (``iter_all_markdown``) and its exclusion
-    predicate, not the indexer's own indexing walk — a check that shares the walk
-    shares its blind spot, which is #158.
+    THE QUESTION IS "would a rebuild index anything", so the answer has to use
+    the indexer's own scope. It used to count every ``.md`` under the home that
+    was not hidden and not deliberately excluded, which is a different question:
+    the indexer walks the layer dirs and ``projects/``, not the whole tree. A
+    home holding only a stray ``note.md`` at its root, or only ``tasks/t.md``,
+    therefore read as SOME — "search returns nothing for your files", with
+    ``rekol index rebuild`` as the remedy, which would have built an empty index
+    and changed nothing (Codex, 2026-11-06).
+
+    ``is_in_indexed_layer`` is the indexer's scope as a predicate, pinned to the
+    real walk by a property test. A predicate rather than the walk itself
+    because this needs ``os.walk``'s ``onerror`` to SEE an unreadable directory;
+    ``glob`` swallows that, which is #232.
     """
     try:
         if not memory_home.is_dir():
@@ -139,20 +201,15 @@ def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
         nonlocal walk_failed
         walk_failed = True
 
-    count = 0
-    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=_note_walk_error):
-        # Prune hidden directories, matching the indexer's own exclusion.
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-        for filename in filenames:
-            if not filename.endswith(".md"):
-                continue
-            path = Path(dirpath) / filename
-            if not is_non_memory(path, memory_home):
-                count += 1
+    indexable, outside = _count_markdown_by_scope(memory_home, _note_walk_error)
 
     if walk_failed:
         return _CuratedFiles.UNKNOWN, 0
-    return (_CuratedFiles.SOME if count else _CuratedFiles.NONE), count
+    if indexable:
+        return _CuratedFiles.SOME, indexable
+    if outside:
+        return _CuratedFiles.OUTSIDE_THE_LAYERS, outside
+    return _CuratedFiles.NONE, 0
 
 
 def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
@@ -183,6 +240,27 @@ def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
                         "nothing"
                     ),
                     remedy="rekol index rebuild",
+                )
+            )
+        elif curated is _CuratedFiles.OUTSIDE_THE_LAYERS:
+            # A rebuild would index nothing, so "rekol index rebuild" is the
+            # wrong remedy and "nothing to index" is the wrong reassurance. The
+            # files are real and unreachable; say where they have to live.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}), and the {curated_count} "
+                        f"markdown file(s) in {cfg.memory_home} are all OUTSIDE the "
+                        f"directories rekol indexes ({', '.join(INDEXED_DIRS)}, "
+                        f"{PROJECTS_DIR}/) — a rebuild would index none of them, so "
+                        "they are unsearchable wherever the index stands"
+                    ),
+                    remedy=(
+                        f"move them into one of {', '.join(INDEXED_DIRS)} (or "
+                        f"{PROJECTS_DIR}/<name>.md), then rekol index rebuild"
+                    ),
                 )
             )
         elif curated is _CuratedFiles.UNKNOWN:

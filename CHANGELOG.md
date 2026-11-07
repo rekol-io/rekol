@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The "is there anything to index?" count used a different scope from the indexer (#232,
+  Codex).** It counted every non-hidden, non-excluded `.md` anywhere under the memory home; the
+  indexer walks the layer dirs (`always`, `when`, `topics`, `knowledge`, `feedback`) and
+  `projects/`. So a home holding only a stray `note.md` at its root reported "1 curated memory
+  file(s) exist, so searching curated memory returns nothing" and offered `rekol index rebuild` —
+  which would have built an **empty** index and changed nothing. Both the claim and the remedy were
+  wrong.
+  The scope question is now answered with the indexer's own scope, and the case gets its own
+  answer rather than being rounded to one of the existing two: the files are real, no rebuild will
+  reach them, and the remedy says where they have to live. The predicate is **pinned to the real
+  walk by a property test** over a tree holding every shape the walk distinguishes — layer dirs,
+  nesting, hidden names, flat and nested `projects/`, `tasks/`, strays, and the shipped pointer
+  files — because a predicate that merely looks right is how #157/#158 happened. (It is a
+  predicate rather than the walk itself because this check needs `os.walk`'s `onerror` to see an
+  unreadable directory, which `glob` swallows.)
+- **An unreadable `tasks/` made the whole answer UNKNOWN (#232, Codex).** `tasks/` is the
+  machine-managed task layer, excluded from memory by design — so whether it is readable has no
+  bearing on whether there is curated memory to index. It was still traversed, so an unreadable one
+  tripped `onerror` and turned a perfectly healthy home into "a missing answer". Excluded subtrees
+  are pruned before descending now. The counterpart is pinned too: an unreadable *layer* dir still
+  yields UNKNOWN, so pruning cannot quietly swallow the finding #232 added.
 - **`doctor` called an unbuilt curated index a problem even when there was nothing to index
   (#232).** On a machine with no curated memory yet, `✗ curated index: not built yet` was reported
   with the remedy `rekol index rebuild` — which would have built an *empty* index. Running it did

@@ -1538,3 +1538,149 @@ def test_an_absent_memory_home_is_unknown_not_nothing_to_index(tmp_path: Path, m
     state, count = _curated_memory_file_state(missing)
     assert state is _CuratedFiles.UNKNOWN
     assert count == 0
+
+
+def test_the_scope_predicate_agrees_with_the_indexer_walk(tmp_path: Path) -> None:
+    """THE ANTI-DRIFT PIN, and the reason a predicate is allowed at all.
+
+    `doctor` answers "would a rebuild index anything?" with a predicate rather
+    than the indexer's walk, because it needs `os.walk`'s `onerror` to see an
+    unreadable directory and `glob` swallows that (#232). A predicate that
+    merely looks right is how #157/#158 happened, so it is compared against the
+    real walk over a tree holding every shape the walk distinguishes — layer
+    dirs, nesting, hidden names, flat and nested `projects/`, `tasks/`, strays
+    at the root, and the shipped pointer files.
+
+    Hidden names are included on purpose: the indexer's globs match them, so
+    `always/.draft.md` really is indexed. If that policy ever changes, the walk
+    and this predicate change together or this test fails.
+    """
+    from rekol.indexer import _iter_memory_files, is_in_indexed_layer
+
+    root = tmp_path / "home"
+    shapes = [
+        "always/a.md",
+        "always/.draft.md",
+        "always/deep/b.md",
+        "always/.hidden/c.md",
+        "when/w.md",
+        "topics/t.md",
+        "knowledge/k.md",
+        "feedback/f.md",
+        "projects/flat.md",
+        "projects/.flathidden.md",
+        "projects/slug/always/p.md",
+        "projects/slug/always/deep/q.md",
+        "projects/slug/stray.md",
+        "projects/slug/notalayer/r.md",
+        "stray.md",
+        "MEMORY.md",
+        "REKOL.md",
+        "tasks/t1.md",
+        "tasks/deep/t2.md",
+        ".hidden/h.md",
+        "random/r.md",
+    ]
+    for shape in shapes:
+        target = root / shape
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+
+    walked = {str(p.relative_to(root)) for p in _iter_memory_files(root)}
+    predicted = {s for s in shapes if is_in_indexed_layer(root / s, root)}
+    assert walked == predicted, {
+        "walk only": sorted(walked - predicted),
+        "predicate only": sorted(predicted - walked),
+    }
+    # And it is not vacuously equal: the fixture must contain both answers.
+    assert walked, "the fixture reached nothing — the comparison proves nothing"
+    assert set(shapes) - walked, "the fixture has no excluded shapes"
+
+
+def test_markdown_only_outside_the_indexed_layers_is_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The count used a filesystem-wide walk; the indexer walks the layer dirs.
+
+    So a home holding only a stray `note.md` at its root read as "1 curated
+    memory file(s) exist, so searching curated memory returns nothing", with
+    `rekol index rebuild` as the remedy — which would have built an EMPTY index
+    and changed nothing. Both halves were wrong (Codex, 2026-11-06).
+
+    The right answer is neither of the old two: the file is real, and no rebuild
+    will ever reach it.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "note.md").write_text(
+        "---\nname: Note\ndescription: d\ntype: topic\n---\n\nreal content\n"
+    )
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "OUTSIDE the directories rekol indexes" in finding.detail, finding.detail
+    assert "no curated memory to index" not in finding.detail
+    assert finding.remedy and "move them into" in finding.remedy
+    # The remedy must not be the one that builds an empty index.
+    assert finding.remedy != "rekol index rebuild"
+
+
+def test_a_tasks_only_home_is_neutral_not_a_rebuild_prompt(tmp_path: Path, monkeypatch) -> None:
+    """`tasks/` is machine-managed and excluded by design, so it is not memory.
+
+    It was counted by neither state correctly: excluded from the count by
+    `is_non_memory`, yet still walked — which the test below is about.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert "no curated memory to index" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_tasks_dir_does_not_make_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The answer must not depend on a directory the answer does not depend on.
+
+    `tasks/` is excluded by design, so whether it is readable is irrelevant to
+    "is there curated memory to index". But it was still traversed, so an
+    unreadable one tripped `onerror` and the whole check returned UNKNOWN —
+    turning a perfectly healthy home into "a missing answer" (Codex,
+    2026-11-06). It is pruned before descending now.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    (home / "tasks").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "tasks").chmod(0o755)
+
+    assert "UNKNOWN" not in finding.detail, finding.detail
+    # The real curated file is still reported, so pruning did not blind it.
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "1 curated memory file(s) exist" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_still_makes_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The counterpart to the pruning above: prune only what is excluded.
+
+    Without this, pruning everything would silence #232's finding as well — the
+    unreadable directory that DOES decide the answer.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "knowledge").mkdir()
+    (home / "knowledge" / "k.md").write_text("---\nname: K\n---\n\nk\n")
+    (home / "knowledge").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "knowledge").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail, finding.detail
