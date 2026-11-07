@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The bats sandbox guard: a `..` component is refused on sight, there is one invocation site, and
+  an existing file target no longer false-refuses (#223, Codex).** Containment already caught an
+  escape, but only by *reading the filesystem*, so its answer was true only for the instant it was
+  asked — a `..` traversal through a symlink replaced between the check and the delete is a real
+  TOCTOU. The spelling is now refused before anything is resolved, in both the target check and the
+  override check, matched on the path **component** so `..foo` and `foo..bar` stay ordinary names.
+  The six wrappers are **one**, `rekol_bats_run_destructive`, whose first statement must be
+  verbatim `assert_destructive_targets_sandboxed || return 1` — and the checker verifies that exact
+  form rather than accepting a guard call anywhere above the invocation. Six wrappers meant six
+  copies of the guard and six places one line could be deleted while the suite stayed green.
+  **That change nearly shipped the checker blind**, and it is worth recording why: the one wrapper
+  runs `"${COMPONENT_DIR}/${script}"`, the checker was keyed on the literal script names, so it
+  found *zero invocations* and printed "guard violations: 0" — the same line it prints when
+  everything is guarded. Codex's rejected-shape fixtures caught it. The checker now recognises the
+  indirect shape, and a wrapper defined with nothing recognisable inside it is itself a violation.
+  Canonicalisation also **refused a legitimate file**: it stopped at the deepest existing path and
+  `cd`-ed into it, so a regular target — a manifest, `REKOL.md`, a recorded binary — failed the
+  `cd` and read as outside the sandbox. It resolves through the containing directory now, and a
+  file behind a directory symlink pointing out is still refused.
+  The rejection fixtures are **files** under `tests/fixtures/guard/`, one accept and seven reject,
+  shared by a bats test and a pytest. They began as heredocs inside `test_uninstall.bats`; the
+  checker scans that file line by line, so a heredoc holding a second wrapper read as a real second
+  wrapper and the suite flagged itself.
 - **The new bats sandbox guard was loaded but never called in `test_install.bats` (#233).** That is
   the same defect the guard was written to remove — the copy it replaced there was never called
   either — and it mattered most in `setup_file`, which performs a real install and

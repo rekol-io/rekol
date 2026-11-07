@@ -99,6 +99,18 @@ do_full_install() {
     [ "$status" -eq 0 ]
 }
 
+# THE ONE WRAPPER. Nothing else in this file may invoke either script, and
+# `assert_invocations_guarded.py` enforces exactly that — including the shape of
+# this function, whose FIRST statement must be the guard call.
+#
+# There used to be six wrappers, each with its own `assert_destructive_targets_
+# sandboxed || return 1` line. Six copies of the guard is six places it can be
+# dropped, and the checker accepted any arrangement that put a guard call
+# somewhere above the invocation — so deleting one line left the suite green and
+# one path unguarded (Codex, 2026-11-06). One invocation site means one line to
+# protect, and the checker can demand its exact position rather than its mere
+# presence.
+#
 # install.sh is destructive too, and this suite's protection in that path was
 # the PRODUCT's real-index guard rather than the suite's own (QA, 2026-11-06):
 # `do_full_install` ran it with `env -u MEMORY_HOME -u TEST_MODE` only, so a
@@ -106,11 +118,31 @@ do_full_install() {
 # the developer's LIVE index with `test-hashing`. The data survived because the
 # index guard refused it — the very component #216/#217/#220 show has gaps. A
 # suite must not depend on the thing it is testing to stay safe.
-run_install() {
+#
+# Usage: rekol_bats_run_destructive <script> [VAR=value ...] -- [script args ...]
+rekol_bats_run_destructive() {
     assert_destructive_targets_sandboxed || return 1
-    run env -u MEMORY_HOME -u TEST_MODE \
+    local script="$1"; shift
+    local -a extra_env=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        extra_env+=("$1")
+        shift
+    done
+    [[ "${1:-}" == "--" ]] && shift
+    # -u REKOL_INDEX_DIR as well as the other two: setup() clears it and the
+    # guard refuses an outside value, so this is belt and braces on the one
+    # variable that is used verbatim and exported into every Claude Code session.
+    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/install.sh" "$@"
+        ${extra_env[@]+"${extra_env[@]}"} \
+        "${COMPONENT_DIR}/${script}" "$@"
+}
+
+# The variants below are now ARGUMENT SHAPES, not invocation sites: none of them
+# names a script path, so none can drift out from behind the guard.
+
+run_install() {
+    rekol_bats_run_destructive install.sh -- "$@"
 }
 
 # Default uninstall helper — deliberately passes NO --tools-home/--bin-dir, so it
@@ -119,52 +151,36 @@ run_install() {
 # TOOLS_HOME/BIN_DIR on its own. This is what a user gets running `./uninstall.sh`
 # with no flags after a custom install.
 run_uninstall() {
-    assert_destructive_targets_sandboxed || return 1
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" "$@"
+    rekol_bats_run_destructive uninstall.sh -- "$@"
 }
 
 # Explicit-flags variant for the few tests that must pin the paths directly
 # (e.g. asserting the flag-precedence path, or running against a machine that
 # never had an install/manifest).
 run_uninstall_with_flags() {
-    assert_destructive_targets_sandboxed || return 1
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" \
+    rekol_bats_run_destructive uninstall.sh -- \
         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" "$@"
 }
 
 # Archive variant — forwards REKOL_ARCHIVE_DIR so uninstall resolves the fake
-# archive the test built. Exists so the archive tests go through the same guard
-# as everything else: they were seven of this file's hand-rolled `run env …
-# uninstall.sh` invocations, and --purge-archive deletes irreversibly.
+# archive the test built. --purge-archive deletes irreversibly, so it goes
+# through the same guard as everything else.
 run_uninstall_with_archive() {
-    assert_destructive_targets_sandboxed || return 1
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        REKOL_ARCHIVE_DIR="${REKOL_ARCHIVE_DIR}" \
-        "${COMPONENT_DIR}/uninstall.sh" "$@"
+    rekol_bats_run_destructive uninstall.sh \
+        "REKOL_ARCHIVE_DIR=${REKOL_ARCHIVE_DIR}" -- "$@"
 }
 
 # Custom-paths variant: points the uninstaller at paths that do not exist, to
-# exercise the manifest-less path. Still a wrapper, because the rule is that
-# NOTHING invokes uninstall.sh outside a run_uninstall* function.
+# exercise the manifest-less path.
 run_uninstall_with_custom_paths() {
-    assert_destructive_targets_sandboxed || return 1
-    run env -u MEMORY_HOME REKOL_HOME="$REKOLH" HOME="$SBHOME" \
-        "${COMPONENT_DIR}/uninstall.sh" "$@"
+    rekol_bats_run_destructive uninstall.sh -- "$@"
 }
 
 # Hermetic-PATH dry-run variant: $1 is the dir to put first on PATH.
 run_uninstall_dry_run_with_path() {
-    assert_destructive_targets_sandboxed || return 1
     local path_dir="$1"; shift
-    run env -u MEMORY_HOME -u TEST_MODE -u REKOL_INDEX_DIR \
-        PATH="$(_hermetic_path "$path_dir")" \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/uninstall.sh" --dry-run \
+    rekol_bats_run_destructive uninstall.sh \
+        "PATH=$(_hermetic_path "$path_dir")" -- --dry-run \
         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}" "$@"
 }
 
@@ -995,9 +1011,15 @@ _guard_in_subshell() {
 @test "sandbox check tests CONTAINMENT, not spelling" {
     # Codex: the first version compared strings, so a path carrying the right
     # prefix but resolving elsewhere passed. `..` is the whole attack.
+    #
+    # It is now refused by the `..` rule BEFORE resolution, so the message names
+    # that rather than containment. Both are refusals; what this test owns is
+    # that the path does not pass. Pure containment, with no `..` anywhere, is
+    # covered by the escaping-symlink tests below.
     _guard_in_subshell 'assert_sandboxed "$TESTROOT/../../outside" "tools home"'
     [ "$status" -ne 0 ] || { echo "a ../ escape was accepted as sandboxed"; false; }
-    [[ "$output" == *"OUTSIDE the sandbox"* ]]
+    [[ "$output" == *"REFUSING"* ]] \
+        || { echo "refused without saying so: $output"; false; }
 }
 
 @test "sandbox check requires a path COMPONENT boundary" {
@@ -1068,4 +1090,96 @@ _guard_in_subshell() {
         "${BATS_TEST_DIRNAME}/test_uninstall.bats"
     echo "$output"
     [ "$status" -eq 0 ]
+}
+
+@test "sandbox check refuses a \`..\` component before resolving anything" {
+    # Codex: containment already catches an escape, but only by READING the
+    # filesystem, so the answer is true for the instant it was asked. A `..`
+    # traversal through a symlink that is replaced between the check and the
+    # delete is a real TOCTOU. Refusing the spelling needs no filesystem, so
+    # there is no window — and no destructive target here has any business
+    # containing `..`.
+    _guard_in_subshell 'assert_sandboxed "$TESTROOT/../$(basename "$TESTROOT")/tools" "tools home"'
+    [ "$status" -ne 0 ] || { echo "a .. component was accepted"; false; }
+    [[ "$output" == *'`..` component'* ]] \
+        || { echo "refused, but not for the .. reason: $output"; false; }
+}
+
+@test "sandbox check refuses a \`..\` in an environment override too" {
+    # The override decides where a delete lands, so it gets the same rule.
+    _guard_in_subshell '
+        REKOL_TOOLS_HOME="$TESTROOT/../$(basename "$TESTROOT")/tools"
+        export REKOL_TOOLS_HOME
+        rekol_bats_require_sandboxed_env
+    '
+    [ "$status" -ne 0 ] || { echo "a .. in an override was accepted"; false; }
+}
+
+@test "a directory named ..foo is not mistaken for a traversal" {
+    # The check is on the COMPONENT, not the substring: `..foo` and `foo..bar`
+    # are ordinary names, and refusing them would be the guard crying wolf.
+    _guard_in_subshell 'assert_sandboxed "$TESTROOT/..foo/bar..baz" "tools home"'
+    [ "$status" -eq 0 ] || { echo "an ordinary name was refused: $output"; false; }
+}
+
+@test "sandbox check accepts an existing FILE inside the sandbox" {
+    # Codex: canonicalisation stopped at the deepest EXISTING path and then
+    # `cd`-ed into it. For a target that is a regular file — a manifest, REKOL.md,
+    # a recorded binary — the `cd` failed, canonicalisation returned non-zero,
+    # and the caller read that as "outside the sandbox". A false REFUSAL on a
+    # perfectly contained file, which would have blocked a legitimate test.
+    _guard_in_subshell '
+        mkdir -p "$TESTROOT/home"
+        printf "x\n" > "$TESTROOT/home/REKOL.md"
+        assert_sandboxed "$TESTROOT/home/REKOL.md" "rekol home"
+    '
+    [ "$status" -eq 0 ] || { echo "a contained file was refused: $output"; false; }
+}
+
+@test "sandbox check refuses a file whose containing directory escapes" {
+    # The counterpart: resolving a file through its parent must still follow the
+    # parent's symlinks, or the fix above would turn into a hole.
+    _guard_in_subshell '
+        outside="$(mktemp -d)"
+        printf "x\n" > "$outside/REKOL.md"
+        ln -s "$outside" "$TESTROOT/escape"
+        assert_sandboxed "$TESTROOT/escape/REKOL.md" "rekol home"
+        rc=$?
+        rm -rf "$outside" 2>/dev/null || true
+        exit $rc
+    '
+    [ "$status" -ne 0 ] || { echo "a file behind an escaping symlink was accepted"; false; }
+}
+
+@test "the guard checker REJECTS the shapes it used to accept" {
+    # A checker reporting zero violations is indistinguishable from one that
+    # cannot see anything, and this one has been both: satisfied by a guard
+    # inside a comment, then blind to the indirect `${script}` invocation. So
+    # the rejections are exercised rather than inferred from the real file
+    # passing.
+    #
+    # The fixtures are FILES under tests/fixtures/guard/ rather than heredocs
+    # here, because the checker scans this file line by line: a heredoc body
+    # holding a second wrapper reads as a second wrapper, and the suite flagged
+    # itself. Data belongs in files.
+    checker="${BATS_TEST_DIRNAME}/assert_invocations_guarded.py"
+    fixtures="${BATS_TEST_DIRNAME}/fixtures/guard"
+
+    # Both directions. Without the accept case, a checker that rejects
+    # everything would pass every rejection below.
+    run python3 "$checker" "$fixtures/accept-required-form.bats"
+    echo "$output"
+    [ "$status" -eq 0 ] || { echo "the required form was rejected"; false; }
+
+    local rejected=0
+    for fixture in "$fixtures"/reject-*.bats; do
+        run python3 "$checker" "$fixture"
+        [ "$status" -ne 0 ] || {
+            echo "ACCEPTED a shape it must reject: $(basename "$fixture")"
+            echo "$output"
+            false; }
+        rejected=$(( rejected + 1 ))
+    done
+    # The glob must have matched something, or this test passes by doing nothing.
+    [ "$rejected" -ge 7 ] || { echo "only $rejected rejection fixtures ran"; false; }
 }

@@ -81,6 +81,24 @@ REKOL_BATS_PATH_OVERRIDES=(
 # prefix and resolves somewhere else entirely. Both sides are now canonicalized
 # first, and the comparison requires a component boundary, so a sibling named
 # `${TESTROOT}-evil` cannot pass as inside `${TESTROOT}` either.
+# True when the path contains a `..` component. Checked BEFORE resolution, and
+# refused outright (Codex, 2026-11-06).
+#
+# Canonicalisation already resolves `..`, so containment catches an escape. This
+# is a stronger rule for a different reason: resolution reads the filesystem, so
+# its answer is only true for the instant it was asked. A `..` traversal passing
+# through a symlink that is replaced between the check and the delete is a real
+# TOCTOU, and no destructive target in these suites has any business containing
+# `..` in the first place. Refusing the SPELLING needs no filesystem at all, so
+# there is no window.
+#
+# Matched on the component, not the substring: a directory legitimately named
+# `..foo` or `foo..bar` is not a traversal.
+rekol_bats_path_has_parent_component() {
+    local padded="/$1/"
+    [[ "$padded" == */../* ]]
+}
+
 rekol_bats_canonical_path() {
     # Resolves `.`, `..` and symlinks. The path need NOT exist yet: the deepest
     # existing ancestor is resolved with `pwd -P` and the remainder appended,
@@ -95,6 +113,18 @@ rekol_bats_canonical_path() {
         [[ "$parent" != "$existing" ]] || return 1
         existing="$parent"
     done
+    # AN EXISTING FILE IS NOT A DIRECTORY TO cd INTO (Codex, 2026-11-06). The
+    # loop above stops as soon as the path exists, so a target that is a regular
+    # file -- `$REKOL_HOME/REKOL.md`, a manifest, a recorded binary -- left
+    # `existing` pointing at the file, `cd` failed, and this returned 1. The
+    # caller reads that as "cannot canonicalise", which `assert_sandboxed`
+    # reports as OUTSIDE the sandbox: a false REFUSAL on a perfectly contained
+    # file. Resolve through the containing directory instead, which is where the
+    # symlinks that matter live anyway.
+    if [[ ! -d "$existing" ]]; then
+        trailing="$(basename -- "$existing")${trailing:+/${trailing}}"
+        existing="$(dirname -- "$existing")"
+    fi
     resolved="$(cd -- "$existing" 2>/dev/null && pwd -P)" || return 1
     printf '%s' "${resolved}${trailing:+/${trailing}}"
 }
@@ -131,6 +161,13 @@ assert_sandboxed() {
     # An empty value means "nothing resolved", not "resolved to /" -- the caller
     # has nothing to delete, so there is nothing to refuse.
     [[ -n "$resolved" ]] || return 0
+    # FIRST, before resolving anything: a `..` component is refused on sight.
+    if rekol_bats_path_has_parent_component "$resolved"; then
+        printf 'REFUSING: %s contains a `..` component, which is never a\n' "$label" >&2
+        printf '  legitimate destructive target here and cannot be checked\n' >&2
+        printf '  without reading the filesystem: %s\n' "$resolved" >&2
+        return 1
+    fi
     if rekol_bats_path_is_sandboxed "$resolved"; then
         return 0
     fi
@@ -147,9 +184,14 @@ rekol_bats_require_sandboxed_env() {
     for var in "${REKOL_BATS_PATH_OVERRIDES[@]}"; do
         eval "value=\${$var:-}"
         [[ -n "$value" ]] || continue
-        # A sandbox-internal value is legitimate: a test may point an override
-        # at its own TESTROOT on purpose (the archive tests do exactly that).
-        rekol_bats_path_is_sandboxed "$value" && continue
+        # A `..` component is refused here too, before resolution, for the same
+        # reason: the override decides where a delete lands.
+        if ! rekol_bats_path_has_parent_component "$value"; then
+            # A sandbox-internal value is legitimate: a test may point an
+            # override at its own TESTROOT on purpose (the archive tests do
+            # exactly that).
+            rekol_bats_path_is_sandboxed "$value" && continue
+        fi
         if [[ "$offenders" -eq 0 ]]; then
             printf '\n' >&2
             printf 'REFUSING TO RUN: this suite deletes what it is pointed at, and\n' >&2
