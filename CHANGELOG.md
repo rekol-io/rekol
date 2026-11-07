@@ -6,6 +6,79 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`doctor` disagreed with the indexer in three more places, all the same fault (#232, Codex).**
+  Each was its own hat on "doctor's idea of what is indexed differs from the indexer's", so they are
+  fixed together and checked by one **agreement table** — a set of shapes run through both the
+  doctor state and the real `_iter_memory_files`, required to coincide.
+  1. **A symlinked top-level layer read as EMPTY.** `os.walk` does not follow links by default,
+     while the indexer reaches a symlinked `topics/` through `Path.glob` — so a home whose memory is
+     sitting right there reported "nothing to index" on an unbuilt index. That is memory silently
+     dark, the worst direction to be wrong in.
+     The first fix for it, `followlinks=True`, then overshot in the other direction, which looks
+     harmless until you read the remedy (Codex + product, 2026-11-07): it also follows a link
+     **nested inside** a layer, which `Path.glob("**/*.md")` never does. With only
+     `topics/linked-subdir -> external/`, doctor said SOME and the indexer reached nothing — so the
+     `rekol index rebuild` it advised could not work, and the user was told their memory was there
+     while every rebuild kept producing an empty index.
+     Links are now followed at exactly the names the indexer resolves itself — each layer dir,
+     `projects/`, `projects/<slug>/` and `projects/<slug>/<layer>/` — and nowhere below them, which
+     is the indexer's rule read off its own walk. Cycles are still guarded by `(device, inode)`, so
+     a `topics/loop -> topics` symlink cannot hang it, and that guard is also what makes one walk
+     per entry point count each directory once.
+     **This is agreement, not reach:** a memory reachable only through a nested link is still never
+     indexed and nothing says so, which is filed as #247 rather than papered over by letting doctor
+     disagree with the indexer.
+  2. **A home holding only a root `.draft.md`** reported it as unreachable memory. A hidden file at
+     the root is not something the user is waiting to see in search, and `iter_all_markdown`
+     excludes hidden paths, so it is neutral. Hidden files **inside** a layer are still counted as
+     indexable, because the indexer's globs really do match them — the two rules disagree on
+     purpose, and the table pins both.
+  3. **A home whose `MEMORY.md` is a dangling pointer** read UNKNOWN. The traversal probe stat'd
+     `next(iterdir(), None)` — whichever name the filesystem returned first — so a broken pointer
+     made the whole check report "a missing answer" about a perfectly readable home. It probes only
+     the entries the answer depends on: the layer dirs and `projects/`.
+  An unreadable layer dir still yields UNKNOWN, and an unreadable `tasks/` still does not, so
+  neither fix swallowed the other. Each of the three is revert-proved and fails on its own row.
+- **The "is there anything to index?" count used a different scope from the indexer (#232,
+  Codex).** It counted every non-hidden, non-excluded `.md` anywhere under the memory home; the
+  indexer walks the layer dirs (`always`, `when`, `topics`, `knowledge`, `feedback`) and
+  `projects/`. So a home holding only a stray `note.md` at its root reported "1 curated memory
+  file(s) exist, so searching curated memory returns nothing" and offered `rekol index rebuild` —
+  which would have built an **empty** index and changed nothing. Both the claim and the remedy were
+  wrong.
+  The scope question is now answered with the indexer's own scope, and the case gets its own
+  answer rather than being rounded to one of the existing two: the files are real, no rebuild will
+  reach them, and the remedy says where they have to live. The predicate is **pinned to the real
+  walk by a property test** over a tree holding every shape the walk distinguishes — layer dirs,
+  nesting, hidden names, flat and nested `projects/`, `tasks/`, strays, and the shipped pointer
+  files — because a predicate that merely looks right is how #157/#158 happened. (It is a
+  predicate rather than the walk itself because this check needs `os.walk`'s `onerror` to see an
+  unreadable directory, which `glob` swallows.)
+- **An unreadable `tasks/` made the whole answer UNKNOWN (#232, Codex).** `tasks/` is the
+  machine-managed task layer, excluded from memory by design — so whether it is readable has no
+  bearing on whether there is curated memory to index. It was still traversed, so an unreadable one
+  tripped `onerror` and turned a perfectly healthy home into "a missing answer". Excluded subtrees
+  are pruned before descending now. The counterpart is pinned too: an unreadable *layer* dir still
+  yields UNKNOWN, so pruning cannot quietly swallow the finding #232 added.
+- **`doctor` called an unbuilt curated index a problem even when there was nothing to index
+  (#232).** On a machine with no curated memory yet, `✗ curated index: not built yet` was reported
+  with the remedy `rekol index rebuild` — which would have built an *empty* index. Running it did
+  not make the statement true, it only silenced the line, which is the tell that the severity was
+  wrong. That is `doctor` red out of the box for the third time, after #165 and #231, and each time
+  it teaches people to stop reading the report.
+  "Not built yet" now has three meanings, matching what the checks either side already do (the
+  archive check prints a neutral line for the same condition, and the session index only fires when
+  transcripts exist):
+  no curated files → **neutral**, no remedy; curated files present → **PROBLEM**, naming how many
+  exist and that search returns nothing (the #165 bar, unchanged); the memory home unreadable →
+  **its own PROBLEM**, reported as UNKNOWN, because "cannot tell" is not "nothing to index".
+- **The file count silently undercounted an unreadable subdirectory.** `Path.glob` swallows a
+  `PermissionError` on a subdirectory and simply yields nothing for it, so a readable memory home
+  with one unreadable layer dir counted zero files and reported "there is no curated memory to
+  index" — identical output to genuinely having none, with a real file sitting there. The walk now
+  uses `os.walk(onerror=…)` so the failure is visible and reported as UNKNOWN.
+
+### Fixed
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
