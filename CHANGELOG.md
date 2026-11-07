@@ -13,8 +13,21 @@ follow [Semantic Versioning](https://semver.org/).
   1. **A symlinked top-level layer read as EMPTY.** `os.walk` does not follow links by default,
      while the indexer reaches a symlinked `topics/` through `Path.glob` — so a home whose memory is
      sitting right there reported "nothing to index" on an unbuilt index. That is memory silently
-     dark, the worst direction to be wrong in. The walk follows links now and guards cycles by
-     `(device, inode)`, so a `topics/loop -> topics` symlink cannot hang it.
+     dark, the worst direction to be wrong in.
+     The first fix for it, `followlinks=True`, then overshot in the other direction, which looks
+     harmless until you read the remedy (Codex + product, 2026-11-07): it also follows a link
+     **nested inside** a layer, which `Path.glob("**/*.md")` never does. With only
+     `topics/linked-subdir -> external/`, doctor said SOME and the indexer reached nothing — so the
+     `rekol index rebuild` it advised could not work, and the user was told their memory was there
+     while every rebuild kept producing an empty index.
+     Links are now followed at exactly the names the indexer resolves itself — each layer dir,
+     `projects/`, `projects/<slug>/` and `projects/<slug>/<layer>/` — and nowhere below them, which
+     is the indexer's rule read off its own walk. Cycles are still guarded by `(device, inode)`, so
+     a `topics/loop -> topics` symlink cannot hang it, and that guard is also what makes one walk
+     per entry point count each directory once.
+     **This is agreement, not reach:** a memory reachable only through a nested link is still never
+     indexed and nothing says so, which is filed as #247 rather than papered over by letting doctor
+     disagree with the indexer.
   2. **A home holding only a root `.draft.md`** reported it as unreachable memory. A hidden file at
      the root is not something the user is waiting to see in search, and `iter_all_markdown`
      excludes hidden paths, so it is neutral. Hidden files **inside** a layer are still counted as

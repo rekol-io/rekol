@@ -1727,6 +1727,111 @@ def _disagreements(name: str, state, count: int, reached: int, expected) -> list
     ]
 
 
+# The shapes for the agreement table below. Module-level rather than nested so
+# the test itself stays under the complexity limit as shapes are added — the
+# table grows every time doctor and the indexer are found to disagree.
+def build_linked_layer(home: Path) -> None:
+    """A top-level layer that is a symlink to a readable directory."""
+    external = home.parent / "external-topics"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics").symlink_to(external)
+
+
+def build_root_hidden_file(home: Path) -> None:
+    """A hidden file at the ROOT: outside every layer, and not user-visible."""
+    (home / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_hidden_in_layer(home: Path) -> None:
+    """A hidden file INSIDE a layer: the indexer's globs do match this."""
+    (home / "always").mkdir()
+    (home / "always" / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_dangling_pointer(home: Path) -> None:
+    """A retirement pointer whose target is gone."""
+    (home / "MEMORY.md").symlink_to(home / "nowhere-at-all.md")
+
+
+def build_root_stray(home: Path) -> None:
+    """A visible file at the root: real memory the indexer will never reach."""
+    (home / "note.md").write_text("---\nname: N\n---\n\nreal\n")
+
+
+def build_unreadable_tasks(home: Path) -> None:
+    """`tasks/` is excluded by design, so its readability is irrelevant."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T1\n---\n\nt\n")
+    (home / "tasks").chmod(0o000)
+
+
+def build_unreadable_topics(home: Path) -> None:
+    """A layer dir that cannot be read: the answer DOES depend on it."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics").chmod(0o000)
+
+
+def build_layer_cycle(home: Path) -> None:
+    """A symlink loop inside a layer. Following links must not hang."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics" / "loop").symlink_to(home / "topics")
+
+
+def build_nested_link_in_layer(home: Path) -> None:
+    """A link NESTED INSIDE a layer, which the indexer does not follow.
+
+    `Path.glob("**/*.md")` never descends into a symlinked directory, so
+    this file is unreachable. Doctor used to follow it (`followlinks=True`)
+    and answer SOME, which made its own remedy impossible: the user was told
+    the memory is there and `rekol index rebuild` kept producing an empty
+    index (Codex + product, 2026-11-07). NONE is the agreeing answer; the
+    separate question of whether this file SHOULD be indexed is #247.
+    """
+    (home / "topics").mkdir()
+    external = home.parent / f"{home.name}-nested"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics" / "linked-subdirectory").symlink_to(external)
+
+
+def build_linked_project_slug(home: Path) -> None:
+    """`projects/<slug>` as a link: an entry point, so it IS followed.
+
+    The indexer reaches this one through `iterdir()` + `is_dir()`, both of
+    which resolve a link. The three project-level shapes are here because
+    the fix turns on exactly which names are entry points, and a list of
+    entry points that is wrong in the other direction fails nothing without
+    them.
+    """
+    (home / "projects").mkdir()
+    external = home.parent / f"{home.name}-slug"
+    (external / "always").mkdir(parents=True)
+    (external / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects" / "slug").symlink_to(external)
+
+
+def build_linked_layer_in_slug(home: Path) -> None:
+    """`projects/<slug>/<layer>` as a link: also an entry point."""
+    (home / "projects" / "slug").mkdir(parents=True)
+    external = home.parent / f"{home.name}-slug-layer"
+    external.mkdir()
+    (external / "q.md").write_text("---\nname: Q\n---\n\nq\n")
+    (home / "projects" / "slug" / "always").symlink_to(external)
+
+
+def build_linked_projects_root(home: Path) -> None:
+    """`projects/` itself as a link: the indexer names it, so it follows it."""
+    external = home.parent / f"{home.name}-projects"
+    (external / "slug" / "always").mkdir(parents=True)
+    (external / "slug" / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects").symlink_to(external)
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these shapes rely on")
 def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
     """One table. `doctor` says "there is something to index" exactly when there is.
@@ -1738,53 +1843,13 @@ def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
     """
     from rekol.cli_doctor import _CuratedFiles
 
-    def build_linked_layer(home: Path) -> None:
-        """A top-level layer that is a symlink to a readable directory."""
-        external = home.parent / "external-topics"
-        external.mkdir()
-        (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
-        (home / "topics").symlink_to(external)
-
-    def build_root_hidden_file(home: Path) -> None:
-        """A hidden file at the ROOT: outside every layer, and not user-visible."""
-        (home / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
-
-    def build_hidden_in_layer(home: Path) -> None:
-        """A hidden file INSIDE a layer: the indexer's globs do match this."""
-        (home / "always").mkdir()
-        (home / "always" / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
-
-    def build_dangling_pointer(home: Path) -> None:
-        """A retirement pointer whose target is gone."""
-        (home / "MEMORY.md").symlink_to(home / "nowhere-at-all.md")
-
-    def build_root_stray(home: Path) -> None:
-        """A visible file at the root: real memory the indexer will never reach."""
-        (home / "note.md").write_text("---\nname: N\n---\n\nreal\n")
-
-    def build_unreadable_tasks(home: Path) -> None:
-        """`tasks/` is excluded by design, so its readability is irrelevant."""
-        (home / "topics").mkdir()
-        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
-        (home / "tasks").mkdir()
-        (home / "tasks" / "t1.md").write_text("---\nname: T1\n---\n\nt\n")
-        (home / "tasks").chmod(0o000)
-
-    def build_unreadable_topics(home: Path) -> None:
-        """A layer dir that cannot be read: the answer DOES depend on it."""
-        (home / "topics").mkdir()
-        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
-        (home / "topics").chmod(0o000)
-
-    def build_layer_cycle(home: Path) -> None:
-        """A symlink loop inside a layer. Following links must not hang."""
-        (home / "topics").mkdir()
-        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
-        (home / "topics" / "loop").symlink_to(home / "topics")
-
     # shape -> (builder, expected doctor state)
     shapes = {
         "linked layer": (build_linked_layer, _CuratedFiles.SOME),
+        "nested link in a layer": (build_nested_link_in_layer, _CuratedFiles.NONE),
+        "linked project slug": (build_linked_project_slug, _CuratedFiles.SOME),
+        "linked layer in a slug": (build_linked_layer_in_slug, _CuratedFiles.SOME),
+        "linked projects root": (build_linked_projects_root, _CuratedFiles.SOME),
         "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
         "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
         "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),

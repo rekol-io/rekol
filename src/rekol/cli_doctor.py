@@ -19,6 +19,7 @@ the whole point is to be the tool you reach for when things look broken.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import sqlite3
@@ -119,6 +120,39 @@ class _CuratedFiles(Enum):
     UNKNOWN = "unknown"  # could not be read, so none of the above is known
 
 
+def _indexer_entry_points(memory_home: Path, on_error: Callable[[OSError], None]) -> list[Path]:
+    """Every directory the indexer resolves BY NAME, and so follows a link at.
+
+    This list IS the indexer's link policy, read off ``_iter_memory_files``:
+    each of these paths is reached by naming it and calling ``is_dir()``, which
+    follows a symlink, and everything below it is reached by
+    ``glob("**/*.md")``, which does not. So a link AT one of these names is
+    followed and a link anywhere deeper is not.
+    """
+    entry_points = [memory_home / sub for sub in INDEXED_DIRS]
+    projects_root = memory_home / PROJECTS_DIR
+    entry_points.append(projects_root)
+    try:
+        slugs = sorted(projects_root.iterdir())
+    except OSError as exc:
+        # An absent `projects/` is the ordinary case, not a failure to read.
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            on_error(exc)
+        return entry_points
+    for slug_dir in slugs:
+        try:
+            if not slug_dir.is_dir():
+                continue
+        except OSError as exc:  # is_dir() can raise EACCES on 3.11
+            on_error(exc)
+            continue
+        # The slug dir itself, so the walk can see non-layer markdown under it,
+        # and each layer inside it, because the indexer names those too.
+        entry_points.append(slug_dir)
+        entry_points.extend(slug_dir / sub for sub in INDEXED_DIRS)
+    return entry_points
+
+
 def _count_markdown_by_scope(
     memory_home: Path, on_error: Callable[[OSError], None]
 ) -> tuple[int, int]:
@@ -127,70 +161,154 @@ def _count_markdown_by_scope(
     Split out of :func:`_curated_memory_file_state` only to keep that function
     under the complexity limit; the reasoning lives in its docstring.
 
-    ``followlinks=True``, which matters and is not the default: the indexer
-    reaches a symlinked layer (``home/topics`` pointing elsewhere) through
-    ``Path.glob``, so a walk that refuses to follow it counted ZERO and reported
-    "nothing to index" for a home whose memory is sitting right there (Codex,
-    2026-11-07). That is the worst direction to be wrong in — memory silently
-    dark on an unbuilt index — so the walk follows links and guards against
-    cycles by inode instead.
+    LINKS ARE FOLLOWED EXACTLY WHERE THE INDEXER FOLLOWS THEM, and the history
+    is a correction in each direction:
+
+    * ``followlinks=False`` was too narrow. The indexer reaches a symlinked
+      LAYER (``home/topics`` pointing elsewhere), so a walk refusing to follow
+      it counted ZERO and reported "nothing to index" for a home whose memory
+      was sitting right there — memory silently dark on an unbuilt index, which
+      is the worst direction to be wrong in (Codex, 2026-11-07).
+    * ``followlinks=True`` was then too wide, in a way that is wrong in the
+      other direction and so looks harmless until you read the remedy. It also
+      follows a link NESTED INSIDE a layer, which ``Path.glob("**/*.md")`` never
+      does. With only ``home/topics/linked-subdir -> external/``, doctor said
+      SOME and the indexer reached nothing, so doctor's advice to run
+      ``rekol index rebuild`` could not work: the user would be told their
+      memory is there and a rebuild would keep producing an empty index
+      (Codex + product, 2026-11-07). Doctor's job here is to AGREE with the
+      indexer, not to be more generous than it.
+
+    So the walk itself never follows a link, and it is run once per entry point
+    from :func:`_indexer_entry_points` — the places the indexer names, which are
+    the places it follows one. That a memory reachable only through a nested
+    link goes unindexed with nothing saying so is a real gap, filed separately
+    (#247): it is not doctor's to paper over by disagreeing with the indexer.
+
+    Note what this does NOT change: ``is_in_indexed_layer`` is a predicate on
+    path components and knows nothing about links. It is asked only about files
+    this walk actually found, so the two together answer "reachable AND in
+    scope"; the predicate alone answers only the second half.
+    """
+    # Keyed on (device, inode) rather than on the path, so the same directory
+    # reached twice — by the root walk and then as an entry point, or through
+    # `home/topics/loop -> home/topics` — is counted once. This is what makes
+    # running one walk per entry point safe rather than double-counting.
+    visited: set[tuple[int, int]] = set()
+
+    def _ignore_absent(exc: OSError) -> None:
+        # An entry point that does not exist is the ordinary case, not a
+        # failure to read one. Without this, walking `home/topics` on a home
+        # that has no `topics/` would set `walk_failed` and report UNKNOWN for
+        # every empty home — a check that answers "cannot tell" always is worth
+        # no more than one that answers "fine" always.
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return
+        on_error(exc)
+
+    # The home itself first, which covers root-level markdown and every layer
+    # that is a real directory. The entry points then pick up exactly the ones
+    # the walk declined to follow.
+    indexable, outside = _count_tree(
+        memory_home, memory_home=memory_home, visited=visited, on_error=on_error
+    )
+    for entry_point in _indexer_entry_points(memory_home, on_error):
+        more_indexable, more_outside = _count_tree(
+            entry_point, memory_home=memory_home, visited=visited, on_error=_ignore_absent
+        )
+        indexable += more_indexable
+        outside += more_outside
+    return indexable, outside
+
+
+def _count_tree(
+    top: Path,
+    *,
+    memory_home: Path,
+    visited: set[tuple[int, int]],
+    on_error: Callable[[OSError], None],
+) -> tuple[int, int]:
+    """``(indexable, outside)`` for one tree, never following a link below ``top``."""
+    indexable = 0
+    outside = 0
+    for dirpath, dirnames, filenames in os.walk(top, onerror=on_error, followlinks=False):
+        here, elsewhere = _count_one_directory(
+            dirpath,
+            dirnames,
+            filenames,
+            memory_home=memory_home,
+            visited=visited,
+            on_error=on_error,
+        )
+        indexable += here
+        outside += elsewhere
+    return indexable, outside
+
+
+def _count_one_directory(
+    dirpath: str,
+    dirnames: list[str],
+    filenames: list[str],
+    *,
+    memory_home: Path,
+    visited: set[tuple[int, int]],
+    on_error: Callable[[OSError], None],
+) -> tuple[int, int]:
+    """Count one directory's markdown, and prune what the indexer never reads.
+
+    Mutates ``dirnames`` (that is how ``os.walk`` is told not to descend) and
+    ``visited``. Split out of :func:`_count_markdown_by_scope` only to clear the
+    complexity limit.
     """
     indexable = 0
     outside = 0
-    # Cycle guard, needed because followlinks=True makes os.walk loop forever on
-    # `home/topics/loop -> home/topics`. Keyed on (device, inode) rather than on
-    # the path, so two routes to the same directory count once.
-    visited: set[tuple[int, int]] = set()
+    try:
+        entry = os.stat(dirpath)
+    except OSError as exc:
+        on_error(exc)
+        dirnames[:] = []
+        return 0, 0
+    key = (entry.st_dev, entry.st_ino)
+    if key in visited:
+        dirnames[:] = []
+        return 0, 0
+    visited.add(key)
 
-    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=on_error, followlinks=True):
-        try:
-            entry = os.stat(dirpath)
-        except OSError as exc:
-            on_error(exc)
-            dirnames[:] = []
+    if os.path.samestat(entry, os.stat(memory_home)):
+        # PRUNE WHAT THE INDEXER NEVER READS, BEFORE DESCENDING (Codex).
+        # `tasks/` is the machine-managed task layer, excluded by design — but an
+        # unreadable one still tripped `onerror`, so a home whose curated memory
+        # is perfectly fine reported UNKNOWN because of a directory the answer
+        # does not depend on. Pruned only at the root, which is where the
+        # exclusion applies (`rel.parts[0]`).
+        #
+        # Only the layer dirs and `projects/` can hold anything indexable, so
+        # nothing else is descended into — markdown sitting at the root is still
+        # seen by the file loop below. A hidden directory INSIDE a layer is kept:
+        # the indexer's globs match there, so `always/.old/x.md` really is
+        # indexed.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in NON_MEMORY_DIRS and (d in INDEXED_DIRS or d == PROJECTS_DIR)
+        ]
+    for filename in filenames:
+        if not filename.endswith(".md"):
             continue
-        key = (entry.st_dev, entry.st_ino)
-        if key in visited:
-            dirnames[:] = []
+        path = Path(dirpath) / filename
+        if is_non_memory(path, memory_home):
             continue
-        visited.add(key)
-
-        at_root = os.path.samestat(entry, os.stat(memory_home))
-        if at_root:
-            # PRUNE WHAT THE INDEXER NEVER READS, BEFORE DESCENDING (Codex).
-            # `tasks/` is the machine-managed task layer, excluded by design —
-            # but an unreadable one still tripped `onerror`, so a home whose
-            # curated memory is perfectly fine reported UNKNOWN because of a
-            # directory the answer does not depend on. Pruned only at the root,
-            # which is where the exclusion applies (`rel.parts[0]`).
-            #
-            # Only the layer dirs and `projects/` can hold anything indexable,
-            # so nothing else is descended into — markdown sitting at the root
-            # is still seen by the file loop at this level. A hidden directory
-            # INSIDE a layer is kept: the indexer's globs match there, so
-            # `always/.old/x.md` really is indexed.
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in NON_MEMORY_DIRS and (d in INDEXED_DIRS or d == PROJECTS_DIR)
-            ]
-        for filename in filenames:
-            if not filename.endswith(".md"):
-                continue
-            path = Path(dirpath) / filename
-            if is_non_memory(path, memory_home):
-                continue
-            if is_in_indexed_layer(path, memory_home):
-                indexable += 1
-            elif not filename.startswith("."):
-                # OUTSIDE the layers, and NOT hidden. A root `.draft.md` is not
-                # something the user is waiting to see in search: `iter_all_
-                # markdown` excludes hidden paths, so reporting it as unreachable
-                # memory was noise on an otherwise empty home (Codex). Hidden
-                # files INSIDE a layer are a different question and are counted
-                # as indexable above, because the indexer's globs really do
-                # match them — the two rules disagree on purpose.
-                outside += 1
+        if is_in_indexed_layer(path, memory_home):
+            indexable += 1
+        elif not filename.startswith("."):
+            # OUTSIDE the layers, and NOT hidden. A root `.draft.md` is not
+            # something the user is waiting to see in search: `iter_all_markdown`
+            # excludes hidden paths, so reporting it as unreachable memory was
+            # noise on an otherwise empty home (Codex). Hidden files INSIDE a
+            # layer are a different question and are counted as indexable above,
+            # because the indexer's globs really do match them — the two rules
+            # disagree on purpose.
+            outside += 1
     return indexable, outside
 
 
