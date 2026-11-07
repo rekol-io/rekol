@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 import frontmatter
 
+from rekol.atomic_write import AtomicWriteError, write_text_atomically
 from rekol.config import Config, load_config
 from rekol.review import find_overdue
 from rekol.store import CuratedSchemaOutdatedError, IndexStore
@@ -62,8 +63,11 @@ def _confirm(file_path: str, cfg: Config) -> bool:
     post["last_confirmed"] = dt.date.today().isoformat()
     post.metadata.pop("suspected_at", None)
     post.metadata.pop("suspect_reason", None)
-    with open(target, "w", encoding="utf-8") as handle:
-        handle.write(frontmatter.dumps(post))
+    try:
+        write_text_atomically(target, frontmatter.dumps(post))
+    except AtomicWriteError as exc:
+        click.echo(f"  {exc}", err=True)
+        return False
     return True
 
 

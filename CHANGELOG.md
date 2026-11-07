@@ -6,6 +6,93 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`rekol.config.yaml` was truncated before being rewritten (#238, product).** It is read, mutated
+  and written back whole, so a fault between the truncation and the write emptied it and lost keys
+  with nothing to do with the change being made — the embedding model, archive settings, whatever
+  else the user had set. It goes through the same staged-and-replaced helper now, and its exemption
+  from the rule check is gone rather than annotated.
+- **A new memory was forced to mode `0644`, exposing it to every local account (#238, Codex).**
+  Under `umask 077` `Path.write_text` produces `0600`, so `capture` kept a new memory private; the
+  atomic-write change staged with `mkstemp` and then `chmod 0644`, which made it world-readable. A
+  regression introduced by that change, and a security-relevant one.
+  The stage is created with `os.open(..., O_CREAT|O_EXCL, <mode>)` so the **kernel** applies the
+  umask — no reading or restoring of the process umask, which would be racy in a library. An
+  existing target still keeps its own mode, so an edit cannot silently re-permission a file the user
+  chmod'ed. Controls at umask 077 and 022, across a new memory, a new proposal and a dangling link's
+  target, plus the counterpart that an existing `0640` file stays `0640` under either umask.
+  `propose` now reports a write failure with the same one sentence as the other commands rather than
+  a traceback.
+  **The private content went into a readable temporary first (#238, Codex + product).** The first
+  version of the above still staged at `0666 & ~umask` and copied the target's mode on afterwards,
+  so under `umask 022` editing a `0600` memory wrote its whole content into a **world-readable
+  `0644`** temporary — and a kill before the `chmod` left that file in the memory home. Another
+  regression from this change, in the same place, which is why the rule is now stated rather than
+  reasoned about each time: **at no point can the staged file be more readable than the file it will
+  replace.** The target's mode is read before the stage exists and passed to `os.open`, which the
+  kernel can only narrow, so the stage is never wider than the final file from the instant it exists
+  — and the exact mode is restored before publication, so a tight umask does not tighten the file
+  either. If the target's mode cannot be read at all, the write is refused rather than guessed at.
+  The test probes the **descriptor** with `os.fstat` at the moment before the first byte, because
+  checking the published file's mode would pass whatever the stage had been.
+- **A symlinked `rekol.config.yaml` is written through, and that is deliberate (#238, product
+  answering Codex).** `os.replace` acts on the name, so publishing without following the link would
+  leave a regular file in the memory home holding the new keys while a dotfile repo kept the old
+  ones — the config silently detached from the one the user edits. Memory files reached through a
+  link out of the home are refused, which is the opposite call: a link leaving the home is an
+  anomaly for a memory and the normal case for a config. Documented at the call site with a test
+  asserting the link survives as a link and its target holds the new content.
+- **The atomic-write property test claimed more than it checked (#238, Codex).** It scanned a fixed
+  five-module list while the change claimed a new command would be caught automatically. It now
+  scans **every** module under `src/rekol` with an explicit reviewed exemption list — each entry
+  carrying the reason it is safe — so a new module must be looked at before it can pass. It also
+  sees `Path.open("w")` and `r+`, which the control for the scan caught it missing, and the test
+  states the shapes it still cannot see (a mode in a variable, `os.open`, `shutil.copy`, a path
+  computed at runtime). Two further controls: an exemption for a module that no longer truncates is
+  reported as a dead decision, and the five commands this fixed cannot be made to pass by exempting
+  them.
+  One exemption is a **known gap** rather than a safe case, and is labelled as such: `config.py`
+  truncates `rekol.config.yaml` inside the memory home.
+- Documented limits of atomic publication, in the helper where they apply rather than in a commit
+  message: hard links to the target are broken, extended attributes and ACLs are not carried over,
+  ownership comes from the staged file, and durability of the directory entry is not claimed (the
+  bytes are fsynced before the rename; the rename is not).
+- **A symlinked memory would have been forked rather than edited (#238, product).** `os.replace`
+  acts on the **name**, so publishing over a symlinked memory deleted the link, left a regular file
+  in the home holding the new text, and left the **real file with the old text** — the user's edit
+  in a different place from the file they believed they edited, with nothing reporting it. This was
+  a regression introduced by the atomic-write change itself: `Path.write_text` follows a symlink, so
+  `confirm` on a symlinked memory works on `main`. The target is resolved first and the temporary is
+  staged beside it, which also keeps the `os.replace` on one filesystem when the link points off the
+  home. A dangling link is followed too, matching `write_text`, and the mode preserved is the
+  **target's**. Tested contained, pointing outside the home, dangling, and dangling into a missing
+  directory.
+- **`tempfile.mkstemp` sat outside the error boundary (#238, product).** A read-only directory or an
+  exhausted inode table raised a raw `OSError` traceback instead of `AtomicWriteError`, which breaks
+  the one promise this module makes — that a failure says in one sentence whether the file survived.
+  A consequence accepted deliberately: a writable file in a read-only directory used to be editable
+  and now fails whole, with that message.
+- **Editing a memory destroyed it first, then wrote the replacement (#238).** `Path.write_text`
+  and `open(path, "w")` **truncate before writing**, and that is how `confirm`, `flag-suspect`,
+  `invalidate` and `review --confirm` all edited a memory in place. A fault between the truncation
+  and the write — ENOSPC, a kill, a full disk on a synced home — left the file truncated or empty,
+  and the truncated copy was the only one. `capture` had the same shape with a different
+  consequence: an interrupted write left a 0-byte or half-written `.md` under a real name, which
+  the indexer reads as a memory.
+  There is now one way rekol writes such a file (`rekol.atomic_write`): stage a temporary in the
+  same directory, `fsync` it, then `os.replace` it over the target. The name holds the old content
+  or the new content, never a partial write, and a failure says **"the file is UNCHANGED"** in one
+  sentence instead of raising a traceback that leaves the user unable to tell whether their memory
+  survived. The retry after a failure works, and leaves one file rather than two.
+  **Keyed on the rule, not on the call sites.** A property test parses each module that writes
+  into the memory home and fails on any `write_text` / `open(…, "w")`, so a new command that
+  writes a memory the old way fails CI even though nobody thought to add a test for it — which is
+  the point, since each of the sites this fixed was added by someone who did not know the rule
+  existed. The detector has its own control, because a property test that cannot fail is worse
+  than no test. It found two sites beyond the ones in the original report, in `propose`.
+  The staged name is `.partial-<random>.md.tmp`: a leading dot is **not** enough on its own, since
+  `Path.glob("**/*.md")` matches dotfiles and that glob *is* the indexer's walk. The test proves
+  that premise rather than asserting it. The replaced file's mode is preserved too — `mkstemp`
+  creates `0600`, so a naive replace silently tightened permissions on every edit.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
