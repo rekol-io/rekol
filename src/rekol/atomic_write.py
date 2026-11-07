@@ -70,14 +70,19 @@ class AtomicWriteError(Exception):
     """
 
 
-def _create_stage(directory: Path) -> tuple[int, Path]:
+def _create_stage(directory: Path, mode: int) -> tuple[int, Path]:
     """Create an exclusive temporary in ``directory`` and return ``(fd, path)``.
 
-    ``os.open`` with ``0o666`` rather than ``tempfile.mkstemp``, which forces
-    ``0o600``. The mode argument is what the KERNEL masks with the process
-    umask, so a new memory ends up exactly as private as anything else the user
-    creates -- ``0600`` under umask 077, ``0644`` under 022 -- and nothing here
-    has to read, set or restore the umask, which would be racy in a library.
+    ``os.open`` rather than ``tempfile.mkstemp``, which forces ``0o600``. The
+    mode argument is what the KERNEL masks with the process umask, so nothing
+    here has to read, set or restore the umask, which would be racy in a
+    library, and the file is never for an instant more permissive than ``mode``.
+
+    ``mode`` is ``0o666`` for a NEW file, so a new memory ends up exactly as
+    private as anything else the user creates -- ``0600`` under umask 077,
+    ``0644`` under 022. For an EXISTING target it is that target's own mode, so
+    the stage starts no more readable than the file it will become; see
+    :func:`write_text_atomically`.
 
     The name is random rather than counted so two concurrent writers cannot
     collide, and ``O_EXCL`` means a collision fails rather than truncating.
@@ -85,7 +90,7 @@ def _create_stage(directory: Path) -> tuple[int, Path]:
     for _ in range(_STAGE_NAME_ATTEMPTS):
         candidate = directory / f".partial-{os.urandom(8).hex()}.md.tmp"
         try:
-            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
         except FileExistsError:
             continue
         return fd, candidate
@@ -93,6 +98,26 @@ def _create_stage(directory: Path) -> tuple[int, Path]:
         errno.EEXIST,
         f"no free staging name in {directory} after {_STAGE_NAME_ATTEMPTS} attempts",
     )
+
+
+def _mode_of_existing(target: Path, path: Path) -> int | None:
+    """``target``'s permission bits, or ``None`` when there is no file there yet.
+
+    Any other error is refused rather than guessed at. The mode decides how
+    private the staged copy of the user's content will be, so "could not tell"
+    cannot quietly become "0666 and hope the umask covers it" — that is the
+    regression this function exists to prevent, one step removed.
+    """
+    try:
+        return target.stat().st_mode & 0o7777
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return None
+        raise AtomicWriteError(
+            f"could not read the current permissions of {path}: {exc}. Nothing "
+            f"was written to it, because the staged copy could not be made as "
+            f"private as the file it would replace."
+        ) from exc
 
 
 def write_text_atomically(path: Path, text: str) -> None:
@@ -121,12 +146,28 @@ def write_text_atomically(path: Path, text: str) -> None:
     target = Path(os.path.realpath(path))
     directory = target.parent
 
-    # INSIDE the boundary (product, 2026-11-07). A read-only directory or an
-    # exhausted inode table raises here, and outside the try that escaped as a
-    # raw OSError traceback -- which breaks the one promise this module makes,
-    # that a failure says in one sentence whether the file survived.
+    # THE TARGET'S MODE IS READ FIRST, BEFORE THE STAGE EXISTS (Codex P1,
+    # product 2026-11-07: a regression introduced by this module, and the reason
+    # is privacy rather than tidiness).
+    #
+    # The stage used to be created 0666-and-umask and the target's mode copied
+    # onto it afterwards. Under umask 022 that wrote the full content of a 0600
+    # memory into a world-readable 0644 temporary, and a kill before the chmod
+    # left that file sitting in the memory home. Private content was readable by
+    # every local account for the duration of the write, which is longer than it
+    # sounds on a synced home.
+    #
+    # The rule is: AT NO POINT CAN THE STAGE BE MORE READABLE THAN THE FINAL
+    # FILE. Passing the target's mode to `os.open` is what enforces it, because
+    # the kernel masks that mode with the umask -- so the stage is at most the
+    # target's permissions and possibly tighter, never wider, from the instant
+    # it exists and therefore before its first byte. The exact mode is restored
+    # after the write, so a tighter umask does not re-permission the file.
+    existing_mode = _mode_of_existing(target, path)
     try:
-        staged_fd, staged_path = _create_stage(directory)
+        staged_fd, staged_path = _create_stage(
+            directory, 0o666 if existing_mode is None else existing_mode
+        )
     except OSError as exc:
         raise AtomicWriteError(
             f"could not prepare a temporary file in {directory} to write "
@@ -141,9 +182,10 @@ def write_text_atomically(path: Path, text: str) -> None:
             # leave the published name pointing at blocks that were never
             # written.
             os.fsync(staged.fileno())
-        # An EXISTING target keeps its own mode: without this, an edit silently
-        # reset permissions to whatever the staging created, which on a memory
-        # home shared over a network mount is a real change.
+        # An EXISTING target keeps its own mode EXACTLY: the stage was created
+        # no wider than this, but a tight umask may have made it narrower, and
+        # an edit must not silently tighten a file either -- on a memory home
+        # shared over a network mount that is a real change.
         #
         # A NEW file gets whatever the umask says, and nothing is forced here.
         # Forcing 0644 was a security regression (product, 2026-11-07): under
@@ -152,10 +194,8 @@ def write_text_atomically(path: Path, text: str) -> None:
         # account. The umask is applied by the KERNEL at creation in
         # `_create_stage`, which is why there is no `os.chmod` on this branch --
         # reading and restoring the process umask would be racy in a library.
-        try:
-            os.chmod(staged_path, target.stat().st_mode & 0o7777)
-        except FileNotFoundError:
-            pass
+        if existing_mode is not None:
+            os.chmod(staged_path, existing_mode)
         os.replace(staged_path, target)
     except OSError as exc:
         staged_path.unlink(missing_ok=True)

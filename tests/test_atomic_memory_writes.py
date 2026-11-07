@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -58,11 +59,24 @@ EXEMPT_MODULES: dict[str, str] = {
     "sessions/archive.py": "transcript archive, not curated memory",
     # Writes the file the user asked for, at a path they named.
     "docs_convert/writer.py": "writes its explicit output path",
-    # The migration's own writes, which #224 made staged-and-replaced; these
-    # two line numbers are prose in docstrings, not calls. Exempt so a reader
-    # does not go looking for a defect that is not there.
-    "migrate/archive.py": "its publication is staged and replaced (#224)",
-    "migrate/migrator.py": "imports are published through claim_free_name (#224)",
+    # PENDING, NOT ABSOLVED. Both of these really do call `write_text` on this
+    # branch, and the reasons that used to sit here — "prose in docstrings, not
+    # calls" — were simply false (Codex, 2026-11-07). An exemption whose reason
+    # is wrong is worse than no exemption: it tells the next reader to stop
+    # looking, which is exactly what this test exists to prevent.
+    #
+    # `archive.py` writes the `.MIGRATED` marker and `migrator.py` writes the
+    # imported memory, both by truncation, and both are what #224 replaces with
+    # staged-and-replaced publication. #224 merges before this PR, so these come
+    # out at the rebase rather than being fixed here — and not on anyone
+    # remembering: `test_every_exemption_still_describes_a_real_module` fails on
+    # a dead exemption, so the rebase cannot pass with them still listed.
+    # Verified against #224's head (`387f514`): neither module has a truncating
+    # write there, so both exemptions will go.
+    "migrate/archive.py": "PENDING: write_text at archive.py:101 (the .MIGRATED marker), "
+    "removed by #224 and due out of this list at the rebase",
+    "migrate/migrator.py": "PENDING: write_text at migrator.py:218 (the imported memory), "
+    "removed by #224 and due out of this list at the rebase",
 }
 
 
@@ -518,6 +532,58 @@ def test_an_existing_file_keeps_its_mode_whatever_the_umask(
     assert target.read_text() == "replacement"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this relies on")
+@pytest.mark.parametrize("umask_value", [0o022, 0o077])
+def test_the_stage_is_never_more_readable_than_the_file_it_replaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, umask_value: int
+) -> None:
+    """THE STAGE'S MODE IS CHECKED BEFORE ITS FIRST BYTE (Codex P1, product).
+
+    A regression this module introduced: the stage was created `0666 & ~umask`
+    and the target's mode copied on afterwards. Under umask 022 that wrote the
+    whole content of a private `0600` memory into a **world-readable 0644**
+    temporary, and a kill before the chmod left that file in the memory home.
+
+    The probe is on the descriptor, which is the only way to ask the question
+    product actually asked: `os.fstat` at the moment `write_text_atomically` is
+    about to write, before any content exists. Checking the published file's
+    mode would pass whatever the stage had been.
+    """
+    from rekol import atomic_write
+
+    target = tmp_path / "private.md"
+    target.write_text("---\nname: P\n---\n\nsecret\n")
+    target.chmod(0o600)
+
+    observed: dict[str, int] = {}
+    real_fdopen = atomic_write.os.fdopen
+
+    def observe_then_open(fd, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        observed["stage"] = stat.S_IMODE(os.fstat(fd).st_mode)
+        observed["size"] = os.fstat(fd).st_size
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_write.os, "fdopen", observe_then_open)
+    previous = os.umask(umask_value)
+    try:
+        write_text_atomically(target, "---\nname: P\n---\n\nstill secret\n")
+    finally:
+        os.umask(previous)
+        monkeypatch.undo()
+
+    assert observed, "the probe never fired; this test proved nothing"
+    assert observed["size"] == 0, "the probe ran after bytes were already written"
+    # THE CLAIM: not one permission bit beyond what the final file will have.
+    assert observed["stage"] & ~0o600 == 0, (
+        f"the staged file was {oct(observed['stage'])} while holding the content "
+        f"of a 0600 file under umask {oct(umask_value)}"
+    )
+    # And the published file keeps its exact mode, so a tight umask has not
+    # quietly tightened it either.
+    assert target.stat().st_mode & 0o777 == 0o600, oct(target.stat().st_mode & 0o777)
+    assert target.read_text() == "---\nname: P\n---\n\nstill secret\n"
+
+
 def test_persisting_include_scope_does_not_truncate_the_config(tmp_path, monkeypatch) -> None:
     """`rekol.config.yaml` is read, mutated and written back WHOLE.
 
@@ -556,3 +622,44 @@ def test_persisting_include_scope_does_not_truncate_the_config(tmp_path, monkeyp
     text = config_file.read_text()
     assert "embedding_model: test-hashing" in text
     assert "/some/dir" in text
+
+
+def test_a_symlinked_config_is_written_through_and_the_link_survives(tmp_path: Path) -> None:
+    """A dotfile-managed config keeps working, and that is a decision.
+
+    `rekol.config.yaml -> ~/dotfiles/rekol.yaml` is what someone using a
+    dotfile manager has. `os.replace` acts on the NAME, so publishing without
+    following the link would leave a regular file in the home holding the new
+    keys while the dotfile repo kept the old ones — the config silently detached
+    from the one the user edits and version-controls.
+
+    Codex asked whether this should be refused, as product ruled for MEMORY
+    files reached through a link out of the home. Product answered no
+    (2026-11-07): a link leaving the home is an anomaly for a memory and the
+    normal case for a config, and refusing it would break a working setup.
+    """
+    from rekol.config import persist_include_scope
+
+    home = tmp_path / "home"
+    home.mkdir()
+    elsewhere = tmp_path / "dotfiles"
+    elsewhere.mkdir()
+    real_config = elsewhere / "rekol.yaml"
+    real_config.write_text("embedding_model: test-hashing\narchive_enabled: false\n")
+    link = home / "rekol.config.yaml"
+    link.symlink_to(real_config)
+
+    persist_include_scope(home, ["/some/dir"], ["/some/dir/secret"])
+
+    # The LINK survives as a link, pointing where it did.
+    assert link.is_symlink(), "the config was replaced by a regular file"
+    assert link.resolve() == real_config.resolve()
+    # The TARGET holds the new content, with the user's other keys intact.
+    written = real_config.read_text()
+    assert "/some/dir" in written, written
+    assert "/some/dir/secret" in written, written
+    assert "embedding_model: test-hashing" in written, written
+    # And nothing was left beside the link in the home.
+    assert sorted(p.name for p in home.iterdir()) == ["rekol.config.yaml"], sorted(
+        p.name for p in home.iterdir()
+    )

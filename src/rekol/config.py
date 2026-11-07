@@ -447,6 +447,15 @@ def persist_include_scope(
     # holds the user's OTHER config keys too -- it is read, mutated and written
     # back whole -- so a fault between the truncation and the write emptied it
     # and lost settings that have nothing to do with include-scope.
+    #
+    # A SYMLINKED CONFIG IS WRITTEN THROUGH, ON PURPOSE (product, 2026-11-07,
+    # answering Codex). `write_text_atomically` follows the link and replaces
+    # the target, so `rekol.config.yaml -> ~/dotfiles/rekol.yaml` keeps working
+    # and the link survives. That is deliberate and is NOT the case product
+    # ruled on for memory files, where a link leaving the home is an anomaly:
+    # a symlinked config is what people using a dotfile manager have, refusing
+    # it would break their setup, and replacing the link with a regular file
+    # would silently detach the config they think they are editing.
     write_text_atomically(
         config_file, yaml.safe_dump(existing, sort_keys=False, allow_unicode=True)
     )
