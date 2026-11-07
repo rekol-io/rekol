@@ -6,6 +6,77 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A command that merely MENTIONED rekol's reindex script was still softened (#235, Codex).**
+  Recognising it with `endswith` accepted `false && <path>/hooks/auto-reindex.sh`,
+  `my-gate --config <path>/hooks/auto-reindex.sh` and `printf <path>/hooks/auto-reindex.sh`. Codex
+  **executed** the first and watched exit 1 become exit 0 — #235 through a different door.
+  The next version required the whole command to be "one path token", as a character class — which
+  then accepted `false${IFS}<path>/hooks/auto-reindex.sh`: no whitespace in the string, a word break
+  the moment the shell expands it, and two commands where the installer counted one. Codex found
+  that too.
+  **Ownership is a positive allowlist now (product ruling, 2026-11-07),** because each round of
+  character class closed one shape and left the next one open: a class describes what we thought of,
+  not what we wrote. A command is rekol's only if, after stripping the one suffix rekol appends, it
+  is a supported prefix (`$HOME`, `${HOME}`, `~`, or an absolute path) followed by **literal** path
+  components — no `$`, `{`, `}`, backtick, quote, whitespace or operator — ending in
+  `/hooks/auto-reindex.sh`. A string that passes cannot expand into anything but itself, which is
+  the property the class never had. Anything else is **not ours and is left alone**: a wrong "not
+  ours" leaves a stale hook in place, which is much better than altering a command of the user's.
+  The list was checked against every form released versions actually wrote (git history plus the
+  v0.5.13 fixtures): the pre-rebrand and pre-#172 literal `$HOME/...` paths and today's absolute
+  tools-home path, each bare or with the suffix. Two forms the installer *can* write are refused and
+  said so in the code — a relative `--tools-home`, and a tools-home containing a space — because
+  both describe a hook that is already broken before rekol touches it. All four attack shapes are
+  negative controls and the two that gate on failure are **executed**, so "it stopped blocking"
+  cannot pass as a byte comparison.
+- **De-duplicating the reindex hook deleted hooks rekol does not own (#235, Codex).** It dropped
+  whole later `PostToolUse` **blocks** whose text contained `auto-reindex.sh`, so a hook of the
+  user's sharing such a block was **deleted** — worse than the softening this issue is about, since
+  a softened hook is recoverable from the backup and a deleted one is not. It now removes only the
+  owned handler, keyed on the same ownership predicate as the softener, and leaves everything else in
+  the block; a block left with no hooks at all is dropped as debris.
+  Reachable on an ordinary path, not just a hand-edited file: two reindex blocks arise from #236's
+  duplicate-append behaviour on an un-upgraded install, and a user hook added to the newer block
+  would then be destroyed by the next install.
+- When the set of rekol-owned commands cannot be collected, the soft-fail pass is skipped — the safe
+  direction, since it cannot touch a hook of the user's — and **says so** rather than leaving a
+  failed collection indistinguishable from a settings.json that holds none of rekol's hooks.
+- **The installer stopped a user's blocking hook from blocking (#235).** The soft-fail step matched
+  any command whose text contained `rekol` or `REKOL`, so a hook of the user's own got
+  ` 2>/dev/null || true` appended — `my-tool --uses rekol --flag`, or anything living under a path
+  such as `~/src/rekol-tools/`. That is not cosmetic: `|| true` forces exit 0 and `2>/dev/null`
+  discards stderr, which is how Claude Code receives a block reason, so the hook silently stopped
+  blocking after any install. **Present since #183 (2026-08-18), so in v0.5.13 and on `main`;** the
+  original is backed up as `settings.json.bak-softfail-*`.
+  Soft-fail is now applied by **whole-command equality**: a command is rekol's only when the entire
+  string equals one the installer is about to write. That set is built from the rendered snippets
+  themselves plus a handler allowlist — one definition, derived from the renderer, driving both the
+  softener and the count — with and without the soft-fail tail, since Step 6.95 rewrites a pre-#159
+  bare invocation to the current rendering *without* the tail and this step is what adds it.
+  An anchored regex was tried first and was wrong in **both** directions (product measured it): it
+  missed rekol's own `@TOOLS_HOME@/hooks/auto-reindex.sh …`, whose command starts with a path, and
+  SessionEnd's `if [ -n "${REKOL_HOME:-…` notice — so a user with no hooks of their own was told the
+  installer had left theirs alone — while *claiming* `rekol _hook x && my-gate` and
+  `"$(my-wrapper)" --check "_hook foo"`, because the subcommand test was an unanchored substring.
+  Both of those are now executed negative controls, and a pristine install and reinstall must print
+  no preserved-hook line at all.
+  Both directions are **executed** in the test rather than inferred, because inference is what let
+  this ship: a user's blocking hook is byte-identical and still exits non-zero with its stderr
+  intact, and rekol's own hook still exits 0 with its binary removed, which is the failure that
+  could otherwise fail a `UserPromptSubmit` and lock someone out of Claude Code.
+  **The "we left N hooks of yours alone" report was written, measured and removed.** Answering that
+  needs the ability to tell a *legacy* rekol rendering from a user's command, and this change does
+  not have it: on a v0.5.13 upgrade fixture with **no user hooks planted** it said `left 4`, and all
+  four were rekol's own handlers still in the `$(command -v rekol || echo …)` form, because Step 6.95
+  here only rewrites the pre-#159 bare invocation. QA measured the same thing as `left 3`, where the
+  third was the old SessionStart loader before a later step adds its `: rekol:backend=` marker — the
+  count was running in the middle of the install and describing a state that no longer existed by the
+  end. It lands with #203, whose allowlist defines every rendering this installer has produced. What
+  this change owns is narrower and complete without it: the softener no longer touches a command that
+  is not rekol's.
+  Also recognised as rekol's: `<tools-home>/hooks/auto-reindex.sh`, by the script name rather than
+  the path, because that path has changed three times (`memory-tools` before the rebrand, then
+  `$HOME/.local/share/rekol`, then `--tools-home`) and an older install's string is not this one's.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
