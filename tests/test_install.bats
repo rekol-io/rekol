@@ -1821,11 +1821,17 @@ JSON
   cmd_a="false && $fake/auto-reindex.sh"
   cmd_b="my-gate --config $fake/auto-reindex.sh"
   cmd_c="printf $fake/auto-reindex.sh"
-  jq -n --arg a "$cmd_a" --arg b "$cmd_b" --arg c "$cmd_c" \
+  # Codex, batch 6: no whitespace in the STRING, a word break once the shell
+  # expands it. The "single path token" character class accepted this because
+  # `$`, `{` and `}` were in the class for the literal `$HOME` forms. Ownership
+  # is a positive allowlist now, so the components permit no expansion at all.
+  cmd_d='false${IFS}'"$fake/auto-reindex.sh"
+  jq -n --arg a "$cmd_a" --arg b "$cmd_b" --arg c "$cmd_c" --arg d "$cmd_d" \
     '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[
       {type:"command",command:$a},
       {type:"command",command:$b},
-      {type:"command",command:$c}]}]}}' > "$SBHOME/.claude/settings.json"
+      {type:"command",command:$c},
+      {type:"command",command:$d}]}]}}' > "$SBHOME/.claude/settings.json"
 
   run env -u MEMORY_HOME -u TEST_MODE \
     REKOL_HOME="$REKOLH" HOME="$SBHOME" \
@@ -1833,7 +1839,7 @@ JSON
       --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  for want in "$cmd_a" "$cmd_b" "$cmd_c"; do
+  for want in "$cmd_a" "$cmd_b" "$cmd_c" "$cmd_d"; do
     got="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
             | select(. == $w)] | length' "$SBHOME/.claude/settings.json")"
     [ "$got" -eq 1 ] || {
@@ -1843,15 +1849,21 @@ JSON
       false; }
   done
 
-  # EXECUTED: `false && …` must still fail. With ` 2>/dev/null || true` appended
-  # it would exit 0, which is how a gate stops gating.
-  after_a="$(jq -r --arg w "$cmd_a" '[.. | objects | .command? // empty
-             | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
-  set +e
-  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after_a" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || { echo "FAIL: 'false && script' now exits 0 — it stopped failing"; false; }
+  # EXECUTED, not inferred: both gate shapes must still fail. With
+  # ` 2>/dev/null || true` appended either one exits 0, which is how a gate
+  # stops gating.
+  for gate in "$cmd_a" "$cmd_d"; do
+    after="$(jq -r --arg w "$gate" '[.. | objects | .command? // empty
+               | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
+    set +e
+    env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || {
+      echo "FAIL: a blocking command now exits 0 — it stopped blocking:"
+      echo "  $after"
+      false; }
+  done
 
   # And our OWN form, bare, is still recognised and softened.
   ours="$(jq -r '[.. | objects | .command? // empty

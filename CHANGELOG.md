@@ -9,10 +9,26 @@ follow [Semantic Versioning](https://semver.org/).
 - **A command that merely MENTIONED rekol's reindex script was still softened (#235, Codex).**
   Recognising it with `endswith` accepted `false && <path>/hooks/auto-reindex.sh`,
   `my-gate --config <path>/hooks/auto-reindex.sh` and `printf <path>/hooks/auto-reindex.sh`. Codex
-  **executed** the first and watched exit 1 become exit 0 — #235 through a different door. The whole
-  command must now be a single script invocation: the one suffix rekol appends is stripped, and what
-  remains has to be one path token ending in that script name, with no whitespace, shell operator or
-  quoting. All three shapes are negative controls, and the first is executed.
+  **executed** the first and watched exit 1 become exit 0 — #235 through a different door.
+  The next version required the whole command to be "one path token", as a character class — which
+  then accepted `false${IFS}<path>/hooks/auto-reindex.sh`: no whitespace in the string, a word break
+  the moment the shell expands it, and two commands where the installer counted one. Codex found
+  that too.
+  **Ownership is a positive allowlist now (product ruling, 2026-11-07),** because each round of
+  character class closed one shape and left the next one open: a class describes what we thought of,
+  not what we wrote. A command is rekol's only if, after stripping the one suffix rekol appends, it
+  is a supported prefix (`$HOME`, `${HOME}`, `~`, or an absolute path) followed by **literal** path
+  components — no `$`, `{`, `}`, backtick, quote, whitespace or operator — ending in
+  `/hooks/auto-reindex.sh`. A string that passes cannot expand into anything but itself, which is
+  the property the class never had. Anything else is **not ours and is left alone**: a wrong "not
+  ours" leaves a stale hook in place, which is much better than altering a command of the user's.
+  The list was checked against every form released versions actually wrote (git history plus the
+  v0.5.13 fixtures): the pre-rebrand and pre-#172 literal `$HOME/...` paths and today's absolute
+  tools-home path, each bare or with the suffix. Two forms the installer *can* write are refused and
+  said so in the code — a relative `--tools-home`, and a tools-home containing a space — because
+  both describe a hook that is already broken before rekol touches it. All four attack shapes are
+  negative controls and the two that gate on failure are **executed**, so "it stopped blocking"
+  cannot pass as a byte comparison.
 - **De-duplicating the reindex hook deleted hooks rekol does not own (#235, Codex).** It dropped
   whole later `PostToolUse` **blocks** whose text contained `auto-reindex.sh`, so a hook of the
   user's sharing such a block was **deleted** — worse than the softening this issue is about, since

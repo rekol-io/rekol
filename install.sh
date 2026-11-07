@@ -957,6 +957,14 @@ REKOL_OWN_COMMANDS_JSON="${REKOL_OWN_COMMANDS_JSON:-[]}"
 # failed collection and a settings.json that genuinely holds none of our hooks
 # would otherwise be indistinguishable, and the user would be left with hooks
 # that can fail their event.
+# UNTESTED BECAUSE UNREACHABLE, and said out loud rather than left looking
+# covered (product, 2026-11-07). Reaching this branch needs `DO_HOOK=1` with the
+# rendering step having produced no snippets at all -- but Step 6.9 `die`s on a
+# failed rendering and the allowlist above contributes entries with no snippets
+# at all, so no test here can get the set to `[]` without stubbing the two steps
+# that build it. It is kept as a fail-closed guard for a future edit that breaks
+# the collection, and as an honest claim about coverage: this is the one branch
+# in the ownership path with no test behind it.
 if [[ "$DO_HOOK" == "1" ]] && [[ "${REKOL_OWN_COMMANDS_JSON}" == "[]" ]]; then
   say "could not work out which hook commands are rekol's (no rendered snippets)." >&2
   say "  Skipping the soft-fail pass rather than guessing: nothing of yours is" >&2
@@ -986,21 +994,53 @@ REKOL_OWNERSHIP_JQ='
   # older install -- and the middle form MENTIONS rekol, so it was counted as
   # the user'"'"'s: a false "left 1 hook of your own" on upgrade (product).
   #
-  # THE WHOLE COMMAND MUST BE ONE SCRIPT INVOCATION (Codex P1, product ruling).
-  # `endswith` was not enough: it accepted `false && /tmp/hooks/auto-reindex.sh`,
-  # `my-gate --config /tmp/hooks/auto-reindex.sh` and
-  # `printf /tmp/hooks/auto-reindex.sh`. Codex EXECUTED the first and watched
-  # exit 1 become exit 0, which is #235 all over again.
+  # OWNERSHIP IS A POSITIVE ALLOWLIST OF FORMS WE REALLY WROTE (product ruling,
+  # 2026-11-07). Everything else is NOT OURS and is left alone.
   #
-  # So: strip the one suffix we append, and what remains must be a single path
-  # token ending in our script name -- no whitespace, no shell operator, no
-  # quoting. The only forms this installer has ever written are an UNQUOTED
-  # path, bare or followed by that suffix, which is why no quoted variant is
-  # accepted here. `$` and `{}` are allowed because the two pre-#172 forms are
-  # literal `$HOME/...` strings.
+  # The history of this one predicate is the argument for the ruling. It began
+  # as `endswith`, which accepted `false && /tmp/hooks/auto-reindex.sh`,
+  # `my-gate --config /tmp/...` and `printf /tmp/...`; Codex EXECUTED the first
+  # and watched exit 1 become exit 0, which is #235 all over again. It became a
+  # "single path token" character class, which then accepted
+  # `false${IFS}/tmp/hooks/auto-reindex.sh` -- no whitespace in the string, a
+  # space once the shell expands it, and two commands where we counted one.
+  # Each round closed one shape and left the class open to the next, because a
+  # character class describes what we have thought of, not what we wrote.
+  #
+  # So this describes what we wrote. A command is ours only if, after stripping
+  # the one suffix we append, it is exactly:
+  #
+  #     <prefix><literal components>/hooks/auto-reindex.sh
+  #
+  # MEASURED against every shipped form rather than assumed (git history +
+  # the v0.5.13 fixtures, 2026-11-07):
+  #   $HOME/.local/share/memory-tools/hooks/auto-reindex.sh   before the rebrand
+  #   $HOME/.local/share/rekol/hooks/auto-reindex.sh          until #172
+  #   <absolute tools-home>/hooks/auto-reindex.sh             since #172
+  # each bare or with ` 2>/dev/null || true`. The literal `$HOME` forms are why
+  # that prefix is allowed at all; since #172 bash expands the path before it is
+  # written, so the third form is a plain absolute path. `${HOME}` and `~` are
+  # accepted too, per the ruling, although no released version wrote either.
+  #
+  # The components allow NO expansion or substitution -- no `$`, `{`, `}`,
+  # backtick, quote, whitespace or shell operator -- so a string this accepts
+  # cannot expand into anything other than itself, which is the property the
+  # character class kept failing to have.
+  #
+  # TWO FORMS THIS INSTALLER CAN WRITE AND THIS LIST REFUSES, stated rather
+  # than quietly covered, because both describe a hook that is already broken:
+  #   * a RELATIVE `--tools-home` (or `REKOL_TOOLS_HOME`): no leading slash and
+  #     no `$HOME`, so the hook depends on the cwd of whatever launched Claude;
+  #   * a tools-home containing a SPACE: the command is written unquoted, so the
+  #     shell already splits it into two tokens.
+  # In both cases refusing is the safe direction -- a stale hook stays in place
+  # and nothing of the user is altered -- and softening a command we cannot
+  # parse as one invocation is precisely what #235 was.
   def is_our_reindex_script($c):
-    ($c | rtrimstr(" 2>/dev/null || true"))
-    | test("^[A-Za-z0-9_./~${}-]+/hooks/auto-reindex\\.sh$");
+    ("[A-Za-z0-9._-]+") as $component
+    | ("(\\$HOME|\\$\\{HOME\\}|~)?") as $prefix
+    | ($c | rtrimstr(" 2>/dev/null || true"))
+    | test("^" + $prefix + "(/" + $component + ")+/hooks/auto-reindex\\.sh$");
   def command_is_ours($c):
     (($own | index($c)) != null) or is_our_reindex_script($c);
 '
