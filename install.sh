@@ -901,6 +901,88 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
+# Step 6.94 — what counts as a hook command REKOL owns (#203, #235)
+# =============================================================================
+# Defined once, before any step needs it, and used by Step 6.96's softener and
+# Step 7Z's report. Two copies of this predicate is how #235 shipped: the
+# softener matched any command MENTIONING rekol, and the message that said we
+# had left the user's alone used a different test again.
+#
+# Defined unconditionally rather than inside a step, because settings.json may
+# not exist when Step 6.96 runs and does by the time Step 7Z does -- and an
+# unset program there would make jq fail, which reads as a count of zero.
+
+# The handler allowlist. One entry per handler rekol writes as
+#     <pre><invocation> <argtail><suffix>
+# for the commands built directly rather than rendered from a snippet.
+# `_hook stop-failure-record` is written by `rekol resume enable`, not by this
+# script, and is listed so an existing one is softened too.
+REKOL_OWNED_HOOKS_JSON='[
+  {"argtail":"_hook time-context"},
+  {"argtail":"_hook capture-nudge"},
+  {"argtail":"_hook record-stop"},
+  {"argtail":"_hook session-coverage"},
+  {"argtail":"_hook session-tasks"},
+  {"argtail":"_hook update-check"},
+  {"argtail":"_hook session-confidence"},
+  {"argtail":"_hook stop-failure-record"},
+  {"argtail":"review --nudge"},
+  {"pre":"nohup ","argtail":"session-index --incremental","suffix":" >/dev/null 2>&1 &"}
+]'
+
+# Every command this install writes, as exact strings. The rendered snippets
+# are the authority for the ones with no path variability -- the memory
+# loader, the SessionEnd notice, the auto-reindex script -- because they are
+# the very files the merge steps are about to install.
+REKOL_OWN_COMMANDS_JSON='[]'
+if [[ -n "${RENDERED_HOOK_DIR}" ]] && compgen -G "${RENDERED_HOOK_DIR}/*.json" >/dev/null 2>&1; then
+  REKOL_OWN_COMMANDS_JSON="$(
+    jq -s --arg rekol "${REKOL_INVOCATION}" \
+          --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
+      def variants: . as $c
+        | [$c, ($c | rtrimstr(" 2>/dev/null || true"))];
+      [ ( .[] | .. | objects | select(has("command")) | .command ),
+        ( $owned[]
+          | ((.pre // "") + "\"" + $rekol + "\" " + .argtail
+             + (.suffix // " 2>/dev/null || true")) )
+      ]
+      | map(variants) | add | map(select(. != "")) | unique
+    ' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null || printf '[]'
+  )"
+fi
+REKOL_OWN_COMMANDS_JSON="${REKOL_OWN_COMMANDS_JSON:-[]}"
+
+# ONE DEFINITION of "this command is rekol's", prepended to both programs
+# below -- the softener and the count. Two copies of a predicate is how #235
+# shipped in the first place.
+#
+# BIND THE COMMAND FIRST. `$own | index(.command)` re-binds `.` to $own inside
+# the index argument, so it looked up $own.command -- null -- and the
+# predicate was false for everything. Nothing was softened and the count was
+# 0, which on a pristine install is the right answer for the wrong reason:
+# exactly the check whose output is identical whether or not it works.
+REKOL_OWNERSHIP_JQ='
+  # Our own reindex script, recognised by the name WE install it under,
+  # because its directory has changed three times (measured in git history,
+  # 2026-11-07):
+  #   $HOME/.local/share/memory-tools/hooks/auto-reindex.sh   before the rebrand
+  #   $HOME/.local/share/rekol/hooks/auto-reindex.sh          until #172
+  #   <tools-home>/hooks/auto-reindex.sh                      since #172
+  # The third is whatever --tools-home was AT THE TIME, not necessarily this
+  # install'"'"'s. So exact equality against today'"'"'s rendering cannot match an
+  # older install -- and the middle form MENTIONS rekol, so it was counted as
+  # the user'"'"'s: a false "left 1 hook of your own" on upgrade (product).
+  #
+  # Anchored at the END, with only the directory free. A command ending in
+  # /hooks/auto-reindex.sh is ours by the script name, which nothing else
+  # installs; the de-duplication step already keys on that same name.
+  def is_our_reindex_script($c):
+    ($c | rtrimstr(" 2>/dev/null || true")) | endswith("/hooks/auto-reindex.sh");
+  def command_is_ours($c):
+    (($own | index($c)) != null) or is_our_reindex_script($c);
+'
+
+# =============================================================================
 # Step 6.95 — MIGRATE existing bare `rekol` hook commands in settings.json (#159)
 # =============================================================================
 # This step is what makes #159 safe to ship. Without it, changing the command
@@ -1031,53 +1113,8 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
   # WITHOUT adding the tail, and this step is what adds it. Matching only the
   # tailed form would leave such a hook unsoftened forever.
   #
-  # The handler allowlist. One entry per handler rekol writes as
-  #     <pre><invocation> <argtail><suffix>
-  # for the commands built directly rather than rendered from a snippet.
-  # `_hook stop-failure-record` is written by `rekol resume enable`, not by this
-  # script, and is listed so an existing one is softened too.
-  REKOL_OWNED_HOOKS_JSON='[
-    {"argtail":"_hook time-context"},
-    {"argtail":"_hook capture-nudge"},
-    {"argtail":"_hook record-stop"},
-    {"argtail":"_hook session-coverage"},
-    {"argtail":"_hook session-tasks"},
-    {"argtail":"_hook update-check"},
-    {"argtail":"_hook session-confidence"},
-    {"argtail":"_hook stop-failure-record"},
-    {"argtail":"review --nudge"},
-    {"pre":"nohup ","argtail":"session-index --incremental","suffix":" >/dev/null 2>&1 &"}
-  ]'
-
-  # Every command this install writes, as exact strings. The rendered snippets
-  # are the authority for the ones with no path variability -- the memory
-  # loader, the SessionEnd notice, the auto-reindex script -- because they are
-  # the very files the merge steps are about to install.
-  REKOL_OWN_COMMANDS_JSON='[]'
-  if [[ -n "${RENDERED_HOOK_DIR}" ]] && compgen -G "${RENDERED_HOOK_DIR}/*.json" >/dev/null 2>&1; then
-    REKOL_OWN_COMMANDS_JSON="$(
-      jq -s --arg rekol "${REKOL_INVOCATION}" \
-            --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
-        def variants: . as $c
-          | [$c, ($c | rtrimstr(" 2>/dev/null || true"))];
-        [ ( .[] | .. | objects | select(has("command")) | .command ),
-          ( $owned[]
-            | ((.pre // "") + "\"" + $rekol + "\" " + .argtail
-               + (.suffix // " 2>/dev/null || true")) )
-        ]
-        | map(variants) | add | map(select(. != "")) | unique
-      ' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null || printf '[]'
-    )"
-  fi
-  REKOL_OWN_COMMANDS_JSON="${REKOL_OWN_COMMANDS_JSON:-[]}"
-
-  SOFTEN_PROG='
-    # BIND THE COMMAND FIRST. `$own | index(.command)` re-binds `.` to $own
-    # inside the index argument, so it looked up $own.command -- null -- and the
-    # predicate was false for everything. Nothing was softened and the count was
-    # 0, which on a pristine install is the right answer for the wrong reason:
-    # exactly the check whose output is identical whether or not it works.
-    def is_ours: (.command? // "") as $c | ($own | index($c)) != null;
+  SOFTEN_PROG="${REKOL_OWNERSHIP_JQ}"'
+    def is_ours: (.command? // "") as $c | command_is_ours($c);
     def soften:
       if is_ours
       then if (.command | test("\\|\\| true$")) then .            # already guarded
@@ -1123,30 +1160,6 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
     say "rekol hooks already soft-fail and de-duplicated — no-op"
   fi
 
-  # NOT inside the "we changed something" branch, which is where this lived at
-  # first and why it never printed: the wiring step already writes rekol's hooks
-  # soft-failing, so the softener no-ops on an ordinary install and the whole
-  # branch is skipped. A message whose absence is indistinguishable from success
-  # is the defect this project keeps shipping, and I had just reproduced it.
-  #
-  # Reported on every run where such a hook exists, because "we left yours
-  # alone" is the fact a user needs after #235 was released softening them.
-  if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
-    local_not_ours="$(jq -r --argjson own "${REKOL_OWN_COMMANDS_JSON}" '
-      [.. | objects | select(has("command"))
-       | .command
-       | select(test("rekol|REKOL"))
-       | . as $c
-       | select(($own | index($c)) == null)]
-      | length' "${SETTINGS_JSON}" 2>/dev/null || printf 0)"
-    local_not_ours="${local_not_ours:-0}"
-    if [[ "${local_not_ours}" -gt 0 ]]; then
-      say "left ${local_not_ours} hook(s) of your own that mention rekol untouched:"
-      say "  they are not rekol invocations, so their exit status and stderr are"
-      say "  preserved — a blocking hook of yours still blocks."
-      log_journal "PRESERVED ${local_not_ours} non-owned hook(s) in ${SETTINGS_JSON} (#235)"
-    fi
-  fi
 fi
 
 # =============================================================================
@@ -1753,6 +1766,29 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "added SessionEnd review-nudge handler to ${SETTINGS_JSON}"
   fi
 fi
+
+# =============================================================================
+# Step 7Z — DELIBERATELY NOT REPORTING "we left N hooks of yours alone" (#235)
+# =============================================================================
+# This report was written, measured, and REMOVED. Keeping the reasoning because
+# the obvious thing to do next is to add it back.
+#
+# The claim it makes is "of the commands mentioning rekol, these are yours and
+# we left them as they were". Answering it needs the ability to tell a LEGACY
+# rekol rendering apart from a user's command — and on this branch that does not
+# exist yet. Measured on a v0.5.13 upgrade fixture with no user hooks planted:
+# the report said `left 4`, and all four were rekol's own hooks still in the
+# `$(command -v rekol || echo …)` form, because Step 6.95 here only rewrites the
+# pre-#159 bare invocation. QA measured the same thing as `left 3` before this.
+#
+# So the report would be wrong in exactly the direction that matters: it tells a
+# user with no hooks of their own that we touched, or spared, something.
+#
+# Where it belongs is #203, whose Step 6.95 carries the allowlist that defines
+# every rendering this installer has produced — the only thing that can answer
+# the question. It lands there, with the v0.5.13 upgrade fixture below as its
+# test. What #235 owns is narrower and complete without it: the softener no
+# longer touches a command that is not ours.
 
 # =============================================================================
 # Step 8 — (removed) sync-ignore file for the local vector index

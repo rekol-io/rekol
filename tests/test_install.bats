@@ -1593,28 +1593,16 @@ JSON
     echo "FAIL: the user's hook lost its stderr, so Claude Code sees no block reason"
     echo "  stderr was: $(cat "$user_err")"; false; }
 
-  # ...and the install SAYS it left it alone. Asserted because my first version
-  # of this diagnostic sat inside the softener's "we changed something" branch,
-  # which never runs on an ordinary install (the wiring step already writes
-  # rekol's hooks soft-failing), so it printed nothing — and this test passed
-  # anyway, because it only checked byte-identity. A message whose absence is
-  # indistinguishable from success is the defect this project keeps shipping.
-  [[ "$output" == *"hook(s) of your own that mention rekol untouched"* ]] || {
-    echo "FAIL: the install did not report leaving the user's hook alone"
-    echo "$output" | tail -25; false; }
-  [[ "$output" == *"still blocks"* ]] || {
-    echo "FAIL: the report does not say the user's hook still blocks"; false; }
-
-  # THE COUNT MUST BE EXACT (product, 2026-11-07). My first predicate missed two
-  # of rekol's OWN commands -- `@TOOLS_HOME@/hooks/auto-reindex.sh …`, which
-  # starts with a path, and SessionEnd's `if [ -n "${REKOL_HOME:-…` -- so this
-  # line appeared on a pristine install and told a user with no hooks of their
-  # own that we had left theirs alone. One real user hook is wired here, so the
-  # count has to be exactly one.
-  [[ "$output" == *"left 1 hook(s) of your own"* ]] || {
-    echo "FAIL: the preserved count is not exactly 1"
-    echo "$output" | grep -i "of your own" || echo "  (no count line at all)"
-    false; }
+  # NO REPORT IS ASSERTED HERE ANY MORE. The "we left N hooks of yours alone"
+  # line was written, measured and REMOVED from this step: answering it needs
+  # the ability to tell a LEGACY rekol rendering from a user's command, which
+  # lands with #203. On a v0.5.13 upgrade with no user hooks planted it said
+  # `left 4`, and all four were rekol's own hooks still in the
+  # `$(command -v rekol || echo …)` form. QA measured the same as `left 3`.
+  #
+  # What this test owns is the BEHAVIOUR, which is complete without a message:
+  # the user's hook is byte-identical, still exits non-zero, and keeps its
+  # stderr. Those are asserted above and below.
 
   # DIRECTION 2: rekol's OWN hooks must still be soft-failing, or a broken
   # install can fail a UserPromptSubmit and lock the user out of Claude Code.
@@ -1735,4 +1723,74 @@ JSON
   [ "$rc" -ne 0 ] || { echo "FAIL: the user's gate stopped blocking (exit 0)"; false; }
   grep -q "BLOCKED by my gate" "$stderr_file" \
     || { echo "FAIL: the gate's stderr was discarded"; cat "$stderr_file"; false; }
+}
+
+@test "upgrading a v0.5.13 install with NO user hooks reports none of your own (#235)" {
+  # QA measured `left 3` on the first install and `left 2` on the second, with
+  # no hooks of their own planted. All three were rekol's, and the count dropped
+  # because it ran in the MIDDLE of the install:
+  #
+  #   * the old SessionStart loader, before Step 7 adds its `: rekol:backend=`
+  #     marker -- the one that disappeared on the second run
+  #   * `<tools-home>/hooks/auto-reindex.sh`, whose command starts with a path
+  #   * SessionEnd's `if [ -n "${REKOL_HOME:-...` notice
+  #
+  # The report runs after every hook-rewriting step now, so it describes the
+  # state the install actually leaves. This fixture is the v0.5.13 hook shapes.
+  SBHOME="$TESTROOT/sandhome-v0513"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-v0513"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # The loader WITHOUT the `: rekol:backend=` marker, the old PATH-first
+  # handlers, the old auto-reindex path, and the SessionEnd notice.
+  old_inv="\"\$(command -v rekol || echo '/old/bin/rekol')\""
+  loader="HOME_DIR=\"\${REKOL_HOME:-\$MEMORY_HOME}\"; IDX=\"\$HOME_DIR/REKOL.md\"; if [ -n \"\$HOME_DIR\" ] && [ -f \"\$IDX\" ]; then cat \"\$IDX\"; fi; ${old_inv} _hook session-confidence 2>/dev/null || true"
+  jq -n --arg loader "$loader" \
+        --arg tasks "${old_inv} _hook session-tasks 2>/dev/null || true" \
+        --arg reindex '$HOME/.local/share/rekol/hooks/auto-reindex.sh' \
+        --arg notice 'if [ -n "${REKOL_HOME:-$MEMORY_HOME}" ]; then echo '"'"'[rekol] session ended — if you learned something durable, run `rekol capture` (see the memory skill)'"'"'; fi' \
+        --arg nudge "${old_inv} review --nudge 2>/dev/null || true" \
+    '{hooks:{
+      SessionStart:[{matcher:"",hooks:[{type:"command",command:$loader},
+                                       {type:"command",command:$tasks}]}],
+      PostToolUse:[{matcher:"Edit|Write",hooks:[{type:"command",command:$reindex}]}],
+      SessionEnd:[{matcher:"",hooks:[{type:"command",command:$notice},
+                                      {type:"command",command:$nudge}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  jq -e . "$SBHOME/.claude/settings.json" >/dev/null || { echo "bad fixture"; false; }
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: an upgrade with no user hooks claims it preserved some"
+    echo "$output" | grep -i "of your own"
+    jq -r '[.. | objects | .command? // empty | select(test("rekol|REKOL"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+
+  # The legacy loader must end SOFT-FAILING. Before #239 the softener caught it
+  # by mention; now it does not match, so Step 7's whole-command replacement is
+  # what has to deliver it (product asked for this confirmed, not assumed).
+  after_loader="$(jq -r '[.. | objects | .command? // empty
+      | select(test("REKOL.md") and test("REKOL_HOME:-"))] | .[0]' \
+      "$SBHOME/.claude/settings.json")"
+  [ -n "$after_loader" ] && [ "$after_loader" != "null" ] || {
+    echo "FAIL: the memory loader is gone after the upgrade"; false; }
+  [[ "$after_loader" == *"|| true"* ]] || {
+    echo "FAIL: the upgraded loader is not soft-failing: $after_loader"; false; }
+  [[ "$after_loader" == *": rekol:backend=install.sh"* ]] || {
+    echo "FAIL: the loader was not upgraded to the marked form"; false; }
+
+  # And the old auto-reindex path is recognised as ours, not reported as yours.
+  reindex_count="$(jq -r '[.. | objects | .command? // empty
+      | select(test("auto-reindex\\.sh"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$reindex_count" -ge 1 ] || { echo "FAIL: the auto-reindex hook vanished"; false; }
 }

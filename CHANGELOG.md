@@ -29,7 +29,19 @@ follow [Semantic Versioning](https://semver.org/).
   this ship: a user's blocking hook is byte-identical and still exits non-zero with its stderr
   intact, and rekol's own hook still exits 0 with its binary removed, which is the failure that
   could otherwise fail a `UserPromptSubmit` and lock someone out of Claude Code.
-  The install now also reports how many hooks of yours it left alone, and says they still block.
+  **The "we left N hooks of yours alone" report was written, measured and removed.** Answering that
+  needs the ability to tell a *legacy* rekol rendering from a user's command, and this change does
+  not have it: on a v0.5.13 upgrade fixture with **no user hooks planted** it said `left 4`, and all
+  four were rekol's own handlers still in the `$(command -v rekol || echo …)` form, because Step 6.95
+  here only rewrites the pre-#159 bare invocation. QA measured the same thing as `left 3`, where the
+  third was the old SessionStart loader before a later step adds its `: rekol:backend=` marker — the
+  count was running in the middle of the install and describing a state that no longer existed by the
+  end. It lands with #203, whose allowlist defines every rendering this installer has produced. What
+  this change owns is narrower and complete without it: the softener no longer touches a command that
+  is not rekol's.
+  Also recognised as rekol's: `<tools-home>/hooks/auto-reindex.sh`, by the script name rather than
+  the path, because that path has changed three times (`memory-tools` before the rebrand, then
+  `$HOME/.local/share/rekol`, then `--tools-home`) and an older install's string is not this one's.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
