@@ -598,3 +598,53 @@ def test_launcher_tolerates_a_cwd_that_no_longer_exists(tmp_path: Path) -> None:
     log = tmp_path / "launch.log"
     # `claude` is absent in CI, so this exercises the guard, not a real launch.
     assert _launch_detached("sess-1", log, cwd=str(tmp_path / "gone")) in (True, False)
+
+
+def _install_sh_allowlist() -> list[dict]:
+    """The hook allowlist Step 6.95 of ``install.sh`` migrates against.
+
+    Read out of the script rather than duplicated here, because a copy is what
+    drift looks like. The block holds no apostrophes by construction — one would
+    terminate the single-quoted ``jq`` program it is passed to — so stripping
+    them leaves valid JSON.
+    """
+    install_sh = Path(__file__).resolve().parent.parent / "install.sh"
+    lines = install_sh.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("  REKOL_OWNED_HOOKS_JSON="))
+    end = next(i for i, line in enumerate(lines) if i > start and line.strip() == "]'")
+    block = "\n".join(lines[start : end + 1])
+    block = block.split("=", 1)[1].replace("'", "")
+    return json.loads(block)
+
+
+def test_resume_renders_the_hook_form_install_sh_knows_how_to_upgrade(monkeypatch) -> None:
+    """``resume enable`` and ``install.sh`` must not drift apart.
+
+    ``install.sh`` never writes the freeze-recorder hook — ``rekol resume
+    enable`` does — yet Step 6.95's allowlist carries ``_hook
+    stop-failure-record`` so that an existing one can be upgraded off the
+    PATH-first invocation (#203). That only holds while this renderer keeps
+    producing the exact shape the migration matches, and nothing else connects
+    the two files. So this test is the connection: it builds the accepted form
+    from the allowlist and compares.
+    """
+    from rekol import cli_resume
+
+    monkeypatch.setattr(cli_resume, "_rekol_executable", lambda: "/some/where/bin/rekol")
+    rendered = cli_resume._hook_command()
+
+    entries = _install_sh_allowlist()
+    tails = [e["argtail"] for e in entries]
+    assert "_hook stop-failure-record" in tails, (
+        "install.sh no longer migrates the freeze-recorder hook, so an existing "
+        f"one can never be upgraded off the old invocation. Allowlist: {tails}"
+    )
+    entry = next(e for e in entries if e["argtail"] == "_hook stop-failure-record")
+    head = (entry.get("pre") or "") + "\"$(command -v rekol || echo '"
+    foot = "')\" " + entry["argtail"] + (entry.get("suffix") or " 2>/dev/null || true")
+
+    assert rendered.startswith(head) and rendered.endswith(foot), (
+        "resume enable writes a hook command install.sh cannot recognise:\n"
+        f"  rendered: {rendered}\n  expects:  {head}<path>{foot}"
+    )
+    assert rendered == head + "/some/where/bin/rekol" + foot

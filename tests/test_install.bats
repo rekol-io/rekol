@@ -1868,3 +1868,193 @@ JSON
     echo "FAIL: the known gap is not named, so the user cannot act on it"
     echo "$output" | tail -20; false; }
 }
+
+@test "the migration rewrites ONLY whole commands rekol itself renders (#203)" {
+  # The exact-match contract, as four controls and two positives.
+  #
+  # This matcher had three rounds of near-misses, each shipped as a refinement of
+  # the same regex, and each time a reviewer found another command it should not
+  # have touched. The rule is now an equality: the WHOLE command has to be a
+  # rendering the installer produces for a handler on its allowlist, with only
+  # the recorded path free to differ. The controls below are the shapes a pattern
+  # kept getting wrong.
+  SBHOME="$TESTROOT/sandhome-exact"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-exact"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # POSITIVE 1  ours, with the soft-fail tail                     -> upgraded
+  # POSITIVE 2  ours, recorded path contains a close-paren        -> upgraded
+  #             (a pattern that stops at the first `)` truncates it; splitting
+  #             on the literal text either side of the path does not)
+  # CONTROL A   a literal STRING holding the old form and a real handler name
+  # CONTROL B   ours, plus an option rekol does not pass
+  # CONTROL C   a handler name rekol does not own
+  # CONTROL D   the user's own command, which merely mentions rekol
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionStart":[{"matcher":"","hooks":[
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/bin/rekol')\" _hook session-tasks 2>/dev/null || true"},
+  {"type":"command","command":"\"$(command -v rekol || echo '/tmp/a)b/bin/rekol')\" _hook update-check 2>/dev/null || true"},
+  {"type":"command","command":"printf '%s\\n' '\"$(command -v rekol || echo /x)\" _hook time-context 2>/dev/null || true'"},
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/bin/rekol')\" _hook time-context --verbose 2>/dev/null || true"},
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/bin/rekol')\" _hook not-ours 2>/dev/null || true"},
+  {"type":"command","command":"my-tool --uses rekol --flag"}
+]}]}}
+JSON
+  jq -e . "$SBHOME/.claude/settings.json" >/dev/null || {
+    echo "FAIL: the fixture itself is not valid JSON"; false; }
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  all_cmds="$(jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json")"
+
+  # REQUIRE THE UPGRADE, not installer exit 0: a swallowed jq error leaves the
+  # migration unapplied while the installer still succeeds (Codex).
+  for want in "_hook session-tasks" "_hook update-check"; do
+    upgraded="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
+                 | select(contains($w) and contains("if [ -x"))] | length' \
+               "$SBHOME/.claude/settings.json")"
+    [ "$upgraded" -ge 1 ] || {
+      echo "FAIL: the owned $want hook was NOT upgraded"; echo "$all_cmds"; false; }
+  done
+
+  # And no trace of the old form is left on either positive.
+  stale="$(jq -r '[.. | objects | .command? // empty
+            | select((contains("_hook session-tasks") or contains("_hook update-check"))
+                     and contains("command -v rekol || echo"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$stale" -eq 0 ] || {
+    echo "FAIL: an owned hook still carries the old form"; echo "$all_cmds"; false; }
+
+  # CONTROLS: the old text intact, and in particular NOT carrying the new
+  # invocation. The fragments are chosen to be UNIQUE to each control: "printf"
+  # is not, because the new invocation itself contains `printf %s`, so the
+  # memory loader matched and the check failed on the wrong command.
+  #
+  # Byte-identity is deliberately NOT asserted here. On this branch Step 6.96
+  # still appends ` 2>/dev/null || true` to anything mentioning rekol (#235), so
+  # these come back changed by a LATER step. What this test owns is that Step
+  # 6.95 did not rewrite the invocation; #235 owns the soft-fail boundary.
+  for frag in "echo /x" "--verbose" "_hook not-ours"; do
+    kept="$(jq -r --arg f "$frag" '[.. | objects | .command? // empty
+             | select(contains($f) and contains("command -v rekol || echo"))] | length' \
+           "$SBHOME/.claude/settings.json")"
+    [ "$kept" -eq 1 ] || {
+      echo "FAIL: rekol rewrote a command it does not own: $frag"; echo "$all_cmds"; false; }
+    rewritten="$(jq -r --arg f "$frag" '[.. | objects | .command? // empty
+                  | select(contains($f) and contains("if [ -x"))] | length' \
+                "$SBHOME/.claude/settings.json")"
+    [ "$rewritten" -eq 0 ] || {
+      echo "FAIL: $frag was rewritten to the new invocation"; echo "$all_cmds"; false; }
+  done
+  users="$(jq -r '[.. | objects | .command? // empty
+            | select(contains("my-tool --uses rekol"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$users" -eq 1 ] || {
+    echo "FAIL: the user's own command did not survive"; echo "$all_cmds"; false; }
+
+  # The skip is reported, and counted as OCCURRENCES: three commands here still
+  # carry the old text, and `grep -c` counts LINES, which on a jq-formatted file
+  # agrees only by accident.
+  [[ "$output" == *"this migration step did not rewrite them"* ]] || {
+    echo "FAIL: the preserved occurrences were not reported"; echo "$output" | tail -20; false; }
+  [[ "$output" == *"left 3 occurrence(s)"* ]] || {
+    echo "FAIL: the preserved COUNT is wrong (expected 3)"
+    echo "$output" | grep -i "occurrence" || echo "  (no occurrence line at all)"
+    false; }
+}
+
+@test "the preserved-count report runs even when NOTHING was migrated (#203)" {
+  # The case that matters most, and the one the report used to miss: a
+  # settings.json holding only commands rekol does not own. The migration
+  # correctly changes nothing, so the whole "we changed something" branch is
+  # skipped — and the diagnostic used to live inside it, which made its silence
+  # indistinguishable from having nothing to say.
+  SBHOME="$TESTROOT/sandhome-nomig"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-nomig"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/bin/rekol')\" _hook not-ours 2>/dev/null || true"},
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/bin/rekol')\" gate --strict"}
+]}]}}
+JSON
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [[ "$output" == *"left 2 occurrence(s)"* ]] || {
+    echo "FAIL: nothing was migrated, so the skip report did not run"
+    echo "$output" | grep -i "occurrence" || echo "  (no occurrence line at all)"
+    false; }
+  [[ "$output" == *"#235"* ]] || {
+    echo "FAIL: the known gap is not named, so the user cannot act on it"; false; }
+}
+
+@test "the migration allowlist covers every hook command a fresh install writes (#203)" {
+  # THE DRIFT GUARD. The matcher is an exact comparison against an allowlist, so
+  # a handler added to the installer and not to that list would be left
+  # un-upgradeable forever — which is the failure #203 itself was. Rather than
+  # trusting two lists to be edited together, this reads what a real install
+  # WROTE and requires every rekol command in it to be an allowlist entry.
+  SBHOME="$TESTROOT/sandhome-drift"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-drift"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # The allowlist, read out of install.sh itself. It holds no apostrophes by
+  # construction (they would end the single-quoted jq program), so stripping
+  # them is safe and leaves valid JSON.
+  allow="$(sed -n "/REKOL_OWNED_HOOKS_JSON=/,/^  ]'/p" "$COMPONENT_DIR/install.sh" \
+           | sed "s/.*REKOL_OWNED_HOOKS_JSON=//" | tr -d "'")"
+  echo "$allow" | jq -e 'type == "array" and length > 0' >/dev/null || {
+    echo "FAIL: could not read the allowlist out of install.sh"; echo "$allow"; false; }
+
+  # Every command the install wrote that STARTS with rekol's new invocation.
+  # The memory loader starts with its own sentinel, so it is excluded here for
+  # the same reason it is off the allowlist: Step 7 upgrades it whole.
+  written="$(jq -r '[.. | objects | .command? // empty
+      | select(startswith("nohup \"$(if [ -x") or startswith("\"$(if [ -x"))] | .[]' \
+      "$SBHOME/.claude/settings.json")"
+  [ -n "$written" ] || { echo "FAIL: the install wrote no rekol hook commands"; false; }
+
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    tail_text="${cmd#*fi)\" }"
+    [ "$tail_text" != "$cmd" ] || {
+      echo "FAIL: could not split the invocation off: $cmd"; false; }
+    found="$(echo "$allow" | jq -r --arg t "$tail_text" '
+        [ .[] | (.argtail + (.suffix // " 2>/dev/null || true")) ] | index($t) // "no"')"
+    [ "$found" != "no" ] || {
+      echo "FAIL: the installer writes a hook that is NOT on the migration allowlist."
+      echo "  command tail: [$tail_text]"
+      echo "  allowlist:    $(echo "$allow" | jq -c '[.[] | .argtail]')"
+      echo "  Add it to REKOL_OWNED_HOOKS_JSON in install.sh, or an existing"
+      echo "  install can never be upgraded off the old invocation."
+      false; }
+  done <<< "$written"
+}

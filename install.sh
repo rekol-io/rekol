@@ -954,7 +954,7 @@ if [[ "$DO_HOOK" == "1" ]]; then
 fi
 
 # =============================================================================
-# Step 6.95 — MIGRATE existing bare `rekol` hook commands in settings.json (#159)
+# Step 6.95 — UPGRADE hook commands this installer wrote earlier (#159, #203)
 # =============================================================================
 # This step is what makes #159 safe to ship. Without it, changing the command
 # text actively breaks existing installs, because the five merge steps disagree
@@ -973,47 +973,131 @@ fi
 # Rewriting in place (rather than uninstall + reinstall) preserves any hooks the
 # user added or customised themselves — a blind uninstall would drop those.
 #
-# Only these exact invocations are rewritten. Prose mentions inside echo strings
-# (e.g. run `rekol capture`) are deliberately left alone, and the replacement is
-# literal, so it is naturally idempotent: once rewritten, `rekol <subcmd>` no
-# longer appears as a contiguous substring.
+# EXACT FORMS, NOT A PATTERN (product's redirect, 2026-11-06). This matcher went
+# through three rounds of near-misses: a `gsub` of the old substitution anywhere
+# in a command, then a shell-context guess, then an ownership regex. Each round
+# shipped, and each time a reviewer found another command it should not have
+# touched — a `printf` that merely prints the text, a user's own command built on
+# the same substitution. The lesson is not that the regex needed one more
+# refinement. A pattern cannot express "we wrote this"; an equality can.
+#
+# So: a command is rewritten only when the WHOLE string equals a rendering this
+# installer produces for a handler on the allowlist below, with the only freedom
+# being the recorded path inside the old invocation (an existing install
+# recorded whatever BIN_DIR was then, which is not necessarily this one).
+# Anything else is left byte-for-byte alone and counted, so the skip is visible.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS_JSON}" ]]; then
+  # THE ALLOWLIST. One entry per handler whose command rekol writes, in the shape
+  #
+  #     <pre><invocation> <argtail><suffix>
+  #
+  # `pre` defaults to empty and `suffix` to the soft-fail tail Step 6.96 appends;
+  # the SessionEnd indexer is backgrounded instead and carries its own.
+  #
+  # NOT HERE, deliberately:
+  #   * The memory loader. Its command is a paragraph of shell that has gained
+  #     content over releases, so no exact form can match an older install.
+  #     Step 7 upgrades it by replacing the whole command, recognised by the
+  #     stable `REKOL.md` + `REKOL_HOME:-` markers — and its trailing
+  #     `_hook session-confidence` invocation goes with it, which is why that
+  #     handler is absent below.
+  #   * `_hook context-watch`, which is a statusline recorder, not a hook.
+  #
+  # `_hook stop-failure-record` IS here even though install.sh never writes it:
+  # `rekol resume enable` does, in exactly the old PATH-first shape, so it
+  # carries the same #203 defect. A pytest pins that renderer to this form so
+  # the two cannot drift apart silently.
+  REKOL_OWNED_HOOKS_JSON='[
+    {"argtail":"_hook time-context"},
+    {"argtail":"_hook capture-nudge"},
+    {"argtail":"_hook record-stop"},
+    {"argtail":"_hook session-coverage"},
+    {"argtail":"_hook session-tasks"},
+    {"argtail":"_hook update-check"},
+    {"argtail":"_hook stop-failure-record"},
+    {"argtail":"review --nudge"},
+    {"pre":"nohup ","argtail":"session-index --incremental","suffix":" >/dev/null 2>&1 &"}
+  ]'
+
+  # NO APOSTROPHE MAY APPEAR INSIDE THE jq PROGRAM BELOW. The program is a
+  # single-quoted bash string, so one apostrophe ends it and the rest of the
+  # script becomes an unterminated quote — `bash -n` reported the failure 1100
+  # lines later, at EOF. The old invocation that has to be matched is full of
+  # them, so the three apostrophe-bearing literals are built here and passed in
+  # with --arg, which also keeps them out of any expansion.
+  REKOL_SQ="'"
+  REKOL_OLD_HEAD="\"\$(command -v rekol || echo ${REKOL_SQ}"
+  REKOL_OLD_FOOT="${REKOL_SQ})\" "
+
   # `|| true` matters: under `set -e` a failing command substitution ABORTS the
   # install. A migration that cannot run must be skipped, never fatal — repairing
   # old hooks is a best-effort courtesy, not a precondition for installing.
   # (Caught by the uninstall suite: install died right here after an uninstall.)
-  # The PREVIOUS rendering, which Step 6.95 originally did not touch (Codex,
-  # 2026-11-06). Existing installs carry `$(command -v rekol || echo '<path>')`,
-  # which is PATH-first: an orphaned `rekol` earlier on PATH wins over the
-  # install's own binary. The bare-`rekol` rewrite below cannot reach it, and the
-  # handler-presence checks then see a correctly-named handler and no-op, so a
-  # reinstall left every such hook exactly as it was. Only the memory loader was
-  # upgraded, which is why this looked fixed. Upgrading it here is what makes the
-  # reinstall remedy true for installs that already exist.
   #
-  # Matched by pattern, not by exact text, because the recorded path in an
-  # existing install is whatever BIN_DIR was then — possibly not this one.
-  #
-  # OWNERSHIP BOUNDARY (Codex, 2026-11-06). The first version matched the old
-  # substitution anywhere in a command string, with no shell-context or
-  # ownership check — so it rewrote things rekol does not own: a
-  # `printf "%s\n" '$(command -v rekol || echo ...)'` that merely PRINTS the
-  # text, and a user's own `… my-custom-thing` invocation. This step writes to
-  # the user's settings.json, so it must only touch invocations that are ours.
-  #
-  # The boundary is the subcommand that follows: the substitution must be
-  # immediately followed by `" ` and one of OUR subcommands. Anything else is
-  # left exactly as it is, and counted so the skip can be reported.
-  REKOL_OLD_INVOCATION_RE="\\\$\\(command -v rekol \\|\\| echo '[^']*'\\)\" (?<sub>_hook [a-z][a-z-]*|review --nudge|session-index --incremental)"
+  # The invocation is passed with --arg, never interpolated into the program: it
+  # contains `$(`, `'` and `|`, and every attempt to splice it in has produced a
+  # different quoting bug.
   MIGRATED="$(
     jq --arg rekol "${REKOL_INVOCATION}" \
-       --arg oldform "${REKOL_OLD_INVOCATION_RE}" '
-      ["_hook time-context","_hook record-stop","_hook session-confidence",
-       "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
-       "_hook stop-failure-record","_hook update-check",
-       "review --nudge","session-index --incremental"]
-      as $subs
+       --arg sq "${REKOL_SQ}" \
+       --arg oldhead "${REKOL_OLD_HEAD}" \
+       --arg oldfoot "${REKOL_OLD_FOOT}" \
+       --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
+      # Every WHOLE-STRING rendering rekol has ever written for each handler.
+      #
+      # Two legacy invocations, both of which this installer produced:
+      #   pre-#159      rekol <argtail>                        (unquoted, bare)
+      #   #159 … #203   the quoted command -v form, with a recorded path
+      #
+      # and two tails, because Step 6.96 only began appending ` 2>/dev/null ||
+      # true` in #183 — an install older than that stored the command without it,
+      # and that form must still be recognised or the handler-presence checks see
+      # a correctly-named hook and no-op on it forever.
+      def forms:
+        . as $e
+        | ($e.pre // "") as $pre
+        | ($e.suffix // " 2>/dev/null || true") as $suf
+        | ($pre + "\"" + $rekol + "\" " + $e.argtail + $suf) as $new
+        | [$suf, ""][]
+        | . as $tail
+        | {
+            new: $new,
+            # pre-#159: an exact string, no freedom at all.
+            bare: ($pre + "rekol " + $e.argtail + $tail),
+            # #159…#203: exact either side of the recorded path.
+            head: ($pre + $oldhead),
+            foot: ($oldfoot + $e.argtail + $tail)
+          };
+
+      # Does this command equal one of those renderings? The recorded path is the
+      # only part allowed to vary, and it is read by SPLITTING on the literal text
+      # either side of it rather than by a pattern — so a path containing `)` or a
+      # shell metacharacter is handled, and a path containing an apostrophe is
+      # refused
+      # because the renderer that wrote these did not escape it, so such a command
+      # was never one of ours -- that breakage is #222, and an unparseable hook
+      # is not something this step can repair by guessing.
+      def upgraded($forms):
+        . as $c
+        | (first(
+            $forms[]
+            # Bound to variables, not read as `.head`: inside the slice below the
+            # input is the COMMAND, so `.head` there indexes a string and jq dies
+            # with "Cannot index string with string".
+            | .head as $h | .foot as $f | .bare as $bare | .new as $new
+            | select(
+                ($c == $bare)
+                or (($c | startswith($h))
+                    and ($c | endswith($f))
+                    and (($c | length) > (($h | length) + ($f | length)))
+                    and (($c[($h | length):(($c | length) - ($f | length))]) as $path
+                         | ($path | length) > 0 and ($path | contains($sq) | not)))
+              )
+            | $new
+          ) // $c);
+
+      [$owned[] | forms] as $forms
       # Type-guard every level. `(.hooks // {}) |= ...` LOOKS safe but throws
       # "Invalid path expression" when .hooks is absent entirely — which is
       # exactly the post-uninstall shape ({} or {"env":...}), and combined with
@@ -1025,13 +1109,7 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
               if (.hooks? | type) == "array" then
                 .hooks |= map(
                   if (.command? // "") != "" then
-                    # The old-rendering upgrade runs FIRST, so the bare-`rekol`
-                    # rewrite below sees already-upgraded text and no-ops. The
-                    # reverse order would leave `command -v rekol` inside the
-                    # new invocation open to a second rewrite.
-                    .command |= gsub($oldform; $rekol + "\" " + .sub)
-                    | .command |= ( . as $c | reduce $subs[] as $s
-                        ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
+                    .command |= upgraded($forms)
                   else . end)
               else . end) else . end)
           )
@@ -1049,35 +1127,48 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
     printf '%s\n' "$MIGRATED" > "${local_tmp}"
     if jq -e . "${local_tmp}" >/dev/null 2>&1; then
       run "mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "MIGRATED bare rekol hook commands in ${SETTINGS_JSON} (#159)"
-      say "repaired existing hooks that invoked a bare 'rekol' (PATH-independent now)"
-      # Report what was deliberately LEFT ALONE: preserving it silently is
-      # indistinguishable from having missed it.
-      local_skipped="$(grep -c "command -v rekol || echo" "${SETTINGS_JSON}" 2>/dev/null || true)"
-      local_skipped="${local_skipped:-0}"
-      if [[ "${local_skipped}" -gt 0 ]]; then
-        # The claim here is deliberately narrow: THIS STEP left them alone. An
-        # earlier version of this message said "rekol does not rewrite what it
-        # does not own", which the same install then falsified — Step 7's
-        # soft-fail pass appends ` 2>/dev/null || true` to any command whose text
-        # merely mentions rekol, so a preserved command does NOT come back
-        # byte-identical (QA's F9, #235). Printing a guarantee the next step
-        # breaks is worse than printing nothing, so this says only what is true
-        # and names the gap.
-        say "left ${local_skipped} occurrence(s) of the old 'command -v rekol' text alone:"
-        say "  they are not rekol hook invocations (a literal string, or your own"
-        say "  command), so this migration step did not rewrite them."
-        say "  KNOWN GAP (#235): a later step still appends ' 2>/dev/null || true'"
-        say "  to any command whose text mentions rekol, so such a command is not"
-        say "  left byte-identical, and a BLOCKING hook of yours would stop"
-        say "  blocking. Check ${SETTINGS_JSON} if you have one."
-        say "  If one of them IS meant to be a rekol hook, update it by hand."
-        log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON} (see #235)"
-      fi
+      log_journal "MIGRATED rekol hook commands in ${SETTINGS_JSON} (#159, #203)"
+      say "repaired existing hooks that could resolve the wrong rekol"
     else
       rm -f "${local_tmp}"
       say "hook migration produced invalid JSON — left settings.json untouched" >&2
     fi
+  fi
+
+  # OUTSIDE the "we changed something" branch. Inside it, this reported nothing
+  # on the case that matters most — a settings.json holding ONLY commands we do
+  # not own, where the migration correctly changes nothing and the user most
+  # needs to be told what was skipped. A message whose absence is
+  # indistinguishable from success is the defect this project keeps shipping.
+  #
+  # OCCURRENCES, not lines. `grep -c` counts matching LINES, and a settings.json
+  # that jq has formatted puts every command on its own line only by accident —
+  # two old-form invocations inside one command counted as one.
+  local_skipped="$(
+    jq '[ .. | objects | .command? // empty
+          | ((. / "command -v rekol || echo") | length - 1) ] | add // 0' \
+       "${SETTINGS_JSON}" 2>/dev/null || printf 0
+  )"
+  local_skipped="${local_skipped:-0}"
+  if [[ "${local_skipped}" -gt 0 ]]; then
+    # The claim here is deliberately narrow: THIS STEP left them alone. An
+    # earlier version of this message said "rekol does not rewrite what it
+    # does not own", which the same install then falsified — Step 6.96's
+    # soft-fail pass appends ` 2>/dev/null || true` to any command whose text
+    # merely mentions rekol, so a preserved command does NOT come back
+    # byte-identical (QA's F9, #235). Printing a guarantee the next step
+    # breaks is worse than printing nothing, so this says only what is true
+    # and names the gap.
+    say "left ${local_skipped} occurrence(s) of the old 'command -v rekol' text alone:"
+    say "  they do not match any hook command rekol writes (a literal string, an"
+    say "  option rekol does not pass, a handler rekol does not own, or your own"
+    say "  command), so this migration step did not rewrite them."
+    say "  KNOWN GAP (#235): a later step still appends ' 2>/dev/null || true'"
+    say "  to any command whose text mentions rekol, so such a command is not"
+    say "  left byte-identical, and a BLOCKING hook of yours would stop"
+    say "  blocking. Check ${SETTINGS_JSON} if you have one."
+    say "  If one of them IS meant to be a rekol hook, update it by hand."
+    log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON} (see #235)"
   fi
 fi
 

@@ -6,19 +6,41 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
-- **The hook migration rewrote commands rekol does not own.** Its `gsub` matched the old
-  invocation anywhere in a command string, with no ownership or shell-context boundary, so it
-  changed a `printf` that merely *prints* that text and a user's own command built on it. This step
-  writes to the user's `settings.json`. The substitution must now be immediately followed by one of
-  rekol's own subcommands (`_hook <name>`, `review --nudge`, `session-index --incremental`);
-  anything else is left untouched by that step, and the count of preserved occurrences is
-  **reported** — preserving silently is indistinguishable from having missed it.
-  **Not yet byte-identical overall, and the installer now says so.** A later step (Step 7's
-  soft-fail pass) still appends ` 2>/dev/null || true` to any command whose text merely mentions
-  `rekol`, so a preserved command does not come back unchanged. An earlier version of this message
-  claimed "rekol does not rewrite what it does not own", which the same install then falsified;
-  printing a guarantee the next step breaks is worse than printing nothing, so it now states only
-  what this step does and names the gap (#235).
+- **The hook migration rewrote commands rekol does not own, and now matches exactly.** This step
+  writes to the user's `settings.json`, and three successive versions of its matcher each rewrote
+  something that was not rekol's: a `gsub` of the old invocation anywhere in a command string, then
+  a shell-context guess, then an ownership regex that accepted any `_hook <name>`. Each was
+  reviewed, shipped, and found wanting on a new shape. A pattern cannot express "we wrote this".
+  The matcher is now an **equality**: a command is rewritten only when the WHOLE string equals a
+  rendering the installer itself produces for a handler on an explicit allowlist
+  (`REKOL_OWNED_HOOKS_JSON`), with the recorded path the only part free to differ — and that path
+  is read by splitting on the literal text either side of it, so a path containing `)`, `&` or a
+  space works, while one containing an apostrophe is refused because the renderer that wrote these
+  never escaped it (that breakage is #222).
+  Four shapes that a pattern got wrong are now controls in the suite: a `printf` whose text holds
+  the old form and a real handler name, a command carrying an option rekol does not pass, a
+  `_hook` name rekol does not own, and the user's own command. All four come back from this step
+  untouched, and the recorded path `a)b` round-trips.
+  Two legacy renderings are accepted, each with and without the soft-fail tail Step 6.96 only began
+  appending in #183, because an install older than that stored the command without it and the
+  presence checks would otherwise no-op on it forever.
+  **The allowlist is drift-guarded three ways**, because a hand-maintained list that silently omits
+  a handler reproduces the original bug: a bats test reads what a real install *wrote* and requires
+  every rekol command in it to be an allowlist entry; a pytest requires every invocation shipped in
+  a snippet to be on the list, excusing only one that appears solely inside the memory-loader
+  command (which Step 7 replaces whole) and asserting that step still exists; and a third pins
+  `rekol resume enable`'s own rendering — written by a different file entirely — to the same list.
+  **The count of preserved occurrences is reported even when nothing was migrated.** That is the
+  case that matters most, a `settings.json` holding only commands rekol does not own, and it is
+  exactly the case the old report missed: it sat inside the "we changed something" branch, so its
+  silence was indistinguishable from having nothing to say. It also counts occurrences rather than
+  `grep -c` lines, which agreed only by accident.
+  **Not yet byte-identical overall, and the installer still says so.** Step 6.96's soft-fail pass
+  appends ` 2>/dev/null || true` to any command whose text merely mentions `rekol`, so a preserved
+  command does not come back unchanged. An earlier version of this message claimed "rekol does not
+  rewrite what it does not own", which the same install then falsified; printing a guarantee the
+  next step breaks is worse than printing nothing, so it states only what this step does and names
+  the gap (#235).
   **That gap is in released versions.** The soft-fail pass has matched on text since #183
   (2026-08-18), so it is present in v0.5.13 and on `main`: any hook of yours whose command mentions
   `rekol` — including a path such as `~/src/rekol-tools/gate.sh` — has had ` 2>/dev/null || true`
