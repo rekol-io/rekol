@@ -1164,6 +1164,60 @@ def _check_hook_executability() -> list[Finding]:
     ]
 
 
+def _check_hook_resolution_order() -> list[Finding]:
+    """Does any wired hook still resolve PATH before the install's own binary? (#221).
+
+    THE COMPANION TO AN UPGRADE THAT CANNOT REACH EVERYTHING. The installer
+    rewrites legacy hook commands to the recorded-path-first rendering, but it
+    only rewrites forms it recognises — and QA found one it did not (an unquoted
+    ``echo <path>``, which is in Leon's own file on three handlers). Product's
+    ruling: a form left behind must not also be silent.
+
+    This is the bug #203 is about, so it deserves its own line rather than being
+    folded into `_check_hook_executability`. That check asks "is the recorded
+    fallback runnable?" and explicitly says it does **not** verify which
+    executable a hook resolves. This one asks exactly that, and they can disagree
+    — a hook can have a perfectly runnable fallback and still prefer an orphaned
+    `rekol` on PATH, which is the whole of #203.
+    """
+    from rekol.update import load_settings, path_first_hooks
+
+    settings = load_settings()
+    if not (settings.get("hooks") or {}):
+        return [
+            Finding(
+                label="hook resolution order",
+                status=Status.INFO,
+                detail="no hooks registered in settings.json — nothing to check",
+            )
+        ]
+
+    stale = path_first_hooks(settings)
+    if not stale:
+        return [
+            Finding(
+                label="hook resolution order",
+                status=Status.OK,
+                detail="every wired hook tries the install's recorded binary before PATH",
+            )
+        ]
+    lines = "; ".join(f"{name} — {form}" for name, form in stale)
+    return [
+        Finding(
+            label="hook resolution order",
+            status=Status.PROBLEM,
+            detail=(
+                f"{len(stale)} wired hook(s) still resolve PATH FIRST, so an orphaned "
+                f"`rekol` earlier on PATH runs instead of this install: {lines}. "
+                f"Re-running the installer upgrades the forms it recognises; if a "
+                f"hook is still listed here afterwards, its command is in a shape "
+                f"the upgrade does not own and has to be edited by hand."
+            ),
+            remedy="./install.sh   (re-renders hook commands recorded-path-first)",
+        )
+    ]
+
+
 class _ScriptVerdict(Enum):
     """What static inspection can honestly conclude about a `rekol` on PATH."""
 
@@ -1513,6 +1567,7 @@ def run_doctor(cfg: Config, embedder: BaseEmbedder, *, deep: bool = False) -> Do
     # unconditionally (not behind --deep) because the failure they catch is
     # invisible to every other check and silent at runtime.
     findings.extend(_check_hook_executability())
+    findings.extend(_check_hook_resolution_order())
     findings.extend(_check_console_scripts())
     findings.extend(_check_version_metadata())
     findings.extend(_check_update_staleness(cfg))

@@ -74,6 +74,64 @@ _FALLBACK_RE = re.compile(
     r"command\s+-v\s+\S+\s*\|\|\s*echo\s+(?:'([^']+)'|\"([^\"]+)\"|([^\s)]+))"
 )
 
+# The CURRENT rendering, which puts the install's own binary first:
+#
+#   $(if [ -x '<path>' ]; then printf %s '<path>'
+#     else command -v rekol || printf %s '<path>'; fi)
+#
+# Parsed from the `[ -x '<path>' ]` test, which is unambiguously the recorded
+# binary. Without this, ``unrunnable_hooks`` found no fallback in a perfectly
+# healthy new-style hook and reported every one of them as "bare invocation with
+# no absolute fallback — exits 127" (Codex measured seven findings against a real
+# fixture install). That is the same false-positive shape this module exists to
+# end: a working install reported broken.
+#
+# The old pattern above is KEPT, not replaced: installs written before the
+# change still carry it, and a parser that understood only the new form would
+# mis-report them in the opposite direction.
+#
+# The path is shell-single-quoted, so an apostrophe in it arrives as the
+# `'\''` splice; `_unquote_shell_single` puts it back.
+# ANCHORED to the generated command substitution, not to any `if [ -x … ]`
+# anywhere in the command (Codex, 2026-11-06). The first version matched a bare
+# preflight: with
+#
+#   if [ -x '/usr/bin/true' ]; then :; fi; "$(command -v rekol || echo '/missing/rekol')" …
+#
+# it returned `/usr/bin/true`, probed that, found it runnable, and reported a
+# hook whose real fallback does not exist as healthy. That is the decoy-echo
+# false-health class again through a different token, which is why the match now
+# requires BOTH the `$(if [ -x …` opening of our own rendering AND the
+# `command -v rekol` that only our substitution contains.
+#
+# AND it no longer scans for a parenthesis (Codex P2, 2026-11-07). The `[^)]*?`
+# that bridged the preflight and `command -v rekol` could not cross a `)`, so a
+# recorded path containing one — `/Users/a)b/bin/rekol` — made the match fail,
+# the parser return None, and `doctor` report a perfectly working hook as "bare
+# invocation … exits 127". The bridge now consumes SINGLE-QUOTED RUNS WHOLE, so
+# a `)` inside quotes is part of the path, while a bare `)` still ends the
+# substitution where it should.
+#
+# `_SQ_RUN` is the shell single-quoted token, including the close-escape-reopen
+# splice `'\''` that the renderer uses for an apostrophe in the path.
+# A BARE pre-#159 invocation, in COMMAND POSITION. Anchored at the start (after
+# an optional `nohup `) so `rekol` has to be the program being run, not a word
+# appearing in someone else's command line. Without the anchor, a user's
+# `my-gate --config rekol.yaml _hook session-tasks` reads as ours.
+_BARE_REKOL_RE = re.compile(r"^(?:nohup\s+)?[\"']?rekol[\"']?\s")
+
+_SQ_RUN = r"'(?:[^']|'\\'')*'"
+_RECORDED_BINARY_RE = re.compile(
+    r"\$\(\s*if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\]"
+    r"(?:" + _SQ_RUN + r"|[^')])*"
+    r"command\s+-v\s+rekol"
+)
+
+
+def _unquote_shell_single(inner: str) -> str:
+    r"""Undo shell single-quote splicing: ``o'\''brien`` → ``o'brien``."""
+    return inner.replace("'\\''", "'")
+
 
 @dataclass
 class Drift:
@@ -209,10 +267,74 @@ def _hook_fallback_path(command: str) -> str | None:
     working install as broken on a real machine. That is the same false-positive
     shape as reporting a working hook "BROKEN" by string comparison.
     """
+    # Current rendering first: it also contains `command -v rekol || printf …`,
+    # so checking the old pattern first would be a coin toss on which form won.
+    recorded = _RECORDED_BINARY_RE.search(command)
+    if recorded:
+        return _unquote_shell_single(recorded.group(1))
     match = _FALLBACK_RE.search(command)
     if match:
         return next((g for g in match.groups() if g), None)
     return None
+
+
+def path_first_hooks(settings: dict) -> list[tuple[str, str]]:
+    """Registered rekol hooks that resolve PATH BEFORE the install's own binary.
+
+    ``[(handler, the form it is still in)]``.
+
+    THE BUG #203/#221 EXISTS TO FIX, reported rather than silently left (product
+    ruling, 2026-11-07). Both legacy renderings put ``command -v rekol`` first:
+
+        rekol <argtail>                                   pre-#159, no fallback
+        "$(command -v rekol || echo '<path>')" <argtail>   #159 … #203
+
+    ``command -v`` wins whenever it succeeds, so an orphaned ``rekol`` earlier on
+    PATH — a stale console script from a removed venv, say — runs instead of the
+    install's own. The current rendering tries the recorded path FIRST and only
+    consults PATH if that is gone.
+
+    The installer upgrades these in place, but it can only upgrade the forms it
+    recognises, and QA found one it did not (an unquoted ``echo <path>``). **A
+    form we leave behind must not also be silent**: whatever the upgrade misses,
+    doctor says so, so the two failures cannot combine into a hook that prefers
+    the wrong binary with nothing reporting it.
+
+    Deliberately keyed on the ABSENCE of the current rendering rather than on a
+    list of old ones. That is the one direction that stays correct when a form
+    nobody anticipated turns up — which is exactly what happened here.
+    """
+    stale: list[tuple[str, str]] = []
+    for blocks in (settings.get("hooks") or {}).values():
+        for block in blocks or []:
+            for hook in block.get("hooks") or []:
+                command = str(hook.get("command", ""))
+                handlers = _HANDLER_RE.findall(command)
+                if not handlers:
+                    continue
+                if _RECORDED_BINARY_RE.search(command):
+                    continue  # current rendering: recorded path first
+                if _FALLBACK_RE.search(command):
+                    form = "PATH first, with an absolute fallback (#159 … #203 form)"
+                elif _BARE_REKOL_RE.match(command):
+                    # `unrunnable_hooks` reports this one too, as the harsher
+                    # "exits 127" finding. Named here as well because the two
+                    # checks answer different questions and a reader of either
+                    # should see the whole shape.
+                    form = "bare invocation — PATH only, no fallback at all (pre-#159)"
+                else:
+                    # NOT OURS, AND THE HANDLER NAME DOES NOT MAKE IT OURS.
+                    # Caught by my own test: `my-own-gate --strict _hook
+                    # session-tasks` contains `_hook session-tasks`, so keying on
+                    # the handler alone reported a user's command as a broken
+                    # rekol hook — the #235 mistake in a new place, and the shape
+                    # of #241. A command is only reported when a rekol
+                    # INVOCATION is recognisable in it: the `command -v`
+                    # substitution, or a bare `rekol` in command position.
+                    # Anything else is someone else's, whatever it mentions.
+                    continue
+                stale.append((handlers[0], form))
+    return stale
 
 
 def unrunnable_hooks(settings: dict, probe: bool = True) -> list[tuple[str, str]]:

@@ -6,6 +6,132 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The upgrade left the UNQUOTED fallback form behind, on three handlers in a real file (#203/#221,
+  QA).** `"$(command -v rekol || echo /abs/path/rekol)" _hook …` was not upgraded, while the same
+  command with `echo '<path>'` quoted was. The quotes were the only difference, and the hooks left
+  behind kept resolving PATH first — an orphaned `rekol` earlier on PATH running instead of the
+  install's own, which is the entire bug #203 exists to fix.
+  **Provenance, measured from git history rather than assumed:** no release tag ever wrote this
+  form. It existed in `21e6e8a` and `ec2f9db` (both 2026-08-12, contained in no tag); `faa834b`
+  added the quotes the same day, and `b0db220` is what v0.5.2, v0.5.4 and v0.5.13 contain. Every
+  tag from v0.5.2 on wrote `echo '${BIN_DIR}/rekol'`; v0.4.0 and earlier wrote a **bare** `rekol`
+  with no fallback at all, which is #159. So the unquoted form comes from installing an untagged
+  `main` — which is what anyone installing from a checkout gets, and is how it reached a real
+  `settings.json`.
+  The form is recognised now as a **literal absolute path only**, by #239's allowlist rule: unquoted
+  means the shell word-splits and expands it, so `echo $(…)/rekol`, a path containing a space, and
+  anything carrying an operator are **not** ours and are left byte-identical. The quoted form can
+  afford to be permissive because the quotes protect it, which is why the two forms get different
+  guards rather than one shared one.
+- **`doctor` now reports a hook that resolves PATH before the install's own binary (#221).** A form
+  the upgrade cannot reach must not also be silent: the upgrade only rewrites what it recognises,
+  and QA found a form it did not. The new check is keyed on the **absence** of the current
+  recorded-path-first rendering rather than on a list of legacy ones — the one direction that stays
+  correct when a form nobody anticipated turns up, which is exactly what happened here.
+  It is a separate finding from `hook executability`, which asks whether the recorded fallback is
+  *runnable* and says explicitly that it does not check which executable a hook resolves. These two
+  can disagree, and the disagreement is #203.
+  A negative control caught a real defect in the first attempt: keying on the handler name alone
+  reported `my-own-gate --strict _hook session-tasks` as a broken rekol hook, because it contains
+  `_hook session-tasks`. A command is reported only when a rekol **invocation** is recognisable in
+  it — the `command -v` substitution, or a bare `rekol` in command position.
+- **A recorded path containing `)` made `doctor` call a working hook broken (#203, Codex).** The
+  parser bridged the `if [ -x … ]` preflight and `command -v rekol` with `[^)]*?`, which cannot
+  cross a `)` — so for a path like `/Users/a)b/bin/rekol` the match failed, the parser returned
+  `None`, and the report said "bare invocation … exits 127" about a hook that exits 0. It now
+  consumes **single-quoted runs whole**, including the `'\''` splice, so a `)` inside quotes is part
+  of the path while a bare `)` still ends the substitution. Verified against four path shapes
+  (ordinary, `)`, apostrophe, spaces-and-`&`), and the `a)b` case is **executed**: the rendered
+  command runs and returns the version, and `unrunnable_hooks` reports nothing — parsing it while
+  the shell could not run it would be no better than the bug.
+- **An ordinary v0.5.13 upgrade is free of duplicate handlers, measured on a real install (#236).**
+  That issue was filed as no-hold because the duplicates had only been seen on a hand-edited
+  `settings.json`. Measured properly: a **real v0.5.13 install**, upgraded twice with this branch
+  plus #235's fix, ends with **exactly one of every handler on both runs**, no `command -v rekol`
+  text left, and the memory loader marked and soft-failing. One of each: loader, `session-confidence`,
+  `session-coverage`, `session-tasks`, `update-check`, `auto-reindex`, the SessionEnd notice,
+  `session-index`, `review --nudge`, `time-context`, `capture-nudge`, `record-stop`.
+  Pinned by a test built from the v0.5.13 *rendering* read out of that tag's snippets rather than a
+  hand-edited file. Against the pre-rework matcher it fails on the first run with seven old-form
+  invocations left — which is the state that makes a later run append a second handler.
+- **The hook migration rewrote commands rekol does not own, and now matches exactly.** This step
+  writes to the user's `settings.json`, and three successive versions of its matcher each rewrote
+  something that was not rekol's: a `gsub` of the old invocation anywhere in a command string, then
+  a shell-context guess, then an ownership regex that accepted any `_hook <name>`. Each was
+  reviewed, shipped, and found wanting on a new shape. A pattern cannot express "we wrote this".
+  The matcher is now an **equality**: a command is rewritten only when the WHOLE string equals a
+  rendering the installer itself produces for a handler on an explicit allowlist
+  (`REKOL_OWNED_HOOKS_JSON`), with the recorded path the only part free to differ — and that path
+  is read by splitting on the literal text either side of it, so a path containing `)`, `&` or a
+  space works, while one containing an apostrophe is refused because the renderer that wrote these
+  never escaped it (that breakage is #222).
+  Four shapes that a pattern got wrong are now controls in the suite: a `printf` whose text holds
+  the old form and a real handler name, a command carrying an option rekol does not pass, a
+  `_hook` name rekol does not own, and the user's own command. All four come back from this step
+  untouched, and the recorded path `a)b` round-trips.
+  Two legacy renderings are accepted, each with and without the soft-fail tail Step 6.96 only began
+  appending in #183, because an install older than that stored the command without it and the
+  presence checks would otherwise no-op on it forever.
+  **The allowlist is drift-guarded three ways**, because a hand-maintained list that silently omits
+  a handler reproduces the original bug: a bats test reads what a real install *wrote* and requires
+  every rekol command in it to be an allowlist entry; a pytest requires every invocation shipped in
+  a snippet to be on the list, excusing only one that appears solely inside the memory-loader
+  command (which Step 7 replaces whole) and asserting that step still exists; and a third pins
+  `rekol resume enable`'s own rendering — written by a different file entirely — to the same list.
+  **The count of preserved occurrences is reported even when nothing was migrated.** That is the
+  case that matters most, a `settings.json` holding only commands rekol does not own, and it is
+  exactly the case the old report missed: it sat inside the "we changed something" branch, so its
+  silence was indistinguishable from having nothing to say. It also counts occurrences rather than
+  `grep -c` lines, which agreed only by accident.
+  **Not yet byte-identical overall, and the installer still says so.** Step 6.96's soft-fail pass
+  appends ` 2>/dev/null || true` to any command whose text merely mentions `rekol`, so a preserved
+  command does not come back unchanged. An earlier version of this message claimed "rekol does not
+  rewrite what it does not own", which the same install then falsified; printing a guarantee the
+  next step breaks is worse than printing nothing, so it states only what this step does and names
+  the gap (#235).
+  **That gap is in released versions.** The soft-fail pass has matched on text since #183
+  (2026-08-18), so it is present in v0.5.13 and on `main`: any hook of yours whose command mentions
+  `rekol` — including a path such as `~/src/rekol-tools/gate.sh` — has had ` 2>/dev/null || true`
+  appended on every install since. For a **blocking** hook that matters: `|| true` forces exit 0
+  and `2>/dev/null` discards stderr, which is how Claude Code receives a block reason, so such a
+  hook stops blocking. Your original is backed up as `settings.json.bak-softfail-*`. The fix is
+  #235, landing in its own change.
+- **`doctor` took an unrelated executable preflight for rekol's binary.** With an
+  `if [ -x '/usr/bin/true' ]` earlier in the command, the fallback parser returned `/usr/bin/true`,
+  probed it, found it runnable, and reported a hook whose real fallback does not exist as healthy —
+  the decoy false-health class again through a different token. The matcher now requires both the
+  `$(if [ -x …` opening of rekol's own rendering and the `command -v rekol` that only that
+  substitution contains.
+
+### Fixed
+- **Re-running the installer did not actually upgrade existing installs (#203).** Step 6.95 rewrote
+  only a bare `rekol <subcommand>`, never the previous `$(command -v rekol || echo '<path>')`
+  rendering — which is the form every existing install carries. The handler-presence checks then
+  saw a correctly named handler and no-op'd, so a reinstall left those hooks byte-for-byte
+  PATH-first; only the memory loader was upgraded, which is what made this look fixed. Codex
+  reproduced it against a fixture install.
+  The old rendering is now migrated in place first, so the existing checks see already-correct
+  commands. **Existing installs must re-run `./install.sh` to be upgraded** — the fix is in the
+  installer, not in the running code, so nothing happens until it is re-run.
+  Proven by a regression that downgrades a complete install back to the old rendering, re-runs the
+  installer, and then **executes** the upgraded hooks with an orphan `rekol` first on PATH. With
+  the migration removed it reports 7 hooks still PATH-first and names them.
+- **`doctor` reported every newly rendered hook as broken.** `unrunnable_hooks()` parsed only
+  `command -v … || echo …`, so the current `if [ -x … ]; then printf …` rendering yielded no
+  fallback and each healthy handler was reported as "bare invocation with no absolute fallback —
+  exits 127". Codex measured seven such findings against a real fixture install whose hooks
+  executed fine. That is the exact false-positive shape this check exists to end: a working install
+  reported broken. The parser now understands both renderings — the old one is kept, because
+  installs predating the change carry it — and handles a path containing an apostrophe (arriving as
+  the `'\''` splice), an ampersand, or spaces.
+- The `#203` orphan regression now also asserts a **positive** trace that the recorded binary ran.
+  "The orphan did not run" is satisfied when *nothing* runs, and every hook there is executed with
+  errors suppressed, so the two outcomes were indistinguishable.
+- Five `jq`-site comments blamed the 18 hook-test failures on quote interpolation through `eval`.
+  That was disproved in a container — `eval` of this invocation returns 0 on bash 3.2 and 5.2
+  alike — and the real cause was bash 5.2's `patsub_replacement` expanding an unescaped `&`.
+  Passing the command by variable is still right, but for its own reasons, and the comments now say
+  so.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
@@ -98,6 +224,29 @@ follow [Semantic Versioning](https://semver.org/).
   code was 0.6.1 — six patch releases apart, and that stale number was repeated in coordination
   notes for days. INFO rather than a problem, since a drifting editable install is the normal
   state of a development checkout.
+
+### Fixed
+- **A hook could resolve an orphaned `rekol` on its PATH instead of the install's own, starting a
+  session with no memory (#203).** Hook commands rendered as
+  `"$(command -v rekol || echo '<recorded path>')"` — PATH first, recorded path only as a
+  fallback. The reasoning was that PATH stays accurate if the install is later moved, but it had
+  the risk backwards: **PATH is the unreliable half in a hook environment**, and whatever it finds
+  first wins. A stale console script left behind by another interpreter therefore beat a perfectly
+  good recorded path, and because an interactive shell resolves the working wrapper first,
+  `command -v rekol` was green and `doctor` passed while every hook ran the orphan.
+  The order is now inverted: use the recorded path when it is executable, and fall through to
+  `command -v` only when it is not. A moved or reinstalled tree still adapts — the recorded path
+  stops being executable and the PATH lookup takes over exactly as before — but an orphan earlier
+  on a hook's PATH can no longer hijack a working install.
+  Proven end to end rather than argued: a regression installs for real, puts an orphan **first** on
+  the hook's PATH, asserts that a bare `rekol` genuinely resolves to that orphan (so the test
+  cannot pass vacuously), then executes every wired hook command and asserts the orphan was never
+  run. Against the previous order **nine** hooks executed it.
+  Two residual cases, both narrower and both visible: a recorded path that exists but is broken is
+  a genuinely broken install, and `doctor`'s hook-executability check names it; and if the recorded
+  path is *absent* — a tree moved without reinstalling — PATH resolution resumes and an orphan
+  could win again, which is the cost of keeping a moved install working. Re-running `install.sh`
+  re-records the path and closes that window.
 
 ### Fixed
 - **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
