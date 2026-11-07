@@ -92,7 +92,20 @@ _FALLBACK_RE = re.compile(
 #
 # The path is shell-single-quoted, so an apostrophe in it arrives as the
 # `'\''` splice; `_unquote_shell_single` puts it back.
-_RECORDED_BINARY_RE = re.compile(r"if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\]")
+# ANCHORED to the generated command substitution, not to any `if [ -x … ]`
+# anywhere in the command (Codex, 2026-11-06). The first version matched a bare
+# preflight: with
+#
+#   if [ -x '/usr/bin/true' ]; then :; fi; "$(command -v rekol || echo '/missing/rekol')" …
+#
+# it returned `/usr/bin/true`, probed that, found it runnable, and reported a
+# hook whose real fallback does not exist as healthy. That is the decoy-echo
+# false-health class again through a different token, which is why the match now
+# requires BOTH the `$(if [ -x …` opening of our own rendering AND the
+# `command -v rekol` that only our substitution contains.
+_RECORDED_BINARY_RE = re.compile(
+    r"\$\(\s*if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\][^)]*?command\s+-v\s+rekol"
+)
 
 
 def _unquote_shell_single(inner: str) -> str:

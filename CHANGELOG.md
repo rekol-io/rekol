@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The hook migration rewrote commands rekol does not own.** Its `gsub` matched the old
+  invocation anywhere in a command string, with no ownership or shell-context boundary, so it
+  changed a `printf` that merely *prints* that text and a user's own command built on it. This step
+  writes to the user's `settings.json`. The substitution must now be immediately followed by one of
+  rekol's own subcommands (`_hook <name>`, `review --nudge`, `session-index --incremental`);
+  anything else is left byte-for-byte, and the count of preserved occurrences is **reported** —
+  preserving silently is indistinguishable from having missed it.
+- **`doctor` took an unrelated executable preflight for rekol's binary.** With an
+  `if [ -x '/usr/bin/true' ]` earlier in the command, the fallback parser returned `/usr/bin/true`,
+  probed it, found it runnable, and reported a hook whose real fallback does not exist as healthy —
+  the decoy false-health class again through a different token. The matcher now requires both the
+  `$(if [ -x …` opening of rekol's own rendering and the `command -v rekol` that only that
+  substitution contains.
+
+### Fixed
 - **Re-running the installer did not actually upgrade existing installs (#203).** Step 6.95 rewrote
   only a bare `rekol <subcommand>`, never the previous `$(command -v rekol || echo '<path>')`
   rendering — which is the form every existing install carries. The handler-presence checks then

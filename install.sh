@@ -994,7 +994,18 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
   #
   # Matched by pattern, not by exact text, because the recorded path in an
   # existing install is whatever BIN_DIR was then — possibly not this one.
-  REKOL_OLD_INVOCATION_RE="\\\$\\(command -v rekol \\|\\| echo '[^']*'\\)"
+  #
+  # OWNERSHIP BOUNDARY (Codex, 2026-11-06). The first version matched the old
+  # substitution anywhere in a command string, with no shell-context or
+  # ownership check — so it rewrote things rekol does not own: a
+  # `printf "%s\n" '$(command -v rekol || echo ...)'` that merely PRINTS the
+  # text, and a user's own `… my-custom-thing` invocation. This step writes to
+  # the user's settings.json, so it must only touch invocations that are ours.
+  #
+  # The boundary is the subcommand that follows: the substitution must be
+  # immediately followed by `" ` and one of OUR subcommands. Anything else is
+  # left exactly as it is, and counted so the skip can be reported.
+  REKOL_OLD_INVOCATION_RE="\\\$\\(command -v rekol \\|\\| echo '[^']*'\\)\" (?<sub>_hook [a-z][a-z-]*|review --nudge|session-index --incremental)"
   MIGRATED="$(
     jq --arg rekol "${REKOL_INVOCATION}" \
        --arg oldform "${REKOL_OLD_INVOCATION_RE}" '
@@ -1018,7 +1029,7 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
                     # rewrite below sees already-upgraded text and no-ops. The
                     # reverse order would leave `command -v rekol` inside the
                     # new invocation open to a second rewrite.
-                    .command |= gsub($oldform; $rekol)
+                    .command |= gsub($oldform; $rekol + "\" " + .sub)
                     | .command |= ( . as $c | reduce $subs[] as $s
                         ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
                   else . end)
@@ -1040,6 +1051,17 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
       run "mv '${local_tmp}' '${SETTINGS_JSON}'"
       log_journal "MIGRATED bare rekol hook commands in ${SETTINGS_JSON} (#159)"
       say "repaired existing hooks that invoked a bare 'rekol' (PATH-independent now)"
+      # Report what was deliberately LEFT ALONE: preserving it silently is
+      # indistinguishable from having missed it.
+      local_skipped="$(grep -c "command -v rekol || echo" "${SETTINGS_JSON}" 2>/dev/null || true)"
+      local_skipped="${local_skipped:-0}"
+      if [[ "${local_skipped}" -gt 0 ]]; then
+        say "left ${local_skipped} occurrence(s) of the old 'command -v rekol' text alone:"
+        say "  they are not rekol hook invocations (a literal string, or your own"
+        say "  command), and rekol does not rewrite what it does not own. If one of"
+        say "  them IS meant to be a rekol hook, update it by hand in ${SETTINGS_JSON}."
+        log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON}"
+      fi
     else
       rm -f "${local_tmp}"
       say "hook migration produced invalid JSON — left settings.json untouched" >&2

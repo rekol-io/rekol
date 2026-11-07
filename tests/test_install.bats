@@ -1805,3 +1805,55 @@ _install_into_bin_dir_and_run_hooks() {
   skip "reproduction for #222 (run() evals interpolated paths); unskip with the sweep"
   _install_into_bin_dir_and_run_hooks "$TESTROOT/My Dir's bin" "apos"
 }
+
+@test "the hook migration leaves commands rekol does not own alone (#203)" {
+  # Codex, 2026-11-06: the migration applied its gsub to every command string
+  # with no ownership or shell-context boundary, so it rewrote a `printf` that
+  # merely PRINTS the old text, and a user's own command built on it. This step
+  # writes to the user's settings.json, so it must only touch invocations that
+  # are ours.
+  SBHOME="$TESTROOT/sandhome-ownership"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-ownership"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  cat > "$SBHOME/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionStart":[{"matcher":"","hooks":[
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/rekol')\" _hook session-tasks"},
+  {"type":"command","command":"\"$(command -v rekol || echo '/old/rekol')\" my-custom-thing --flag"}
+]}]}}
+JSON
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # REQUIRE THE UPGRADE, not installer exit 0: a swallowed jq error leaves the
+  # migration unapplied while the installer still succeeds (Codex).
+  upgraded="$(jq -r '[.. | objects | .command? // empty
+                      | select(contains("_hook session-tasks") and contains("if [ -x"))] | length' \
+             "$SBHOME/.claude/settings.json")"
+  [ "$upgraded" -ge 1 ] || {
+    echo "FAIL: the owned session-tasks hook was NOT upgraded"
+    jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+    false; }
+
+  # The user's own command must still carry the OLD text: rekol does not own it.
+  kept="$(jq -r '[.. | objects | .command? // empty
+                  | select(contains("my-custom-thing") and contains("command -v rekol || echo"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$kept" -eq 1 ] || {
+    echo "FAIL: rekol rewrote a command it does not own"
+    jq -r '[.. | objects | .command? // empty | select(contains("my-custom-thing"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+
+  # And the skip is reported rather than silent.
+  [[ "$output" == *"does not rewrite what it does not own"* ]] || {
+    echo "FAIL: the preserved occurrence was not reported"; echo "$output" | tail -20; false; }
+}

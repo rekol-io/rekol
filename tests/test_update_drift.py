@@ -389,3 +389,30 @@ def test_no_newly_rendered_handler_is_reported_unrunnable(tmp_path) -> None:
         }
     }
     assert unrunnable_hooks(settings, probe=False) == []
+
+
+def test_an_unrelated_executable_preflight_is_not_taken_as_rekols_binary() -> None:
+    """Codex's decoy, 2026-11-06. The false-health class, through a new token.
+
+    With an unrelated `if [ -x '/usr/bin/true' ]` earlier in the command, the
+    first version of the matcher returned `/usr/bin/true`, probed it, found it
+    runnable, and reported a hook whose real fallback does not exist as healthy.
+    The matcher now requires BOTH the `$(if [ -x …` opening of our own rendering
+    and the `command -v rekol` only our substitution contains.
+    """
+    from rekol.update import _hook_fallback_path, unrunnable_hooks
+
+    decoy = (
+        "if [ -x '/usr/bin/true' ]; then :; fi; "
+        "\"$(command -v rekol || echo '/missing/rekol')\" _hook session-tasks"
+    )
+    assert _hook_fallback_path(decoy) == "/missing/rekol"
+
+    settings = {
+        "hooks": {
+            "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": decoy}]}]
+        }
+    }
+    found = unrunnable_hooks(settings, probe=False)
+    assert found, "a hook whose fallback does not exist must be reported"
+    assert "/missing/rekol" in found[0][1]
