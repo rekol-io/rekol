@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A command that merely MENTIONED rekol's reindex script was still softened (#235, Codex).**
+  Recognising it with `endswith` accepted `false && <path>/hooks/auto-reindex.sh`,
+  `my-gate --config <path>/hooks/auto-reindex.sh` and `printf <path>/hooks/auto-reindex.sh`. Codex
+  **executed** the first and watched exit 1 become exit 0 — #235 through a different door. The whole
+  command must now be a single script invocation: the one suffix rekol appends is stripped, and what
+  remains has to be one path token ending in that script name, with no whitespace, shell operator or
+  quoting. All three shapes are negative controls, and the first is executed.
+- **De-duplicating the reindex hook deleted hooks rekol does not own (#235, Codex).** It dropped
+  whole later `PostToolUse` **blocks** whose text contained `auto-reindex.sh`, so a hook of the
+  user's sharing such a block was **deleted** — worse than the softening this issue is about, since
+  a softened hook is recoverable from the backup and a deleted one is not. It now removes only the
+  owned handler, keyed on the same ownership predicate as the softener, and leaves everything else in
+  the block; a block left with no hooks at all is dropped as debris.
+  Reachable on an ordinary path, not just a hand-edited file: two reindex blocks arise from #236's
+  duplicate-append behaviour on an un-upgraded install, and a user hook added to the newer block
+  would then be destroyed by the next install.
+- When the set of rekol-owned commands cannot be collected, the soft-fail pass is skipped — the safe
+  direction, since it cannot touch a hook of the user's — and **says so** rather than leaving a
+  failed collection indistinguishable from a settings.json that holds none of rekol's hooks.
 - **The installer stopped a user's blocking hook from blocking (#235).** The soft-fail step matched
   any command whose text contained `rekol` or `REKOL`, so a hook of the user's own got
   ` 2>/dev/null || true` appended — `my-tool --uses rekol --flag`, or anything living under a path

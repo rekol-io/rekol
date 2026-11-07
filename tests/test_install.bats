@@ -1794,3 +1794,117 @@ JSON
       | select(test("auto-reindex\\.sh"))] | length' "$SBHOME/.claude/settings.json")"
   [ "$reindex_count" -ge 1 ] || { echo "FAIL: the auto-reindex hook vanished"; false; }
 }
+
+@test "a command that merely MENTIONS our reindex script is not softened (#235)" {
+  # Codex P1: `endswith` accepted all three of these, and executing the first
+  # showed exit 1 becoming exit 0 — #235 again, through a different door.
+  #
+  #   false && <path>/hooks/auto-reindex.sh
+  #   my-gate --config <path>/hooks/auto-reindex.sh
+  #   printf <path>/hooks/auto-reindex.sh
+  #
+  # The whole command has to be ONE script invocation now. EXECUTED, not
+  # inferred: the first must still exit non-zero after an install.
+  SBHOME="$TESTROOT/sandhome-reindex-mention"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-reindex-mention"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  fake="$TESTROOT/fake-tools/hooks"
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/auto-reindex.sh"
+  chmod +x "$fake/auto-reindex.sh"
+
+  cmd_a="false && $fake/auto-reindex.sh"
+  cmd_b="my-gate --config $fake/auto-reindex.sh"
+  cmd_c="printf $fake/auto-reindex.sh"
+  jq -n --arg a "$cmd_a" --arg b "$cmd_b" --arg c "$cmd_c" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[
+      {type:"command",command:$a},
+      {type:"command",command:$b},
+      {type:"command",command:$c}]}]}}' > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  for want in "$cmd_a" "$cmd_b" "$cmd_c"; do
+    got="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
+            | select(. == $w)] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 1 ] || {
+      echo "FAIL: rekol rewrote a command that only MENTIONS its script:"
+      echo "  wanted byte-identical: $want"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # EXECUTED: `false && …` must still fail. With ` 2>/dev/null || true` appended
+  # it would exit 0, which is how a gate stops gating.
+  after_a="$(jq -r --arg w "$cmd_a" '[.. | objects | .command? // empty
+             | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
+  set +e
+  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after_a" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { echo "FAIL: 'false && script' now exits 0 — it stopped failing"; false; }
+
+  # And our OWN form, bare, is still recognised and softened.
+  ours="$(jq -r '[.. | objects | .command? // empty
+          | select(test("auto-reindex\\.sh") and test("\\|\\| true"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$ours" -ge 1 ] || {
+    echo "FAIL: rekol's own auto-reindex hook is not soft-failing"
+    jq -r '[.. | objects | .command? // empty | select(test("auto-reindex"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+}
+
+@test "de-duplicating auto-reindex never deletes a hook of yours (#235)" {
+  # Codex: the de-duplication dropped whole later PostToolUse BLOCKS whose text
+  # contained `auto-reindex.sh`. A hook of the user's sharing such a block was
+  # DELETED — worse than softening it, because softening is recoverable from the
+  # backup and deleting something we never owned is not.
+  SBHOME="$TESTROOT/sandhome-dedupe"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-dedupe"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # Two blocks each carrying an auto-reindex handler; the SECOND also carries a
+  # hook of the user's. The duplicate must go, the user's hook must not.
+  old_reindex='$HOME/.local/share/rekol/hooks/auto-reindex.sh 2>/dev/null || true'
+  jq -n --arg r "$old_reindex" --arg mine "my-own-watcher --on-edit" \
+    '{hooks:{PostToolUse:[
+      {matcher:"Edit|Write",hooks:[{type:"command",command:$r}]},
+      {matcher:"MultiEdit",hooks:[{type:"command",command:$r},
+                                  {type:"command",command:$mine}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  mine_left="$(jq -r '[.. | objects | .command? // empty
+               | select(test("my-own-watcher"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$mine_left" -eq 1 ] || {
+    echo "FAIL: the user's hook was deleted by de-duplication (found $mine_left)"
+    jq -r '.hooks.PostToolUse' "$SBHOME/.claude/settings.json"
+    false; }
+
+  # Exactly one auto-reindex handler survives: de-duplication still works.
+  ar="$(jq -r '[.. | objects | .command? // empty
+        | select(test("auto-reindex\\.sh"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$ar" -eq 1 ] || {
+    echo "FAIL: expected exactly 1 auto-reindex handler, found $ar"
+    jq -r '.hooks.PostToolUse' "$SBHOME/.claude/settings.json"
+    false; }
+}

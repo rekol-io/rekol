@@ -904,13 +904,14 @@ fi
 # Step 6.94 — what counts as a hook command REKOL owns (#203, #235)
 # =============================================================================
 # Defined once, before any step needs it, and used by Step 6.96's softener and
-# Step 7Z's report. Two copies of this predicate is how #235 shipped: the
-# softener matched any command MENTIONING rekol, and the message that said we
-# had left the user's alone used a different test again.
+# its de-duplication. Two copies of this predicate is how #235 shipped: the
+# softener matched any command MENTIONING rekol, and the message that claimed we
+# had left the user's alone used a different test again. That message is gone
+# (see Step 7Z), so there is now exactly one consumer pair, both here.
 #
-# Defined unconditionally rather than inside a step, because settings.json may
-# not exist when Step 6.96 runs and does by the time Step 7Z does -- and an
-# unset program there would make jq fail, which reads as a count of zero.
+# Defined at the top level rather than inside a step so a later step cannot find
+# it unset -- an unset jq program reads as a result of zero, which is the silent
+# kind of wrong this file keeps producing.
 
 # The handler allowlist. One entry per handler rekol writes as
 #     <pre><invocation> <argtail><suffix>
@@ -951,6 +952,18 @@ if [[ -n "${RENDERED_HOOK_DIR}" ]] && compgen -G "${RENDERED_HOOK_DIR}/*.json" >
   )"
 fi
 REKOL_OWN_COMMANDS_JSON="${REKOL_OWN_COMMANDS_JSON:-[]}"
+# An empty set means nothing gets softened, which is the SAFE direction -- it
+# cannot touch a hook of the user's. But it must not be silent (product): a
+# failed collection and a settings.json that genuinely holds none of our hooks
+# would otherwise be indistinguishable, and the user would be left with hooks
+# that can fail their event.
+if [[ "$DO_HOOK" == "1" ]] && [[ "${REKOL_OWN_COMMANDS_JSON}" == "[]" ]]; then
+  say "could not work out which hook commands are rekol's (no rendered snippets)." >&2
+  say "  Skipping the soft-fail pass rather than guessing: nothing of yours is" >&2
+  say "  touched, but rekol's own hooks may be left able to fail their event." >&2
+  say "  Re-run the installer from a complete checkout to fix this." >&2
+  log_journal "SKIPPED soft-fail: owned-command set empty in ${SETTINGS_JSON:-<none>}"
+fi
 
 # ONE DEFINITION of "this command is rekol's", prepended to both programs
 # below -- the softener and the count. Two copies of a predicate is how #235
@@ -973,11 +986,21 @@ REKOL_OWNERSHIP_JQ='
   # older install -- and the middle form MENTIONS rekol, so it was counted as
   # the user'"'"'s: a false "left 1 hook of your own" on upgrade (product).
   #
-  # Anchored at the END, with only the directory free. A command ending in
-  # /hooks/auto-reindex.sh is ours by the script name, which nothing else
-  # installs; the de-duplication step already keys on that same name.
+  # THE WHOLE COMMAND MUST BE ONE SCRIPT INVOCATION (Codex P1, product ruling).
+  # `endswith` was not enough: it accepted `false && /tmp/hooks/auto-reindex.sh`,
+  # `my-gate --config /tmp/hooks/auto-reindex.sh` and
+  # `printf /tmp/hooks/auto-reindex.sh`. Codex EXECUTED the first and watched
+  # exit 1 become exit 0, which is #235 all over again.
+  #
+  # So: strip the one suffix we append, and what remains must be a single path
+  # token ending in our script name -- no whitespace, no shell operator, no
+  # quoting. The only forms this installer has ever written are an UNQUOTED
+  # path, bare or followed by that suffix, which is why no quoted variant is
+  # accepted here. `$` and `{}` are allowed because the two pre-#172 forms are
+  # literal `$HOME/...` strings.
   def is_our_reindex_script($c):
-    ($c | rtrimstr(" 2>/dev/null || true")) | endswith("/hooks/auto-reindex.sh");
+    ($c | rtrimstr(" 2>/dev/null || true"))
+    | test("^[A-Za-z0-9_./~${}-]+/hooks/auto-reindex\\.sh$");
   def command_is_ours($c):
     (($own | index($c)) != null) or is_our_reindex_script($c);
 '
@@ -1104,9 +1127,9 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
   #
   # A pattern cannot express "we wrote this". So, the same standard as #203:
   # a command is ours only when the WHOLE string equals one the installer is
-  # about to write. That set is built BELOW from the rendered snippets
+  # about to write. That set is built in Step 6.94 from the rendered snippets
   # themselves plus the handler allowlist — one definition, derived from the
-  # renderer, driving both the softener and the count.
+  # renderer, driving both the softener and the de-duplication below.
   #
   # WITH AND WITHOUT the soft-fail tail, because that is the point of the step:
   # Step 6.95 rewrites a pre-#159 bare invocation to the current rendering
@@ -1125,13 +1148,26 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
       if type == "array" then map(if (.hooks? | type) == "array"
                                   then .hooks |= map(soften) else . end)
       else . end;
+    # REMOVE THE DUPLICATE HANDLER, NOT THE BLOCK AROUND IT (Codex, product
+    # ruling). This dropped whole later PostToolUse blocks whose text contained
+    # `auto-reindex.sh`, so a hook of YOURS sharing such a block was
+    # DELETED -- worse than the softening #235 is about, since softening is
+    # recoverable from the backup, and deleting something we never owned is
+    # not. Keyed on the same ownership predicate as the softener, so it can only
+    # ever remove a command this installer wrote.
+    #
+    # A block left with no hooks at all is dropped, because an empty block is
+    # debris; a block with anything else in it is kept exactly as it is.
     def dedupe_autoreindex:
       if type == "array" then
         reduce .[] as $blk ({keep: [], seen: false};
           ($blk.hooks // []) as $hs
-          | (($hs | map(select((.command // "") | test("auto-reindex\\.sh"))) | length) > 0) as $isAR
-          | if $isAR and .seen then .
-            else {keep: (.keep + [$blk]), seen: (.seen or $isAR)} end)
+          | [ $hs[] | select(is_our_reindex_script(.command? // "")) ] as $ours
+          | (if (.seen and (($ours | length) > 0))
+             then ($blk | .hooks = [ $hs[] | select(is_our_reindex_script(.command? // "") | not) ])
+             else $blk end) as $kept
+          | { keep: (.keep + (if (($kept.hooks // []) | length) > 0 then [$kept] else [] end)),
+              seen: (.seen or (($ours | length) > 0)) })
         | .keep
       else . end;
     if (.hooks | type) == "object"
