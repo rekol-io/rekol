@@ -89,11 +89,16 @@ def test_migrate_dir_collision_appends_suffix(tmp_path: Path) -> None:
         source_dir=src_parent / "memory", memory_home=memory_home, dry_run=False, allow_llm=False
     )
     assert report.migrated == 2
-    # Migrated file landed at proj-alpha-2.md (suffix-1 reserved for actual collision)
-    collided = memory_home / "topics" / "proj-alpha-2.md"
-    assert collided.is_file()
-    # Original pre-existing file untouched
+    # `-1`, not `-2`: imports and the archive now share one publication
+    # primitive (`claim_free_name`), so they number collisions the same way.
+    # The convention changed when the import write became staged-then-published,
+    # which is what stops a fault leaving a truncated memory under a real name.
+    collided = memory_home / "topics" / "proj-alpha-1.md"
+    assert collided.is_file(), sorted(p.name for p in (memory_home / "topics").iterdir())
+    # Original pre-existing file untouched -- the part that actually matters.
     assert (memory_home / "topics" / "proj-alpha.md").read_text() == "pre-existing"
+    # And no staging debris under any name.
+    assert [p.name for p in (memory_home / "topics").iterdir() if p.name.startswith(".")] == []
 
 
 def test_migrate_dir_writes_frontmatter_and_body(tmp_path: Path) -> None:
