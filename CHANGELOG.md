@@ -6,6 +6,38 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **An archive entry was deleted on a guess, and the verification it guarded was optional (#224,
+  Codex + product).** Five faults in the refusal handling, all reproduced before being fixed.
+  **An archive entry was removed while it held the last copy of those bytes.** The hard-link path's
+  mismatch branch unlinked the archive entry on the strength of a comment — "it is a hard link to
+  the still-present source" — that stopped being true one line earlier: replacing the source
+  pathname between the inode check and the final hash leaves the archive entry at link count 1. The
+  unlink destroyed those bytes and the import undo destroyed the only other copy of them. The
+  removal now has the precondition the argument assumed: the entry is the same inode as the live
+  source **and** the link count shows another name. Otherwise it is kept and the message says which.
+  On the copy path that precondition can never hold — a verified copy is a different inode by
+  construction — so a copy-path entry is now always kept, reversing the previous round's "remove it
+  so a retry finds no twin". The cost is an untidy archive after a refusal, which nothing searches;
+  the alternative was destroying bytes on a guess inside a data-loss fix.
+  **Verification was optional on the paths that needed it.** A failed initial hash was logged and
+  the run carried on with no expected digest — turning the import/retire check off for the one file
+  nothing could vouch for, which left old bytes in the home and retired the new ones. It now fails
+  closed: no import, no archive, source untouched, directory not retired. The **duplicate** branch
+  retired without a digest at all, which was the one call site whose entire claim is "these bytes
+  are already in the home"; Codex reached old-in-home / new-archived **with no errors** through it.
+  It passes the digest now.
+  **The byte-identity guard on the import undo was a text comparison.** `read_text` normalises
+  newlines, so a file rewritten from `hello\n` to `hello\r\n` read back identical and the guard
+  deleted an edited file. It compares bytes, and the import is written as UTF-8 with no newline
+  translation so the comparison can be exact.
+  **A source-unlink `PermissionError` bypassed the cleanup**, arriving as a bare `OSError`, missing
+  the refusal branch, and leaving the import in the home under a message that never mentioned it.
+  Both publication paths now report that case as a refusal, and the migrator undoes the import on
+  **any** failure to retire rather than only on its own exception class.
+  **An interrupted-then-edited retry** keeps both versions in the home — product ruled that
+  building provenance to reconcile them is not worth it here, since it needs a kill, then a user
+  edit, then a retry, and nothing is lost — but the run is no longer silent about it: it names the
+  file it wrote, says both are there and that nothing was deleted. Filed for reconciliation.
 - **A migration could leave a STALE memory in the home while the newest text went only to the
   archive (#224, QA + product).** Measured on the **ordinary hard-link path**, which is why this held
   the tag: the import read the old bytes, the user edited the file in place, `os.link` published the
@@ -19,18 +51,19 @@ follow [Semantic Versioning](https://semver.org/).
   unless the bytes it is about to retire are still those bytes. The check sits immediately before the
   unlink on **both** publication paths, so the only remaining interval is the last-check-to-unlink
   one already accepted — not a wider one.
-  **A refused retirement now leaves nothing behind.** The import this run wrote is removed, guarded:
-  only a file this run created, and only while it still holds exactly what this run wrote. The
-  archive entry is removed too — on the hard-link path it shares the source's inode, so leaving it
-  would track the user's later edits from inside a directory called an archive, and a retry would
-  add a second entry beside it. If an undo cannot happen, or the file is no longer ours to touch,
-  the message **names the file and says it is still there** rather than claiming a removal.
+  **A refused retirement now leaves no import.** The import this run wrote is removed, guarded:
+  only a file this run created, and only while it still holds exactly the bytes this run wrote. If
+  an undo cannot happen, or the file is no longer ours to touch, the message **names the file and
+  says it is still there** rather than claiming a removal.
+  The **archive entry** is a separate question, and the answer is narrower than the first version of
+  this fix assumed: see "an archive entry was deleted on a guess" below.
   This also closes what QA measured on the copy path: a retry used to leave `p-note.md` (old) beside
   `p-note-1.md` (new) — same name, same dates, nothing to tell them apart, and search returning both
-  as equals with the stale one first. A retry now leaves one memory holding the current content.
+  as equals with the stale one first. A retry after a **refusal** now leaves one memory holding the
+  current content. (A retry after an *interruption* that the user then edited keeps both versions
+  and says so — see below.)
   Tested on both paths with QA's walnut/copper fixture, plus a kill between the import and the
-  archive ending whole after a retry. Each of the three parts is revert-proved and fails on its own
-  rows.
+  archive ending whole after a retry. Each part is revert-proved and fails on its own rows.
 - **An atomic save during the final verification hash was silently deleted (#224, Codex).** Hashing
   reads through an open descriptor, so an editor replacing the pathname mid-read left the descriptor
   returning the OLD inode's bytes to EOF. The comparison against the archived copy then *succeeded*
@@ -42,11 +75,14 @@ follow [Semantic Versioning](https://semver.org/).
   descriptor before reading, `fstat` on it again after, and `os.stat` on the pathname — device,
   inode, size and mtime must all agree. On any mismatch, or any failure to establish them, the
   source is kept and the directory is not retired.
-  **What remains accepted, stated per path rather than as a blanket claim:** on the copy path, a
-  write in the interval between that final `os.stat` and the unlink, and an in-place write leaving
-  size, mtime and content unchanged; on the hard-link path, a pathname replacement between the
-  inode confirmation and the unlink. The docstring no longer says "no content window at all" for
-  the hard-link path, which was too strong — it is not an atomic compare-and-unlink.
+  **What remains accepted, in one sentence for both paths:** a write of any kind in the interval
+  between the last verification and the unlink. Everything earlier is caught. The docstring no
+  longer says "no content window at all" for the hard-link path, which was too strong — it is not
+  an atomic compare-and-unlink. Two narrower wordings that were in this file and in the code are
+  gone, both wrong: "accepted: an in-place write leaving size, mtime **and content** unchanged"
+  describes nothing at all, and "leaving size and mtime unchanged" is a limit on what the *identity*
+  evidence can see, not something this function accepts — the digest comparison catches those bytes
+  regardless. That limit is now documented where it lives, on the hashing helper.
 - **Archiving deleted new bytes when an editor saved over the source.** The hard-link path's
   guarantee — same inode, so removing the source name cannot lose content — holds only while the
   pathname still *denotes* that inode. An editor's atomic save replaces the pathname with a brand

@@ -83,6 +83,68 @@ class _HardLinksUnsupportedError(Exception):
     """This filesystem cannot hard-link, so the weaker copy contract applies."""
 
 
+def _retract_archive_entry(candidate: Path, source_path: Path) -> str:
+    """Drop ``candidate`` ONLY if those bytes keep another name, and say which.
+
+    Returns the clause to put in the refusal message. Both outcomes are
+    acceptable; what is not acceptable is guessing, or claiming a removal that
+    did not happen.
+
+    WHY A REMOVAL NEEDS A PRECONDITION AT ALL (Codex P1, 2026-11-07). On the
+    hard-link path the mismatch branch used to unlink the archive entry
+    unconditionally, with a comment arguing it was safe "because it is a hard
+    link to the still-present source". That argument holds at the moment the
+    identity check passes and stops holding immediately after: Codex replaced
+    the source pathname between that check and the final hash, which left the
+    archive entry holding the LAST link to the old bytes. The unlink then
+    destroyed them, and the import undo destroyed the imported copy of them, so
+    they survived nowhere.
+
+    So the precondition is the thing the argument assumed: the entry is still
+    the same inode as the live source, and the link count shows a name other
+    than this one. ``st_nlink >= 2`` is implied by the inode match — two
+    distinct names for one inode — and is checked anyway because it is the
+    direct reading of "another name survives" and costs nothing.
+
+    On the COPY path the precondition can never hold: a verified copy is a
+    different inode by construction, so the entry is always kept. That is
+    deliberate and is product's ruling of 2026-11-07, reversing the previous
+    round's "remove the published copy so a retry finds no twin": a kept archive
+    entry that is not linked to the live source meets the contract, and "bytes
+    removed on a guess" is the wrong default in a data-loss fix. The cost is an
+    untidy archive after a refusal — a retry adds ``-1`` beside it — and the
+    refusal message names the entry so it is not a surprise.
+    """
+    try:
+        published_stat = candidate.lstat()
+        source_stat = source_path.lstat()
+    except OSError as exc:
+        return (
+            f"the archive entry {candidate} was KEPT because it could not be "
+            f"inspected ({exc}), so whether removing it was safe is unknown"
+        )
+
+    same_inode = (published_stat.st_dev, published_stat.st_ino) == (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    )
+    if not (same_inode and published_stat.st_nlink >= 2):
+        return (
+            f"the archive entry {candidate} was KEPT: it is not a second name "
+            f"for the live source, so removing it could have destroyed the only "
+            f"copy of those bytes"
+        )
+
+    try:
+        os.unlink(candidate)
+    except OSError as exc:
+        return f"the archive entry {candidate} could NOT be removed ({exc}) and is still there"
+    return (
+        f"the archive entry {candidate} was removed, which was safe because it "
+        f"was a second name for the source that is still there"
+    )
+
+
 # errno values that mean "hard links are not available here" rather than "this
 # particular link failed": exFAT and some network mounts, and cross-device.
 _NO_HARD_LINK_ERRNOS = frozenset(
@@ -117,17 +179,29 @@ def publish_into_archive(
     copy and before anything is removed; on any mismatch the source is KEPT, the
     failure is reported, and the directory is not retired.
 
-    Concurrent-writer contract, per path, stated plainly because it is weaker
-    than it looks:
+    Concurrent-writer contract, in one sentence for both paths: the source's
+    content and identity are verified as late as possible, and **the only
+    accepted window is the interval between that last verification and the
+    unlink** — a write of any kind in that interval (in place or a replacement
+    of the pathname) is lost. Everything earlier is caught:
 
-    * **copy path** — the source is re-read, re-hashed, and its identity
-      confirmed against the pathname after publication. Accepted: a write in the
-      interval between that final ``os.stat`` and the unlink, and an in-place
-      write that leaves size, mtime AND content unchanged. Codex showed an
-      earlier version lost a whole hash's worth of window here; that is closed.
+    * **copy path** — the source is re-read and re-hashed after publication and
+      its digest compared both with the staged copy and with the caller's
+      imported bytes, so an in-place write is caught however small; its identity
+      is confirmed against the pathname, which is what catches a replacement.
+      Codex showed an earlier version lost a whole hash's worth of window here;
+      that is closed.
     * **hard-link path** — device and inode are confirmed against the published
-      copy immediately before the unlink. Accepted: a pathname replacement in
-      the interval between that confirmation and the unlink.
+      copy, and then the caller's digest is re-verified, immediately before the
+      unlink.
+
+    Two narrower statements that used to be here were wrong and are worth not
+    writing again. "Accepted: an in-place write that leaves size, mtime AND
+    content unchanged" describes nothing (an unchanged file is not a write).
+    "Accepted: an in-place write that leaves size and mtime unchanged" is true
+    of what :func:`_digest_of`'s identity evidence can SEE, and that is where it
+    is now documented — but it is not accepted by this function, because the
+    digest comparison catches the changed bytes regardless of size and mtime.
 
     A final archive name never receives bytes incrementally. It is claimed by an
     atomic ``os.link``, or where that is unsupported by an empty ``O_EXCL``
@@ -207,7 +281,10 @@ def _publish_by_hard_link(
             # Deliberately NOT removing the published copy: it is the only name
             # left for the bytes that were there when we linked, so unlinking it
             # would destroy them. Both survive; the run reports and does not
-            # retire.
+            # retire. This is the same rule _retract_archive_entry applies —
+            # the identity check having just failed is exactly its "not a second
+            # name for the live source" case — spelled out here because the
+            # reason the name must survive is the reason the check exists.
             raise ArchivePublishError(
                 f"{source_path} was replaced while it was being archived, so it "
                 f"is no longer the file that was archived to {candidate}. Both "
@@ -229,33 +306,26 @@ def _publish_by_hard_link(
         if expected_digest is not None:
             current = _digest_of(source_path)
             if current.digest != expected_digest:
-                # REMOVE THE ARCHIVE LINK, which is safe here precisely because
-                # it is a hard link to the still-present source: unlinking this
-                # name cannot destroy bytes while that name remains. Leaving it
-                # would be worse than untidy — it shares the inode, so it would
-                # keep tracking the user's later edits while sitting in a
-                # directory called an archive, and a retry would add a second
-                # entry beside it.
-                removed = True
-                try:
-                    os.unlink(candidate)
-                except OSError:
-                    removed = False
                 raise ArchivePublishError(
                     f"{source_path} changed while it was being archived, so the "
                     f"bytes already imported are not the bytes that would have "
                     f"been retired. The source was KEPT, the directory was not "
-                    f"retired, and "
-                    + (
-                        "the archive entry was removed"
-                        if removed
-                        else f"the archive entry {candidate} could NOT be removed "
-                        f"and is still there"
-                    )
-                    + " — re-run to migrate the current content."
+                    f"retired, and " + _retract_archive_entry(candidate, source_path) + "."
                 )
-        # os.unlink removes the name, never a link target.
-        os.unlink(source_path)
+        # os.unlink removes the name, never a link target. A failure here is not
+        # a tidy-up problem: the import is already written, so it has to reach
+        # the caller as an ArchivePublishError rather than a bare OSError, which
+        # bypassed the undo and left the import behind under a message that said
+        # nothing about it (Codex P2, 2026-11-07).
+        try:
+            os.unlink(source_path)
+        except OSError as exc:
+            raise ArchivePublishError(
+                f"{source_path} was archived to {candidate} but could not then "
+                f"be removed ({exc}), so the directory was not retired, and "
+                + _retract_archive_entry(candidate, source_path)
+                + " — the content is still at the source either way."
+            ) from exc
         return candidate
     raise ArchivePublishError(
         f"no free name for {source_path.name} in {archive_dir} after "
@@ -305,9 +375,14 @@ def _digest_of(path: Path) -> _HashedFile:
     Any mismatch, or any failure to establish them, raises. The caller keeps the
     source and refuses retirement; it never guesses.
 
-    What remains accepted, deliberately and per product's ruling: the interval
-    from that final ``os.stat`` to the unlink, and an in-place write that leaves
-    both size and mtime unchanged.
+    THE LIMIT OF THE IDENTITY EVIDENCE, stated here because this is where it
+    lives: size and mtime are all that is compared, so an in-place write that
+    leaves both unchanged satisfies all three observations even though the
+    content changed. That is a limit on the EVIDENCE, not a hole in the caller's
+    contract — the digest this function returns is of the bytes actually read,
+    so the caller's comparison catches those changed bytes regardless. The
+    window the caller does accept is the interval from the final ``os.stat``
+    here to its own unlink, and nothing wider.
     """
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -428,29 +503,30 @@ def _publish_by_verified_copy(
     # hard-link path: what gets retired has to be what was imported.
     not_what_was_imported = expected_digest is not None and source_hash.digest != expected_digest
     if mismatch or not_what_was_imported:
-        # REMOVE THE PUBLISHED COPY (product, 2026-11-07). It holds the bytes as
-        # they were read, which on a torn write is neither version, and the
-        # source survives carrying the user's current content — so a refused run
-        # leaves no archive entry, and a retry cannot find a stale twin beside
-        # the real one. Guarded: this call created that name in this call.
-        removed = True
-        try:
-            os.unlink(published)
-        except OSError:
-            removed = False
+        # The published copy is KEPT, and the earlier round's "remove it so a
+        # retry finds no twin" is reversed (product, 2026-11-07). A verified copy
+        # is a different inode from the source by construction, so nothing else
+        # names those bytes and removing them is destruction on a guess. The
+        # helper states the rule once for both paths.
         raise ArchivePublishError(
             f"{source_path} changed while it was being archived "
             f"({source_hash.size} bytes now, {staged_hash.size} copied); the "
             f"source was KEPT, the directory was not retired, and "
-            + (
-                "the archive entry was removed"
-                if removed
-                else f"the archive entry {published} could NOT be removed and is still there"
-            )
+            + _retract_archive_entry(published, source_path)
             + " — re-run to migrate the current content."
         )
 
-    os.unlink(source_path)
+    # As on the hard-link path: the import is already written, so a failure to
+    # remove the source has to arrive as an ArchivePublishError.
+    try:
+        os.unlink(source_path)
+    except OSError as exc:
+        raise ArchivePublishError(
+            f"{source_path} was archived to {published} but could not then be "
+            f"removed ({exc}), so the directory was not retired, and "
+            + _retract_archive_entry(published, source_path)
+            + " — the content is still at the source either way."
+        ) from exc
     return published
 
 

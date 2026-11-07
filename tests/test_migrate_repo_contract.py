@@ -1580,9 +1580,17 @@ def test_an_in_place_write_during_the_final_hash_is_caught(
 # THE IMPORT/RETIRE CONTRACT (QA + product, 2026-11-07)
 # ---------------------------------------------------------------------------
 # The home never holds a version other than the one retired; a refused
-# retirement leaves no import and no archive entry from that file; a retry
-# leaves ONE memory with the current content. QA's walnut/copper fixture, run on
-# both publication paths because they fail for different reasons.
+# retirement leaves no import from that file; a retry leaves ONE memory with the
+# current content. QA's walnut/copper fixture, run on both publication paths
+# because they fail for different reasons.
+#
+# THE ARCHIVE ENTRY IS A SEPARATE QUESTION, and product's ruling on it reversed
+# on 2026-11-07 after Codex showed the cost: the entry is removed only when
+# those same bytes keep another name, which is true of a hard link to the live
+# source and never true of a verified copy. So the two parametrisations below
+# legitimately expect different archive states, and that asymmetry is the
+# contract rather than an oversight — "no archive entry either" was the previous
+# round's wording and it licensed destroying the last copy of a file.
 
 _OLD = "# Staleness\n\nOLD deploy target is walnut.\n"
 _NEW = "# Staleness\n\nNEW deploy target is copper.\n"
@@ -1648,15 +1656,28 @@ def test_an_edit_after_the_import_refuses_and_leaves_nothing_behind(
 
     # 1. The home holds no version at all, rather than the stale one.
     assert _home_bodies(home) == [], _home_bodies(home)
-    # 2. And no archive entry either: on the hard-link path that entry shares the
-    #    source's inode, so leaving it would track the user's later edits from
-    #    inside a directory called an archive, and a retry would add a second.
-    assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+    # 2. The archive entry goes only when those bytes keep another name.
+    #    HARD LINK: the entry IS the source's inode, so removing the extra name
+    #    cannot destroy anything, and leaving it would track the user's later
+    #    edits from inside a directory called an archive.
+    #    COPY: a distinct inode, so the entry is the only copy of the bytes as
+    #    they were read. It stays, and the message says so. Untidy beats gone.
+    if hard_links:
+        assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+        assert "was removed, which was safe" in message, message
+    else:
+        # NEW, not OLD: on this path the probe fires before the copy, so the
+        # copy is of the edited source. The entry is therefore byte-identical to
+        # the live source and removing it would provably lose nothing — but the
+        # rule is deliberately one rule (same inode, another name) rather than a
+        # second content proof in a function already on its fifth round. The
+        # cost is an untidy archive, which nothing searches.
+        assert _archive_bodies(tmp_path) == ["NEW"], _archive_bodies(tmp_path)
+        assert "was KEPT: it is not a second name" in message, message
     # 3. The source survives carrying the user's current content.
     assert (legacy / "p-note.md").read_text() == _NEW
     # 4. The message is true about everything, not only the source.
     assert "was KEPT" in message and "not retired" in message, message
-    assert "archive entry was removed" in message, message
     assert "import" in message and "was removed" in message, message
 
 
@@ -1696,9 +1717,17 @@ def test_a_retry_after_a_refusal_leaves_one_memory_with_the_current_content(
 
     assert retry.errors == [], retry.errors
     assert retry.migrated == 1, retry.migrated
-    # EXACTLY ONE memory, holding the current content. No `-1` twin.
+    # EXACTLY ONE memory, holding the current content. No `-1` twin. This is the
+    # clause that matters: the home is what search reads.
     assert _home_bodies(home) == ["NEW"], _home_bodies(home)
-    assert _archive_bodies(tmp_path) == ["NEW"], _archive_bodies(tmp_path)
+    if hard_links:
+        assert _archive_bodies(tmp_path) == ["NEW"], _archive_bodies(tmp_path)
+    else:
+        # The kept copy-path entry from the refused run is still there, so the
+        # retry's entry lands beside it as `p-note-1.md`. This is the accepted
+        # cost of not destroying bytes on a guess (product, 2026-11-07): an
+        # untidy archive, which no one searches, rather than a lost version.
+        assert _archive_bodies(tmp_path) == ["NEW", "NEW"], _archive_bodies(tmp_path)
 
 
 def test_a_kill_between_the_import_and_the_archive_ends_whole_after_a_retry(
@@ -1756,3 +1785,282 @@ def test_a_failed_undo_says_the_import_is_still_there(tmp_path: Path) -> None:
     ok = migrator_module._undo_import(published, "what this run wrote")
     assert "was removed" in ok and "NOT removed" not in ok, ok
     assert not published.exists()
+
+
+# ---------------------------------------------------------------------------
+# BATCH 6: the four ways the refusal handling was still wrong (Codex + product,
+# 2026-11-07). Each of these was reproduced against the previous head before
+# being fixed, and each fails if its own fix is reverted.
+# ---------------------------------------------------------------------------
+
+
+def test_a_replacement_before_the_final_hash_keeps_the_only_copy_of_the_old_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: the mismatch branch deleted the last link to the old bytes.
+
+    The hard-link path's identity check passes, and THEN the source pathname is
+    replaced — an editor's atomic save. The archive entry is now the only name
+    for OLD, with a link count of 1. The final hash correctly sees NEW and
+    refuses, but the cleanup used to unlink the archive entry on the strength of
+    an argument ("it is a hard link to the still-present source") that had
+    stopped being true one line earlier. The import undo then removed the only
+    other copy of OLD, so OLD survived nowhere.
+
+    The user's current content was never at risk — it is in the source, and they
+    overwrote OLD themselves. What this test holds is the default: bytes are not
+    removed on a guess.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    source = legacy / "p-note.md"
+    source.write_text(_OLD)
+
+    real_digest_of = archive_module._digest_of
+    fired = {"replaced": False, "hashes": 0}
+
+    def replace_then_hash(path: Path):  # noqa: ANN202
+        # The SECOND hash of the source, which is the one immediately before the
+        # unlink. The first is the migrator's pre-pass, and replacing the file
+        # there would simply make NEW the expected digest and prove nothing.
+        if path == source:
+            fired["hashes"] += 1
+        if fired["hashes"] == 2 and not fired["replaced"]:
+            fired["replaced"] = True
+            # A REPLACEMENT, not an in-place write: a brand-new inode takes the
+            # name, so the archive entry is orphaned at link count 1.
+            replacement = legacy / ".new"
+            replacement.write_text(_NEW)
+            os.replace(replacement, source)
+        return real_digest_of(path)
+
+    monkeypatch.setattr(archive_module, "_digest_of", replace_then_hash)
+    report = migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    assert fired["replaced"], "the probe never fired; this test proved nothing"
+    assert report.migrated == 0, report.migrated
+    assert report.errors, "the run reported nothing"
+    message = report.errors[0]
+
+    # THE POINT: OLD still exists, in the archive, because nothing else named it.
+    assert _archive_bodies(tmp_path) == ["OLD"], _archive_bodies(tmp_path)
+    assert "was KEPT: it is not a second name" in message, message
+    # The source holds the user's current content, and the home holds no stale
+    # version of it.
+    assert source.read_text() == _NEW
+    assert _home_bodies(home) == [], _home_bodies(home)
+    # Not retired, so a re-run picks up NEW.
+    assert not (legacy / MIGRATION_MARKER_NAME).exists()
+
+
+def test_a_file_whose_hash_fails_is_not_migrated_or_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: verification was optional exactly where it was needed.
+
+    A failed initial hash was logged and the run carried on with
+    ``expected_digest=None``, which turned the whole import/retire check off for
+    the one file nothing could vouch for. With an edit before publication that
+    left OLD in the home and retired NEW. Fail closed instead: no import, no
+    archive, source untouched, directory not retired.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    source = legacy / "p-note.md"
+    source.write_text(_OLD)
+
+    def refuse_to_hash(path: Path) -> str:
+        raise archive_module.ArchivePublishError(f"cannot read {path} to verify it")
+
+    monkeypatch.setattr(migrator_module, "source_digest", refuse_to_hash)
+    report = migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    assert report.migrated == 0, report.migrated
+    assert report.archived == 0, report.archived
+    assert any("could not hash" in e for e in report.errors), report.errors
+    assert _home_bodies(home) == [], _home_bodies(home)
+    assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+    assert source.read_text() == _OLD
+    assert not (legacy / MIGRATION_MARKER_NAME).exists()
+
+
+def test_a_duplicate_is_only_retired_when_its_bytes_are_the_imported_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: the duplicate branch retired without a digest.
+
+    Codex's route to the silent-wrong result, reached through a different branch
+    than QA's: kill a run after the import, then retry. On the retry the source's
+    body already matches the import, so it takes the duplicate branch — which
+    archived with no digest at all. An edit after classification therefore
+    retired NEW while the home kept OLD, **with no errors**.
+
+    The duplicate branch's whole claim is "these bytes are already in the home",
+    so it is the last place that claim should go unchecked.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    source = legacy / "p-note.md"
+    source.write_text(_OLD)
+
+    # 1. A kill between the import and the archive: home holds OLD, source OLD.
+    def die(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise SystemExit("killed between the import and the archive")
+
+    monkeypatch.setattr(migrator_module, "archive_file", die)
+    with pytest.raises(SystemExit):
+        migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+    assert _home_bodies(home) == ["OLD"], _home_bodies(home)
+
+    # 2. The retry, with the source edited in place after classification.
+    fired = {"edit": False}
+    real_link = archive_module.os.link
+
+    def edit_before_publishing(*args, **kwargs):  # noqa: ANN002, ANN003
+        if not fired["edit"]:
+            fired["edit"] = True
+            _edit_in_place(source, _NEW)
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(archive_module.os, "link", edit_before_publishing)
+    retry = migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    assert fired["edit"], "the probe never fired; this test proved nothing"
+    assert retry.skipped_duplicate == 1, retry.skipped_duplicate
+    # THE POINT: it refuses rather than retiring bytes that are not in the home.
+    assert retry.errors, "the duplicate was retired with no error at all"
+    assert retry.archived == 0, retry.archived
+    assert source.read_text() == _NEW, "the user's current content was retired"
+    assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+    # The earlier run's import is left strictly alone: this run did not write it.
+    assert _home_bodies(home) == ["OLD"], _home_bodies(home)
+    assert not (legacy / MIGRATION_MARKER_NAME).exists()
+
+
+def test_the_undo_keeps_a_file_whose_line_endings_changed(tmp_path: Path) -> None:
+    """Codex P2: the byte-identity guard was built on a text comparison.
+
+    ``read_text`` applies universal-newline translation, so a file rewritten
+    from ``hello\\n`` to ``hello\\r\\n`` read back as identical and the guard
+    deleted it. The guard's entire purpose is to delete only what this run wrote
+    and still holds — a normalising comparison cannot establish that.
+    """
+    published = tmp_path / "knowledge" / "note.md"
+    published.parent.mkdir(parents=True)
+    wrote = "---\nname: note\n---\n\nhello\n"
+    published.write_bytes(wrote.encode("utf-8"))
+
+    # Someone rewrote it with CRLF endings. Same characters, different bytes.
+    published.write_bytes(wrote.replace("\n", "\r\n").encode("utf-8"))
+
+    message = migrator_module._undo_import(published, wrote)
+    assert "NOT removed" in message, message
+    assert published.exists(), "an edited file was deleted by a text comparison"
+
+    # The control: the unmodified bytes ARE removed, so the guard still works.
+    published.write_bytes(wrote.encode("utf-8"))
+    ok = migrator_module._undo_import(published, wrote)
+    assert "was removed" in ok and "NOT removed" not in ok, ok
+    assert not published.exists()
+
+
+def test_an_interrupted_then_edited_retry_keeps_both_and_names_the_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Product's narrowed clause 3 (2026-11-07), with its reasoning.
+
+    Codex's shape: kill a run after the import, edit the source, then retry. The
+    home ends up holding both versions under ``p-note.md`` and ``p-note-1.md``.
+
+    Product ruled that this does NOT hold the tag and that provenance to
+    reconcile it must NOT be built: it needs a kill, then a user edit, then a
+    retry, and nothing is lost because both versions are in the home. The
+    requirement is only that the run cannot be SILENT about the pair. So this
+    test asserts the one line, and asserts it reaches the CLI — a warning that
+    exists only in the report object would meet the letter and not the point.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = _memory_home(tmp_path)
+    source = legacy / "p-note.md"
+    source.write_text(_OLD)
+
+    def die(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise SystemExit("killed between the import and the archive")
+
+    monkeypatch.setattr(migrator_module, "archive_file", die)
+    with pytest.raises(SystemExit):
+        migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    _edit_in_place(source, _NEW)
+    result = _run_repo([str(legacy), "--commit", "--no-llm"], home)
+
+    assert result.exit_code == 0, result.output
+    # Both versions, in the home, where search can see them. Nothing deleted.
+    assert sorted(_home_bodies(home)) == ["NEW", "OLD"], _home_bodies(home)
+    # The target name is `<source-dir-slug>-p-note.md`, so match on the suffix.
+    names = sorted(p.name for p in home.rglob("*p-note*.md"))
+    assert len(names) == 2, names
+    assert names[0].endswith("-p-note-1.md"), names
+    assert names[1].endswith("-p-note.md"), names
+    # And the run says so, naming the file it actually wrote.
+    assert names[0] in result.output, result.output
+    assert "nothing was deleted" in result.output, result.output
+
+
+def test_a_source_that_cannot_be_unlinked_leaves_no_import_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: a source-unlink ``PermissionError`` bypassed the cleanup.
+
+    Everything verified, the archive entry published, and then the final
+    ``os.unlink`` failed — an immutable flag, a sticky directory, a read-only
+    mount. That arrived at the migrator as a bare ``OSError``, missed the
+    ``ArchivePublishError`` branch, and landed in the outer handler: the import
+    stayed in the home under a message that never mentioned it. The contract has
+    to hold for every failure to retire, not only the ones with our exception
+    class on them.
+    """
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    source = legacy / "p-note.md"
+    source.write_text(_OLD)
+
+    real_unlink = archive_module.os.unlink
+
+    def refuse_the_source(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if Path(path) == source:
+            raise PermissionError(errno.EPERM, "operation not permitted")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module.os, "unlink", refuse_the_source)
+    report = migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
+    monkeypatch.undo()
+
+    assert report.migrated == 0, report.migrated
+    assert report.errors, "the run reported nothing"
+    message = report.errors[0]
+
+    # THE POINT: the import is gone, and the message says so.
+    assert _home_bodies(home) == [], _home_bodies(home)
+    assert "import" in message and "was removed" in message, message
+    # The message is true about the archive entry too, which on this path was a
+    # second name for the still-present source and so was safe to retract.
+    assert str(source) in message, message
+    assert _archive_bodies(tmp_path) == [], _archive_bodies(tmp_path)
+    # The content is still exactly where it was, and the directory is not retired.
+    assert source.read_text() == _OLD
+    assert not (legacy / MIGRATION_MARKER_NAME).exists()

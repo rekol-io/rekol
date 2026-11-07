@@ -18,7 +18,6 @@ import yaml
 from rekol.config import resolve_index_dir
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
-    ArchivePublishError,
     archive_file,
     claim_free_name,
     predict_archive_name,
@@ -201,6 +200,17 @@ def _serialize_memory_file(classification: Classification) -> str:
     return f"---\n{fm}\n---\n\n{classification.body.strip()}\n"
 
 
+def _target_stem(classification: Classification) -> str:
+    """The filename stem the import ASKS for, before any collision renaming.
+
+    One function so the writer and the collision warning cannot disagree about
+    what name was wanted — a warning that compares against a differently-derived
+    name would fire on every file, or on none, and either way says nothing.
+    """
+    base = classification.target_filename
+    return base[:-3] if base.endswith(".md") else base
+
+
 def _write_imported_file(
     memory_home: Path,
     classification: Classification,
@@ -228,8 +238,7 @@ def _write_imported_file(
     """
     layer_dir = memory_home / LAYER_DIR_MAP[classification.layer]
     layer_dir.mkdir(parents=True, exist_ok=True)
-    base = classification.target_filename
-    stem = base[:-3] if base.endswith(".md") else base
+    stem = _target_stem(classification)
 
     # STAGED, then published atomically — the same shape as the archive and the
     # marker, and for the reason QA measured (2026-11-06): reserving the final
@@ -245,7 +254,10 @@ def _write_imported_file(
     staged_fd, staged_name = tempfile.mkstemp(dir=layer_dir, prefix=".partial-", suffix=".md.tmp")
     staged_path = Path(staged_name)
     try:
-        with os.fdopen(staged_fd, "w") as staged:
+        # Explicit encoding and no newline translation, so the bytes on disk are
+        # exactly ``body.encode("utf-8")``. _undo_import compares bytes, and a
+        # comparison can only be exact if the write was (Codex P2, 2026-11-07).
+        with os.fdopen(staged_fd, "w", encoding="utf-8", newline="") as staged:
             staged.write(body)
             staged.flush()
             os.fsync(staged.fileno())
@@ -260,7 +272,7 @@ def _write_imported_file(
 
 
 def _undo_import(published: Path | None, expected_text: str) -> str:
-    """Remove an import this run just wrote, and SAY what happened either way.
+    r"""Remove an import this run just wrote, and SAY what happened either way.
 
     Returns the sentence to append to the error. The guard is the whole point:
     the file is removed only when it still holds exactly the text this run
@@ -268,11 +280,19 @@ def _undo_import(published: Path | None, expected_text: str) -> str:
     alone. When it cannot be removed, or is no longer ours to remove, the
     message says the import is still there and names it — never that it was
     removed (product, 2026-11-07).
+
+    BYTES, NOT TEXT. This used to call ``read_text``, whose universal-newline
+    translation made the check answer yes to a file that had been edited:
+    rewriting ``hello\n`` as ``hello\r\n`` reads back identical, so the guard
+    passed and the edited file was deleted (Codex P2, 2026-11-07). A guard
+    meant to establish byte-identity cannot be built on a comparison that
+    normalises bytes. ``_write_imported_file`` writes UTF-8 with no newline
+    translation, which is what makes this encode-and-compare exact.
     """
     if published is None:
         return "No import was written, so there is nothing to undo."
     try:
-        if published.read_text() != expected_text:
+        if published.read_bytes() != expected_text.encode("utf-8"):
             return (
                 f"The import {published} was NOT removed: it no longer holds what "
                 f"this run wrote, so it is not ours to delete. It is still there."
@@ -389,10 +409,24 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
     for lf in files:
         try:
             digests[lf.source_path] = source_digest(lf.source_path)
-        except Exception as exc:  # noqa: BLE001 — an unreadable source is reported below
-            report.errors.append(f"could not hash {lf.source_path}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — reported, and the file is then skipped
+            report.errors.append(
+                f"could not hash {lf.source_path}: {exc}. It was NOT migrated and "
+                f"NOT archived, because without a digest nothing could confirm "
+                f"that the bytes retired are the bytes imported."
+            )
 
     for lf in files:
+        # FAIL CLOSED (product, 2026-11-07). A file whose hash failed used to
+        # fall through to `digests.get(...)` returning None, which turned the
+        # whole verification off for exactly the file we understood least: Codex
+        # got OLD in the home and NEW retired, with the only error being the
+        # hash note. Verification cannot be optional on the path that needs it,
+        # so the file is skipped and the source kept. The error above already
+        # blocks retirement, so a later run retries it.
+        if lf.source_path not in digests:
+            continue
+
         try:
             c = classify_file(lf, index_context=index_context, allow_llm=allow_llm)
         except Exception as exc:  # noqa: BLE001 — log and continue
@@ -408,7 +442,14 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
                 report.would_move.append(lf.source_path)
             if not dry_run:
                 try:
-                    archive_file(lf)
+                    # THE DIGEST GOES HERE TOO (Codex P1, 2026-11-07). This
+                    # branch retires a file on the strength of a body hash that
+                    # matched something already in the home — so "what is
+                    # retired is what is in the home" is exactly its claim, and
+                    # it was the one call site making that claim unverified.
+                    # Codex reached OLD-in-home / NEW-archived with no errors
+                    # through here, by retrying after an interrupted import.
+                    archive_file(lf, expected_digest=digests[lf.source_path])
                     report.moved.append(lf.source_path)
                     report.archived += 1
                 except Exception as exc:  # noqa: BLE001
@@ -442,13 +483,36 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             # to the archive, which checks it immediately before the unlink.
             imported_text = _serialize_memory_file(c)
             published = _write_imported_file(memory_home, c, imported_text)
+            if published.name != f"{_target_stem(c)}.md":
+                # NAME THE KEPT PAIR (product, 2026-11-07). The name was taken,
+                # which on this path means an earlier interrupted run already
+                # imported this file and the source has been edited since — so
+                # the home now holds both versions. Product ruled that keeping
+                # both is right and that building provenance to reconcile them
+                # is not worth it in a data-loss fix, but that the run must not
+                # be SILENT about it. This is that one line.
+                report.warnings.append(
+                    f"{lf.source_path} was imported as {published.name}, not "
+                    f"{_target_stem(c)}.md, because that name was already taken "
+                    f"— either by an earlier run that was interrupted before it "
+                    f"could archive this file, or by another file in this batch "
+                    f"with the same name. Both files are in {published.parent}; "
+                    f"nothing was deleted. Compare them and remove whichever you "
+                    f"do not want."
+                )
             try:
-                archive_file(lf, expected_digest=digests.get(lf.source_path))
-            except ArchivePublishError as exc:
-                # A REFUSED RETIREMENT LEAVES NO IMPORT FROM THIS FILE. Guarded
-                # exactly as ruled: only a file THIS run wrote, and only while
-                # it still holds what this run wrote. Anything else is somebody
-                # else's and is left alone, said out loud rather than assumed.
+                archive_file(lf, expected_digest=digests[lf.source_path])
+            except Exception as exc:  # noqa: BLE001
+                # A RETIREMENT THAT DID NOT COMPLETE LEAVES NO IMPORT FROM THIS
+                # FILE — and that has to hold for EVERY failure, not just the
+                # one with our own exception class on it. A source-unlink
+                # PermissionError used to arrive here as a bare OSError, miss
+                # this branch, and land in the outer handler, which left the
+                # import in place under a message that never mentioned it
+                # (Codex P2, 2026-11-07). Archive.py now wraps that case, and
+                # this catch is broad so the next unforeseen one cannot repeat
+                # it. Undo is guarded exactly as ruled: only a file THIS run
+                # wrote, and only while it still holds the bytes this run wrote.
                 report.errors.append(
                     f"archive refused for {lf.source_path}: {exc} "
                     + _undo_import(published, imported_text)
