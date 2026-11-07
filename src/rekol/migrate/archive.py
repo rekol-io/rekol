@@ -109,10 +109,13 @@ def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
     looks: on the copy path a write that lands *after* the re-verification and
     before the unlink is still lost. The window is microseconds rather than the
     duration of a file copy, and it does not exist at all on the hard-link path,
-    which is every ordinary filesystem. An interruption during the fallback's
-    final write can leave a partial file under a real archive name; nothing calls
-    that complete, and ``archive_copy_looks_complete`` is what a later run must
-    use rather than assuming a present name is a good copy.
+    which is every ordinary filesystem.
+
+    A final archive name never receives bytes incrementally. It is claimed by an
+    atomic ``os.link``, or where that is unsupported by an empty ``O_EXCL``
+    placeholder that is then ``os.replace``d, so an interruption leaves either
+    the staged ``.partial-`` temporary or a 0-byte file — never a fragment that
+    reads as a shortened original.
 
     SYMLINK SOURCES are archived as a real-content snapshot, which is what makes
     "kept byte-complete in the archive" true — moving the link re-resolves a
