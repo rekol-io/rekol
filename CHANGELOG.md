@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`doctor` disagreed with the indexer in three more places, all the same fault (#232, Codex).**
+  Each was its own hat on "doctor's idea of what is indexed differs from the indexer's", so they are
+  fixed together and checked by one **agreement table** — a set of shapes run through both the
+  doctor state and the real `_iter_memory_files`, required to coincide.
+  1. **A symlinked top-level layer read as EMPTY.** `os.walk` does not follow links by default,
+     while the indexer reaches a symlinked `topics/` through `Path.glob` — so a home whose memory is
+     sitting right there reported "nothing to index" on an unbuilt index. That is memory silently
+     dark, the worst direction to be wrong in. The walk follows links now and guards cycles by
+     `(device, inode)`, so a `topics/loop -> topics` symlink cannot hang it.
+  2. **A home holding only a root `.draft.md`** reported it as unreachable memory. A hidden file at
+     the root is not something the user is waiting to see in search, and `iter_all_markdown`
+     excludes hidden paths, so it is neutral. Hidden files **inside** a layer are still counted as
+     indexable, because the indexer's globs really do match them — the two rules disagree on
+     purpose, and the table pins both.
+  3. **A home whose `MEMORY.md` is a dangling pointer** read UNKNOWN. The traversal probe stat'd
+     `next(iterdir(), None)` — whichever name the filesystem returned first — so a broken pointer
+     made the whole check report "a missing answer" about a perfectly readable home. It probes only
+     the entries the answer depends on: the layer dirs and `projects/`.
+  An unreadable layer dir still yields UNKNOWN, and an unreadable `tasks/` still does not, so
+  neither fix swallowed the other. Each of the three is revert-proved and fails on its own row.
 - **The "is there anything to index?" count used a different scope from the indexer (#232,
   Codex).** It counted every non-hidden, non-excluded `.md` anywhere under the memory home; the
   indexer walks the layer dirs (`always`, `when`, `topics`, `knowledge`, `feedback`) and

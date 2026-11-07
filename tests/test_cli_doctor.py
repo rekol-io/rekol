@@ -1684,3 +1684,129 @@ def test_an_unreadable_layer_dir_still_makes_the_answer_unknown(
 
     assert finding.status is Status.PROBLEM, finding.detail
     assert "UNKNOWN" in finding.detail, finding.detail
+
+
+# ---------------------------------------------------------------------------
+# THE AGREEMENT TABLE (#232, product's ruling 2026-11-07)
+# ---------------------------------------------------------------------------
+# Every defect found in this check has been the same fault wearing a different
+# hat: doctor's idea of what is indexed differing from the indexer's. A
+# symlinked layer, a hidden file, a dangling pointer — three findings, one
+# cause. So the two are checked TOGETHER from now on, as a table of shapes run
+# through both, rather than as one test per hat.
+
+
+def _doctor_state(home: Path):
+    from rekol.cli_doctor import _curated_memory_file_state
+
+    return _curated_memory_file_state(home)
+
+
+def _indexer_reaches(home: Path) -> int:
+    from rekol.indexer import _iter_memory_files
+
+    return len(list(_iter_memory_files(home)))
+
+
+def _disagreements(name: str, state, count: int, reached: int, expected) -> list[str]:
+    """Why ``name`` fails, if it does. Split out only to clear the complexity limit."""
+    from rekol.cli_doctor import _CuratedFiles
+
+    if state is not expected:
+        return [f"{name}: doctor said {state.value}, expected {expected.value}"]
+    # THE EQUIVALENCE. UNKNOWN is exempt by definition: it is the answer for
+    # "cannot tell", so it carries no claim about what the indexer reaches.
+    if state is _CuratedFiles.UNKNOWN:
+        return []
+    doctor_says_something = state is _CuratedFiles.SOME
+    if doctor_says_something == (reached > 0):
+        return []
+    return [
+        f"{name}: doctor says {'something' if doctor_says_something else 'nothing'} to index "
+        f"({state.value}, count={count}) but the indexer reaches {reached} file(s)"
+    ]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these shapes rely on")
+def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
+    """One table. `doctor` says "there is something to index" exactly when there is.
+
+    The claim being pinned is an equivalence, not a count: for every shape, the
+    indexer reaching at least one file must coincide with `doctor` answering
+    SOME — and where `doctor` cannot tell, it must say UNKNOWN rather than
+    guessing either way.
+    """
+    from rekol.cli_doctor import _CuratedFiles
+
+    def build_linked_layer(home: Path) -> None:
+        """A top-level layer that is a symlink to a readable directory."""
+        external = home.parent / "external-topics"
+        external.mkdir()
+        (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+        (home / "topics").symlink_to(external)
+
+    def build_root_hidden_file(home: Path) -> None:
+        """A hidden file at the ROOT: outside every layer, and not user-visible."""
+        (home / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+    def build_hidden_in_layer(home: Path) -> None:
+        """A hidden file INSIDE a layer: the indexer's globs do match this."""
+        (home / "always").mkdir()
+        (home / "always" / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+    def build_dangling_pointer(home: Path) -> None:
+        """A retirement pointer whose target is gone."""
+        (home / "MEMORY.md").symlink_to(home / "nowhere-at-all.md")
+
+    def build_root_stray(home: Path) -> None:
+        """A visible file at the root: real memory the indexer will never reach."""
+        (home / "note.md").write_text("---\nname: N\n---\n\nreal\n")
+
+    def build_unreadable_tasks(home: Path) -> None:
+        """`tasks/` is excluded by design, so its readability is irrelevant."""
+        (home / "topics").mkdir()
+        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+        (home / "tasks").mkdir()
+        (home / "tasks" / "t1.md").write_text("---\nname: T1\n---\n\nt\n")
+        (home / "tasks").chmod(0o000)
+
+    def build_unreadable_topics(home: Path) -> None:
+        """A layer dir that cannot be read: the answer DOES depend on it."""
+        (home / "topics").mkdir()
+        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+        (home / "topics").chmod(0o000)
+
+    def build_layer_cycle(home: Path) -> None:
+        """A symlink loop inside a layer. Following links must not hang."""
+        (home / "topics").mkdir()
+        (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+        (home / "topics" / "loop").symlink_to(home / "topics")
+
+    # shape -> (builder, expected doctor state)
+    shapes = {
+        "linked layer": (build_linked_layer, _CuratedFiles.SOME),
+        "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
+        "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
+        "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),
+        "dangling MEMORY.md only": (build_dangling_pointer, _CuratedFiles.NONE),
+        "root stray only": (build_root_stray, _CuratedFiles.OUTSIDE_THE_LAYERS),
+        "unreadable tasks/": (build_unreadable_tasks, _CuratedFiles.SOME),
+        "unreadable topics/": (build_unreadable_topics, _CuratedFiles.UNKNOWN),
+    }
+
+    failures: list[str] = []
+    for name, (build, expected) in shapes.items():
+        home = tmp_path / name.replace("/", "-").replace(" ", "-")
+        home.mkdir()
+        build(home)
+        try:
+            state, count = _doctor_state(home)
+            reached = _indexer_reaches(home)
+        finally:
+            for path in (home / "tasks", home / "topics"):
+                if path.is_dir():
+                    path.chmod(0o755)
+
+        failures.extend(_disagreements(name, state, count, reached, expected))
+
+    assert not failures, "doctor and the indexer disagree:\n  " + "\n  ".join(failures)

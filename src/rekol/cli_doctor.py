@@ -126,11 +126,37 @@ def _count_markdown_by_scope(
 
     Split out of :func:`_curated_memory_file_state` only to keep that function
     under the complexity limit; the reasoning lives in its docstring.
+
+    ``followlinks=True``, which matters and is not the default: the indexer
+    reaches a symlinked layer (``home/topics`` pointing elsewhere) through
+    ``Path.glob``, so a walk that refuses to follow it counted ZERO and reported
+    "nothing to index" for a home whose memory is sitting right there (Codex,
+    2026-11-07). That is the worst direction to be wrong in — memory silently
+    dark on an unbuilt index — so the walk follows links and guards against
+    cycles by inode instead.
     """
     indexable = 0
     outside = 0
-    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=on_error):
-        if Path(dirpath) == memory_home:
+    # Cycle guard, needed because followlinks=True makes os.walk loop forever on
+    # `home/topics/loop -> home/topics`. Keyed on (device, inode) rather than on
+    # the path, so two routes to the same directory count once.
+    visited: set[tuple[int, int]] = set()
+
+    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=on_error, followlinks=True):
+        try:
+            entry = os.stat(dirpath)
+        except OSError as exc:
+            on_error(exc)
+            dirnames[:] = []
+            continue
+        key = (entry.st_dev, entry.st_ino)
+        if key in visited:
+            dirnames[:] = []
+            continue
+        visited.add(key)
+
+        at_root = os.path.samestat(entry, os.stat(memory_home))
+        if at_root:
             # PRUNE WHAT THE INDEXER NEVER READS, BEFORE DESCENDING (Codex).
             # `tasks/` is the machine-managed task layer, excluded by design —
             # but an unreadable one still tripped `onerror`, so a home whose
@@ -140,9 +166,9 @@ def _count_markdown_by_scope(
             #
             # Only the layer dirs and `projects/` can hold anything indexable,
             # so nothing else is descended into — markdown sitting at the root
-            # is still seen by the file loop at this level, and counted as
-            # OUTSIDE. A hidden directory INSIDE a layer is kept: the indexer's
-            # globs match there, so `always/.old/x.md` really is indexed.
+            # is still seen by the file loop at this level. A hidden directory
+            # INSIDE a layer is kept: the indexer's globs match there, so
+            # `always/.old/x.md` really is indexed.
             dirnames[:] = [
                 d
                 for d in dirnames
@@ -156,7 +182,14 @@ def _count_markdown_by_scope(
                 continue
             if is_in_indexed_layer(path, memory_home):
                 indexable += 1
-            else:
+            elif not filename.startswith("."):
+                # OUTSIDE the layers, and NOT hidden. A root `.draft.md` is not
+                # something the user is waiting to see in search: `iter_all_
+                # markdown` excludes hidden paths, so reporting it as unreachable
+                # memory was noise on an otherwise empty home (Codex). Hidden
+                # files INSIDE a layer are a different question and are counted
+                # as indexable above, because the indexer's globs really do
+                # match them — the two rules disagree on purpose.
                 outside += 1
     return indexable, outside
 
@@ -177,15 +210,31 @@ def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
     real walk by a property test. A predicate rather than the walk itself
     because this needs ``os.walk``'s ``onerror`` to SEE an unreadable directory;
     ``glob`` swallows that, which is #232.
+
+    Every disagreement between this and the indexer has been the same fault
+    wearing a different hat — a symlinked layer, a hidden file, a dangling
+    pointer — so they are now checked TOGETHER, as a table of shapes run through
+    both this function and the real ``_iter_memory_files`` and required to
+    agree. That table is the test that matters here.
     """
     try:
         if not memory_home.is_dir():
             return _CuratedFiles.UNKNOWN, 0
         # Listing is not traversal (#231): a directory can be listable while its
-        # children cannot be opened, so the first entry is stat'd.
-        first = next(memory_home.iterdir(), None)
-        if first is not None:
-            first.stat()
+        # children cannot be opened, so entries are stat'd rather than only
+        # named.
+        #
+        # ONLY THE ENTRIES THE ANSWER DEPENDS ON, which is the fix for a home
+        # whose `MEMORY.md` is a dangling pointer (Codex, 2026-11-07). This
+        # probed `next(iterdir(), None)` — whichever name the filesystem
+        # happened to return first — so a dangling retirement pointer made the
+        # whole check report UNKNOWN, "a missing answer", about a home that was
+        # perfectly readable. The entries that decide the answer are the layer
+        # dirs and `projects/`; a broken pointer at the root is not one of them.
+        for layer in (*INDEXED_DIRS, PROJECTS_DIR):
+            candidate = memory_home / layer
+            if candidate.is_symlink() or candidate.exists():
+                candidate.stat()  # follows the link on purpose: the indexer does
     except OSError:
         return _CuratedFiles.UNKNOWN, 0
 
