@@ -95,23 +95,127 @@ def _format_last_indexed(indexed_at_unix: int | None) -> str:
         return "unknown"
 
 
+class _CuratedFiles(Enum):
+    """Whether there is any curated memory to index.
+
+    THREE states, not two (same lesson as #231's prior-index check). Collapsing
+    "cannot tell" into "none" is what turns an unreadable memory home into a
+    reassuring first-run line, which is the defect this check is being fixed to
+    stop making.
+    """
+
+    NONE = "none"  # readable, and holds no curated memory files
+    SOME = "some"  # holds at least one
+    UNKNOWN = "unknown"  # could not be read, so neither of the above is known
+
+
+def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
+    """``(state, count)``; the count is meaningful only for ``SOME``.
+
+    Uses the indexer's FILESYSTEM walk (``iter_all_markdown``) and its exclusion
+    predicate, not the indexer's own indexing walk — a check that shares the walk
+    shares its blind spot, which is #158.
+    """
+    try:
+        if not memory_home.is_dir():
+            return _CuratedFiles.UNKNOWN, 0
+        # Listing is not traversal (#231): a directory can be listable while its
+        # children cannot be opened, so the first entry is stat'd.
+        first = next(memory_home.iterdir(), None)
+        if first is not None:
+            first.stat()
+    except OSError:
+        return _CuratedFiles.UNKNOWN, 0
+
+    # NOT `Path.glob`, which SWALLOWS a PermissionError on a subdirectory and
+    # simply yields nothing for it. A readable memory home with one unreadable
+    # layer dir therefore counted 0 files and reported "there is no curated
+    # memory to index" — a file was there, and the answer was identical to
+    # having none. That is the #158 shape: output the same whether or not the
+    # thing held. `os.walk`'s onerror makes the failure visible instead.
+    walk_failed = False
+
+    def _note_walk_error(_exc: OSError) -> None:
+        nonlocal walk_failed
+        walk_failed = True
+
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(memory_home, onerror=_note_walk_error):
+        # Prune hidden directories, matching the indexer's own exclusion.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            path = Path(dirpath) / filename
+            if not is_non_memory(path, memory_home):
+                count += 1
+
+    if walk_failed:
+        return _CuratedFiles.UNKNOWN, 0
+    return (_CuratedFiles.SOME if count else _CuratedFiles.NONE), count
+
+
 def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Inspect the curated ``index.db``: existence, schema, identity, counts, age."""
     findings: list[Finding] = []
     db_path = cfg.index_db_path
     if not db_path.exists():
-        # A curated index that was never built is a PROBLEM, not merely INFO:
-        # memory search has nothing to return, which is exactly the "memory
-        # doesn't work" state a user runs `doctor` to diagnose. Reported, not
-        # crashed (we never open a non-existent DB), with the build remedy.
-        findings.append(
-            Finding(
-                label="curated index",
-                status=Status.PROBLEM,
-                detail=f"not built yet (no {db_path})",
-                remedy="rekol index rebuild",
+        # "Not built yet" has three meanings and they are not interchangeable
+        # (#232). Reporting all of them as a PROBLEM made `doctor` red out of the
+        # box on a machine where nothing was wrong — the third time this project
+        # has shipped that, after #165 and #231, and each time it teaches people
+        # to stop reading the report.
+        #
+        # The two checks either side of this one already model it: `transcript
+        # archive` prints a neutral line for the same condition, and `session
+        # index` only fires when transcripts actually exist. This now matches
+        # them.
+        curated, curated_count = _curated_memory_file_state(cfg.memory_home)
+        if curated is _CuratedFiles.SOME:
+            # The real #165 bar: content exists and search cannot reach it.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}) — but {curated_count} curated "
+                        "memory file(s) exist, so searching curated memory returns "
+                        "nothing"
+                    ),
+                    remedy="rekol index rebuild",
+                )
             )
-        )
+        elif curated is _CuratedFiles.UNKNOWN:
+            # Its own report, because "cannot tell" is not "nothing to index".
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}) and {cfg.memory_home} could "
+                        "not be read, so whether there is anything to index is "
+                        "UNKNOWN — this is not a first run, it is a missing answer"
+                    ),
+                    remedy=(
+                        f"check that {cfg.memory_home} exists and is readable, then "
+                        "rekol index rebuild"
+                    ),
+                )
+            )
+        else:
+            # Nothing to index: an index would be empty, and `rekol index
+            # rebuild` would only silence the line rather than make it true.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.INFO,
+                    detail=(
+                        f"not built yet, and there is no curated memory to index in "
+                        f"{cfg.memory_home} — it is built when you capture your first "
+                        "memory"
+                    ),
+                )
+            )
         return findings
 
     # Opening or querying a corrupt index.db raises sqlite3.DatabaseError ("file

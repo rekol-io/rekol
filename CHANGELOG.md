@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`doctor` called an unbuilt curated index a problem even when there was nothing to index
+  (#232).** On a machine with no curated memory yet, `✗ curated index: not built yet` was reported
+  with the remedy `rekol index rebuild` — which would have built an *empty* index. Running it did
+  not make the statement true, it only silenced the line, which is the tell that the severity was
+  wrong. That is `doctor` red out of the box for the third time, after #165 and #231, and each time
+  it teaches people to stop reading the report.
+  "Not built yet" now has three meanings, matching what the checks either side already do (the
+  archive check prints a neutral line for the same condition, and the session index only fires when
+  transcripts exist):
+  no curated files → **neutral**, no remedy; curated files present → **PROBLEM**, naming how many
+  exist and that search returns nothing (the #165 bar, unchanged); the memory home unreadable →
+  **its own PROBLEM**, reported as UNKNOWN, because "cannot tell" is not "nothing to index".
+- **The file count silently undercounted an unreadable subdirectory.** `Path.glob` swallows a
+  `PermissionError` on a subdirectory and simply yields nothing for it, so a readable memory home
+  with one unreadable layer dir counted zero files and reported "there is no curated memory to
+  index" — identical output to genuinely having none, with a real file sitting there. The walk now
+  uses `os.walk(onerror=…)` so the failure is visible and reported as UNKNOWN.
+
+### Fixed
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name

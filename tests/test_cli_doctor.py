@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from cache_helpers import cache_dir_for
@@ -1440,3 +1441,100 @@ def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
     assert finding.status is Status.INFO, finding.detail
     assert finding.remedy is None
     assert "import hook" in finding.detail
+
+
+# ---------------------------------------------------------------------------
+# "curated index: not built yet" has three meanings (#232)
+# ---------------------------------------------------------------------------
+# Reporting all of them as a PROBLEM made `doctor` red out of the box on a
+# machine where nothing was wrong — the third time this project has shipped
+# that, after #165 and #231. The checks either side already model it: the
+# archive check prints a neutral line for the same condition, and the session
+# index only fires when transcripts actually exist.
+
+
+def _unindexed_home(tmp_path: Path, monkeypatch, *, with_curated: bool) -> Path:
+    """A home with NO curated index built, optionally holding curated files."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {tmp_path / 'projects'}\n"
+    )
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    if with_curated:
+        (home / "topics").mkdir()
+        (home / "topics" / "sailing.md").write_text(
+            "---\nname: Sailing\ndescription: boats\ntype: topic\n"
+            "tags: ['sailing']\naliases: ['boats']\n---\n\n# Sailing\n\nBoats.\n"
+        )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    return home
+
+
+def _curated_finding(findings: list) -> object:
+    matches = [f for f in findings if f.label == "curated index"]
+    assert matches, [f.label for f in findings]
+    return matches[0]
+
+
+def test_no_curated_memory_and_no_index_is_neutral(tmp_path: Path, monkeypatch) -> None:
+    """Nothing to index is not a fault, and `index rebuild` would build nothing.
+
+    Running the old remedy did not make the statement true; it only silenced the
+    line. That is the tell that the severity was wrong.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert finding.remedy is None
+    assert "no curated memory to index" in finding.detail
+
+
+def test_curated_memory_without_an_index_is_still_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """The #165 bar, and the negative control for the neutrality above.
+
+    Without this, making every "not built yet" neutral would pass the test above
+    while hiding the case that actually breaks search.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert finding.remedy == "rekol index rebuild"
+    # The count is what makes it checkable rather than a guess.
+    assert "1 curated memory file(s) exist" in finding.detail
+    assert "returns nothing" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_is_unknown_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`Path.glob` swallows a PermissionError on a subdirectory and yields nothing.
+
+    So a readable memory home with one unreadable layer dir counted zero files
+    and reported "there is no curated memory to index" — the answer identical to
+    genuinely having none, with a real file sitting right there. That is the #158
+    shape, and it is why the walk now uses `os.walk(onerror=…)`.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "topics").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "topics").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail
+    assert "no curated memory to index" not in finding.detail
+
+
+def test_an_absent_memory_home_is_unknown_not_nothing_to_index(tmp_path: Path, monkeypatch) -> None:
+    """A REKOL_HOME that does not exist is not evidence that nothing was curated."""
+    missing = tmp_path / "gone"
+    monkeypatch.setenv("REKOL_HOME", str(missing))
+    (tmp_path / "cfg").mkdir()
+    from rekol.cli_doctor import _curated_memory_file_state, _CuratedFiles
+
+    state, count = _curated_memory_file_state(missing)
+    assert state is _CuratedFiles.UNKNOWN
+    assert count == 0
