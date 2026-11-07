@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A symlinked memory would have been forked rather than edited (#238, product).** `os.replace`
+  acts on the **name**, so publishing over a symlinked memory deleted the link, left a regular file
+  in the home holding the new text, and left the **real file with the old text** — the user's edit
+  in a different place from the file they believed they edited, with nothing reporting it. This was
+  a regression introduced by the atomic-write change itself: `Path.write_text` follows a symlink, so
+  `confirm` on a symlinked memory works on `main`. The target is resolved first and the temporary is
+  staged beside it, which also keeps the `os.replace` on one filesystem when the link points off the
+  home. A dangling link is followed too, matching `write_text`, and the mode preserved is the
+  **target's**. Tested contained, pointing outside the home, dangling, and dangling into a missing
+  directory.
+- **`tempfile.mkstemp` sat outside the error boundary (#238, product).** A read-only directory or an
+  exhausted inode table raised a raw `OSError` traceback instead of `AtomicWriteError`, which breaks
+  the one promise this module makes — that a failure says in one sentence whether the file survived.
+  A consequence accepted deliberately: a writable file in a read-only directory used to be editable
+  and now fails whole, with that message.
 - **Editing a memory destroyed it first, then wrote the replacement (#238).** `Path.write_text`
   and `open(path, "w")` **truncate before writing**, and that is how `confirm`, `flag-suspect`,
   `invalidate` and `review --confirm` all edited a memory in place. A fault between the truncation

@@ -59,11 +59,39 @@ def write_text_atomically(path: Path, text: str) -> None:
     :class:`AtomicWriteError` is raised. There is no third outcome, and in
     particular no window in which the file is shorter than either version.
 
-    ``path``'s parent must exist; callers that create a new memory create its
-    layer directory first, which they already did.
+    SYMLINKS ARE FOLLOWED, which this has to do explicitly (product, 2026-11-07).
+    ``os.replace`` acts on the NAME, so replacing a symlinked memory would
+    delete the link and leave a regular file holding the new text while the real
+    file kept the old — a silent fork, with the user's edit in a different place
+    from the file they think they edited. ``Path.write_text`` follows the link,
+    so that worked before this module existed and must keep working. The target
+    is resolved first and the temporary is staged next to it, which also keeps
+    the ``os.replace`` on one filesystem when the link points off the home.
+
+    A DANGLING link is followed too, again matching ``write_text``: the target is
+    created. If the target's directory does not exist, the staging fails and
+    that surfaces as :class:`AtomicWriteError` like any other write failure.
     """
-    directory = path.parent
-    staged_fd, staged_name = tempfile.mkstemp(dir=directory, prefix=".partial-", suffix=".md.tmp")
+    # realpath, not Path.resolve(strict=True): the target need not exist (a new
+    # memory, or a dangling link), and parent symlinks are resolved too so the
+    # staging really does land beside the real file.
+    target = Path(os.path.realpath(path))
+    directory = target.parent
+
+    # INSIDE the boundary (product, 2026-11-07). A read-only directory or an
+    # exhausted inode table raises here, and outside the try that escaped as a
+    # raw OSError traceback -- which breaks the one promise this module makes,
+    # that a failure says in one sentence whether the file survived.
+    try:
+        staged_fd, staged_name = tempfile.mkstemp(
+            dir=directory, prefix=".partial-", suffix=".md.tmp"
+        )
+    except OSError as exc:
+        raise AtomicWriteError(
+            f"could not prepare a temporary file in {directory} to write "
+            f"{path}: {exc}. The file is UNCHANGED — nothing was written to it."
+        ) from exc
+
     staged_path = Path(staged_name)
     try:
         with os.fdopen(staged_fd, "w", encoding="utf-8") as staged:
@@ -77,11 +105,12 @@ def write_text_atomically(path: Path, text: str) -> None:
         # Preserve the mode of the file being replaced, if there is one. Without
         # this an edit silently resets permissions to the 0600 mkstemp gives,
         # which for a memory home shared over a network mount is a real change.
+        # Read from the TARGET, since that is the file whose mode survives.
         try:
-            os.chmod(staged_path, path.stat().st_mode & 0o7777)
+            os.chmod(staged_path, target.stat().st_mode & 0o7777)
         except FileNotFoundError:
             os.chmod(staged_path, 0o644)  # a new file: the ordinary default
-        os.replace(staged_path, path)
+        os.replace(staged_path, target)
     except OSError as exc:
         staged_path.unlink(missing_ok=True)
         raise AtomicWriteError(

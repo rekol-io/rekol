@@ -230,3 +230,113 @@ def test_the_mode_of_an_existing_memory_is_preserved(tmp_path: Path) -> None:
 
     write_text_atomically(target, "replacement")
     assert target.stat().st_mode & 0o777 == 0o644, oct(target.stat().st_mode)
+
+
+def test_a_symlinked_memory_is_edited_through_the_link(tmp_path: Path) -> None:
+    """os.replace acts on the NAME, so this had to be made explicit.
+
+    Measured by product: replacing a symlinked memory deleted the link, left a
+    regular file in the home holding the new text, and left the REAL file with
+    the old text. A silent fork — the user's edit in a different place from the
+    file they believe they edited. `Path.write_text` follows the link, so that
+    worked before this module existed.
+    """
+    home = tmp_path / "home" / "topics"
+    home.mkdir(parents=True)
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    real = external / "real.md"
+    real.write_text("the original body")
+    link = home / "m.md"
+    link.symlink_to(real)
+
+    write_text_atomically(link, "the new body")
+
+    assert link.is_symlink(), "the symlink was replaced by a regular file"
+    assert real.read_text() == "the new body", "the real file was left stale"
+    assert link.read_text() == "the new body"
+    # No debris beside either file.
+    assert sorted(p.name for p in home.iterdir()) == ["m.md"]
+    assert sorted(p.name for p in external.iterdir()) == ["real.md"]
+
+
+def test_a_symlink_inside_the_home_is_edited_through_the_link(tmp_path: Path) -> None:
+    """The contained case, which is the ordinary one and must behave the same."""
+    home = tmp_path / "home"
+    (home / "topics").mkdir(parents=True)
+    (home / "knowledge").mkdir()
+    real = home / "knowledge" / "real.md"
+    real.write_text("original")
+    link = home / "topics" / "alias.md"
+    link.symlink_to(real)
+
+    write_text_atomically(link, "updated")
+
+    assert link.is_symlink()
+    assert real.read_text() == "updated"
+
+
+def test_a_dangling_symlink_creates_its_target(tmp_path: Path) -> None:
+    """Matching write_text, which creates the target rather than failing."""
+    home = tmp_path / "home" / "topics"
+    home.mkdir(parents=True)
+    target = tmp_path / "elsewhere" / "missing.md"
+    target.parent.mkdir(parents=True)
+    link = home / "dangling.md"
+    link.symlink_to(target)
+    assert not target.exists()
+
+    write_text_atomically(link, "---\nname: D\n---\n\nbody\n")
+
+    assert target.read_text().endswith("body\n")
+    assert link.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_a_dangling_symlink_into_a_missing_directory_fails_cleanly(tmp_path: Path) -> None:
+    """There is nowhere to stage, so it must be the one-sentence failure."""
+    home = tmp_path / "home" / "topics"
+    home.mkdir(parents=True)
+    link = home / "nowhere.md"
+    link.symlink_to(tmp_path / "no" / "such" / "dir" / "x.md")
+
+    with pytest.raises(AtomicWriteError) as caught:
+        write_text_atomically(link, "body")
+    assert "UNCHANGED" in str(caught.value), str(caught.value)
+    assert sorted(p.name for p in home.iterdir()) == ["nowhere.md"]
+
+
+def test_the_mode_of_a_symlink_target_is_preserved(tmp_path: Path) -> None:
+    """The mode that survives is the target's, not the link's."""
+    home = tmp_path / "home" / "topics"
+    home.mkdir(parents=True)
+    real = tmp_path / "elsewhere" / "real.md"
+    real.parent.mkdir(parents=True)
+    real.write_text("original")
+    real.chmod(0o640)
+    (home / "m.md").symlink_to(real)
+
+    write_text_atomically(home / "m.md", "updated")
+    assert real.stat().st_mode & 0o777 == 0o640, oct(real.stat().st_mode)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_a_read_only_directory_fails_with_the_message_not_a_traceback(tmp_path: Path) -> None:
+    """`mkstemp` sat OUTSIDE the try, so this escaped as a raw OSError.
+
+    That breaks the one promise this module makes: a failure says in one
+    sentence whether the file survived. A traceback does not.
+    """
+    directory = tmp_path / "locked"
+    directory.mkdir()
+    target = directory / "m.md"
+    target.write_text("original")
+    directory.chmod(0o500)  # readable and traversable, not writable
+    try:
+        with pytest.raises(AtomicWriteError) as caught:
+            write_text_atomically(target, "replacement")
+    finally:
+        directory.chmod(0o755)
+
+    assert "UNCHANGED" in str(caught.value), str(caught.value)
+    assert target.read_text() == "original"
