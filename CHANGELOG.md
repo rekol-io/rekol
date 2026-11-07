@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Archiving deleted new bytes when an editor saved over the source.** The hard-link path's
+  guarantee — same inode, so removing the source name cannot lose content — holds only while the
+  pathname still *denotes* that inode. An editor's atomic save replaces the pathname with a brand
+  new file, so the unconditional unlink removed the **new** bytes while the archive kept the old
+  ones. The source's device and inode are now confirmed against what was just published,
+  immediately before the name is removed; on a mismatch both files are kept, the run reports it,
+  and the directory is not retired. The published copy is deliberately *not* removed — it is the
+  only name left for the bytes that were there, so unlinking it would destroy them.
+- **The no-hard-link fallback wrote bytes under a final name, and imports inherited it.** It copied
+  the whole file into the final name, so an interruption left a valid-frontmatter fragment at
+  `knowledge/<name>.md`, directly visible to the indexer — QA's wrong-memory hazard, reached
+  through a different door. The fallback now claims the name with an **empty placeholder** and then
+  `os.replace`s the staged file over it, so a final name only ever holds the placeholder or the
+  complete file. The worst interruption leaves a 0-byte file, and a test asserts that is inert by
+  running the real indexer over it: zero files indexed, zero chunks.
+- **Verification ran before a copy that could still lose data.** On the fallback the digest check
+  preceded a second full copy, so a source mutated during that copy was lost with the check already
+  behind us. The source is now re-verified **after** publication, covering everything up to the
+  instant before its name is removed. A separate completeness check stays *before* publication, so
+  a short stage is never published — collapsing those two into one check is a hole this fix briefly
+  opened, and a test caught it.
+- `archive_copy_looks_complete()` is removed. It had no production caller, so it implied a recovery
+  contract nothing enforced; with placeholder-then-replace there is no partial file under a final
+  name for it to detect.
+
+### Fixed
 - **A fault mid-import left a truncated memory under an ordinary name.** The import reserved the
   target name with `O_CREAT|O_EXCL` and then wrote into it, so a write that failed part-way — a full
   disk, a hard kill — left a fragment that *looks* like a memory. QA measured the consequence: the

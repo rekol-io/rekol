@@ -1067,8 +1067,14 @@ def test_a_short_copy_on_the_fallback_is_refused_rather_than_published(
     # The source is what matters: it must still be there, whole.
     assert source.read_text() == "the whole thing matters\n"
     assert "KEPT" in str(caught.value) or "changed while" in str(caught.value)
-    assert not (archive_dir / "topic.md").exists()
-    assert list(archive_dir.iterdir()) == []
+    # The published copy MAY exist, holding the bytes as they were when copied —
+    # verification now happens after publication, which is what closes the
+    # whole-copy window on this path. What must never exist is a FRAGMENT under
+    # a real name: the final name only ever receives bytes via os.replace.
+    published = archive_dir / "topic.md"
+    if published.exists():
+        assert published.read_text() in ("the whole thing matters\n", ""), published.read_text()
+    assert [p.name for p in archive_dir.iterdir() if p.name.startswith(".partial-")] == []
 
 
 def test_sequential_same_name_originals_still_get_suffixes(tmp_path: Path) -> None:
@@ -1139,22 +1145,16 @@ def test_a_same_length_edit_during_the_fallback_copy_keeps_the_source(
     with pytest.raises(archive_module.ArchivePublishError) as caught:
         archive_module.publish_into_archive(source, archive_dir)
 
-    # The new bytes survive, and nothing was published.
+    # The NEW bytes survive at the source — that is the loss this prevents.
     assert source.read_text() == "BBBBBBBB\n"
     assert "KEPT" in str(caught.value)
-    assert list(archive_dir.iterdir()) == []
-
-
-def test_archive_copy_looks_complete_rejects_a_truncated_file(tmp_path: Path) -> None:
-    """An interrupted fallback write can sit under a real name; it is not a copy."""
-    archive_dir = tmp_path / ARCHIVE_DIR_NAME
-    archive_dir.mkdir()
-    partial = archive_dir / "topic.md"
-    partial.write_text("half")
-
-    assert archive_module.archive_copy_looks_complete(partial, source_size=4) is True
-    assert archive_module.archive_copy_looks_complete(partial, source_size=40) is False
-    assert archive_module.archive_copy_looks_complete(archive_dir / "absent.md", 1) is False
+    # The archive holds the bytes as they were, which is not a loss: both
+    # versions exist and the directory is not retired, so a re-run archives the
+    # current content. What must never exist is a fragment.
+    published = archive_dir / "topic.md"
+    if published.exists():
+        assert published.read_text() == "AAAAAAAA\n", published.read_text()
+    assert [p.name for p in archive_dir.iterdir() if p.name.startswith(".partial-")] == []
 
 
 # --------------------------------------------------------------------------
@@ -1323,3 +1323,152 @@ def test_a_retry_after_a_full_disk_imports_exactly_one_whole_file(
     assert len(files) == 1, f"expected exactly one whole file, got {[f.name for f in files]}"
     # Whole, not cut: the body survived, not just the frontmatter.
     assert "Boats are good." in files[0].read_text()
+
+
+# --------------------------------------------------------------------------
+# Codex's three P1 probes (2026-11-06)
+# --------------------------------------------------------------------------
+
+
+def test_an_atomic_save_replacing_the_source_does_not_lose_the_new_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1a: "same inode, no content window" holds only while the NAME denotes it.
+
+    An editor's atomic save replaces the source *pathname* with a brand-new
+    file. The unconditional unlink then deleted the NEW bytes while the archive
+    kept the old ones — a loss path the accepted copy-path micro-window does not
+    cover, because the hard-link path had no source-identity check at all.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("OLD\n")
+
+    real_link = archive_module.os.link
+    swapped = {"done": False}
+
+    def link_then_atomic_save(src, dst, **kwargs):  # noqa: ANN001
+        result = real_link(src, dst, **kwargs)
+        if not swapped["done"]:
+            swapped["done"] = True
+            # Exactly an editor's save: write a new file and rename it over.
+            replacement = tmp_path / "topic.md.new"
+            replacement.write_text("NEW\n")
+            os.replace(replacement, source)
+        return result
+
+    monkeypatch.setattr(archive_module.os, "link", link_then_atomic_save)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    assert swapped["done"], "the probe never fired; this test proved nothing"
+    # The new bytes must survive.
+    assert source.read_text() == "NEW\n"
+    assert "was replaced while it was being archived" in str(caught.value)
+    # And the old bytes are still reachable, because the published link is the
+    # only name they have left — removing it would have destroyed them.
+    assert (archive_dir / "topic.md").read_text() == "OLD\n"
+
+
+def test_a_source_mutation_during_publication_is_caught_after_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1b: verification must cover the publication step itself."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("AAAA\n")
+
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    real_replace = archive_module.os.replace
+    mutated = {"done": False}
+
+    def replace_then_mutate(src, dst):  # noqa: ANN001
+        result = real_replace(src, dst)
+        if not mutated["done"]:
+            mutated["done"] = True
+            source.write_text("BBBB\n")  # same length: a size check misses it
+        return result
+
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
+    monkeypatch.setattr(archive_module.os, "replace", replace_then_mutate)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    assert mutated["done"], "the probe never fired; this test proved nothing"
+    assert source.read_text() == "BBBB\n", "the new bytes were lost"
+    assert "KEPT" in str(caught.value)
+
+
+def test_an_interrupted_fallback_import_never_leaves_a_fragment_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1c: imports inherited the fallback that copied into the final name.
+
+    A valid-frontmatter fragment left at `knowledge/<name>.md` is directly
+    visible to the indexer's markdown walk — QA's wrong-memory hazard. With
+    placeholder-then-``os.replace`` the final name can only ever hold an empty
+    placeholder or the complete file, so the worst case is inert.
+    """
+    memory_home = _memory_home(tmp_path)
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    layer = memory_home / "knowledge"
+
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    def interrupt_at_replace(src, dst):  # noqa: ANN001, ARG001
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
+    monkeypatch.setattr(archive_module.os, "replace", interrupt_at_replace)
+
+    with contextlib.suppress(BaseException):
+        migrate_dir(
+            source_dir=source_dir,
+            memory_home=memory_home,
+            dry_run=False,
+            allow_llm=False,
+        )
+    monkeypatch.undo()
+
+    # Whatever is left under an ordinary .md name must not be a fragment: either
+    # nothing, or the empty placeholder.
+    for path in layer.iterdir():
+        if path.suffix == ".md" and not path.name.startswith("."):
+            assert path.stat().st_size == 0, (
+                f"a fragment is visible as a memory: {path.name} -> {path.read_text()!r}"
+            )
+
+    # And an empty placeholder is inert, asserted through the INDEXER rather
+    # than a validation helper — what matters is whether it can become a
+    # searchable memory, which is the "check it's harmless" product asked for.
+    placeholders = [p for p in layer.iterdir() if p.suffix == ".md" and p.stat().st_size == 0]
+    if placeholders:
+        from rekol.embeddings import HashingEmbedder
+        from rekol.indexer import Indexer
+        from rekol.store import IndexStore
+
+        embedder = HashingEmbedder(dim=384)
+        store = IndexStore(
+            db_path=tmp_path / "index.db",
+            dim=embedder.dim,
+            use_sqlite_vec=False,
+            embedding_model="test-hashing",
+        )
+        store.init_schema()
+        stats = Indexer(
+            memory_root=memory_home,
+            store=store,
+            embedder=embedder,
+            index_dir=tmp_path / "idx",
+        ).rebuild()
+        store.close()
+
+        assert stats.files_indexed == 0, f"an empty placeholder was indexed as a memory: {stats}"
+        assert stats.chunks_written == 0

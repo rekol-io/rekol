@@ -163,8 +163,35 @@ def _publish_by_hard_link(source_path: Path, archive_dir: Path) -> Path:
             raise ArchivePublishError(
                 f"could not archive {source_path}: {exc}. Nothing was moved."
             ) from exc
-        # The archive now holds the same inode, so removing the source name
-        # cannot lose content. os.unlink removes the name, never a link target.
+        # "Same inode, no content window" holds only while the pathname still
+        # DENOTES that inode (Codex, 2026-11-06). An editor's atomic save
+        # replaces the source pathname with a brand-new file, so an
+        # unconditional unlink here deleted the NEW bytes while the archive kept
+        # the old ones. So the source's identity is confirmed against what was
+        # just published, immediately before removing the name.
+        try:
+            source_stat = source_path.lstat()
+            published_stat = candidate.lstat()
+        except OSError as exc:
+            raise ArchivePublishError(
+                f"could not confirm {source_path} after archiving it ({exc}); the "
+                f"source was KEPT and the directory was not retired."
+            ) from exc
+        if (source_stat.st_dev, source_stat.st_ino) != (
+            published_stat.st_dev,
+            published_stat.st_ino,
+        ):
+            # Deliberately NOT removing the published copy: it is the only name
+            # left for the bytes that were there when we linked, so unlinking it
+            # would destroy them. Both survive; the run reports and does not
+            # retire.
+            raise ArchivePublishError(
+                f"{source_path} was replaced while it was being archived, so it "
+                f"is no longer the file that was archived to {candidate}. Both "
+                f"were KEPT and the directory was not retired — re-run to "
+                f"archive the current content."
+            )
+        # os.unlink removes the name, never a link target.
         os.unlink(source_path)
         return candidate
     raise ArchivePublishError(
@@ -186,6 +213,13 @@ def _digest_of(path: Path) -> tuple[str, int]:
 
 def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
     """Copy, re-verify the source is unchanged, and only then remove it."""
+    try:
+        expected_size = source_path.stat().st_size  # follows symlinks on purpose
+    except OSError as exc:
+        raise ArchivePublishError(
+            f"cannot read {source_path} to archive it: {exc}. Nothing was moved."
+        ) from exc
+
     staged_fd, staged_name = tempfile.mkstemp(dir=archive_dir, prefix=".partial-", suffix=".tmp")
     staged_path = Path(staged_name)
     try:
@@ -196,15 +230,18 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
         shutil.copystat(source_path, staged_path, follow_symlinks=True)
 
         staged_digest, staged_size = _digest_of(staged_path)
-        # RE-VERIFY BEFORE ANYTHING IS REMOVED OR PUBLISHED. Checked here rather
-        # than after publication so a mismatch leaves no archive artifact at all.
-        source_digest, source_size = _digest_of(source_path)
-        if (staged_digest, staged_size) != (source_digest, source_size):
+        # TWO DIFFERENT CHECKS, and collapsing them into one is a hole my first
+        # attempt at Codex's P1b actually opened: moving verification after
+        # publication without keeping this one let a SHORT STAGE be published as
+        # a fragment, which a test caught.
+        #
+        # (1) Before publishing: is the staged copy complete? A failed or short
+        #     copy must never reach a real name.
+        if staged_size != expected_size:
             raise ArchivePublishError(
-                f"{source_path} changed while it was being archived "
-                f"({source_size} bytes now, {staged_size} copied); the source was "
-                f"KEPT and the directory was not retired, so nothing is lost — "
-                f"re-run to archive the current content."
+                f"incomplete copy of {source_path} ({staged_size} of "
+                f"{expected_size} bytes); the source was KEPT and nothing was "
+                f"published."
             )
 
         published = _claim_archive_name(staged_path, archive_dir, source_path.name)
@@ -218,22 +255,25 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
         ) from exc
 
     staged_path.unlink(missing_ok=True)
+
+    # (2) After publishing: has the SOURCE changed since we read it? This has to
+    # be here rather than before the claim, because on the no-hard-link path the
+    # claim itself used to copy the whole file again, so a source mutated during
+    # that copy was lost with the check already behind us (Codex's P1b).
+    # Verifying here covers everything up to the instant before the name goes.
+    source_digest, source_size = _digest_of(source_path)
+    if (staged_digest, staged_size) != (source_digest, source_size):
+        # The published copy holds the bytes as they were; the source holds the
+        # new ones. Both are kept, so nothing is lost either way.
+        raise ArchivePublishError(
+            f"{source_path} changed while it was being archived "
+            f"({source_size} bytes now, {staged_size} archived to {published}); "
+            f"the source was KEPT and the directory was not retired, so nothing "
+            f"is lost — re-run to archive the current content."
+        )
+
     os.unlink(source_path)
     return published
-
-
-def archive_copy_looks_complete(archived: Path, source_size: int) -> bool:
-    """Is ``archived`` a plausible complete copy of a ``source_size``-byte file?
-
-    The fallback path can be interrupted while writing under a real archive
-    name, so a later run must not assume a present name is a good copy (product
-    condition 2). Size is the cheapest check that distinguishes a truncated
-    write; it is not a content guarantee and does not claim to be.
-    """
-    try:
-        return archived.is_file() and archived.stat().st_size == source_size
-    except OSError:
-        return False
 
 
 def claim_free_name(staged_path: Path, directory: Path, name: str) -> Path:
@@ -269,31 +309,47 @@ def _claim_archive_name(staged_path: Path, archive_dir: Path, name: str) -> Path
             # short file under a real name, which the link path cannot.
             if exc.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV):
                 raise
-            return _claim_by_exclusive_copy(staged_path, archive_dir, name)
+            return _claim_by_placeholder_and_replace(staged_path, archive_dir, name)
     raise ArchivePublishError(
         f"no free name for {name} in {archive_dir} after "
         f"{MAX_ARCHIVE_NAME_ATTEMPTS} attempts; nothing was moved."
     )
 
 
-def _claim_by_exclusive_copy(staged_path: Path, archive_dir: Path, name: str) -> Path:
-    """Fallback for filesystems without hard links: O_CREAT|O_EXCL then copy."""
-    for candidate in _candidate_archive_names(archive_dir, name):
+def _claim_by_placeholder_and_replace(staged_path: Path, directory: Path, name: str) -> Path:
+    """Claim a free name with an EMPTY placeholder, then atomically replace it.
+
+    For filesystems without hard links. The previous version copied the whole
+    file into the final name, which broke two contracts at once (Codex,
+    2026-11-06): an interrupted copy left a partial file visible under an
+    ordinary ``.md`` name — exactly the wrong-memory hazard QA measured — and
+    that copy happened *after* the digest check, so a source mutated during it
+    was lost with the check already behind us.
+
+    Here the final name only ever receives bytes via ``os.replace``, which is
+    atomic: it holds either the empty placeholder or the complete file, never a
+    fragment. ``O_EXCL`` on the placeholder keeps the claim no-clobber.
+
+    The worst interruption leaves a 0-byte file under a real name. For the
+    archive that is inert. For an import it is a file the indexer rejects as
+    having no frontmatter, so it cannot become a wrong memory — the property
+    that actually matters, and a test asserts it.
+    """
+    for candidate in _candidate_archive_names(directory, name):
         try:
-            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            placeholder_fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
+        os.close(placeholder_fd)
         try:
-            with os.fdopen(fd, "wb") as destination, staged_path.open("rb") as staged:
-                shutil.copyfileobj(staged, destination)
-                destination.flush()
-                os.fsync(destination.fileno())
+            os.replace(staged_path, candidate)
         except OSError:
+            # Our own placeholder, so removing it cannot destroy anything.
             candidate.unlink(missing_ok=True)
             raise
         return candidate
     raise ArchivePublishError(
-        f"no free name for {name} in {archive_dir} after "
+        f"no free name for {name} in {directory} after "
         f"{MAX_ARCHIVE_NAME_ATTEMPTS} attempts; nothing was moved."
     )
 
