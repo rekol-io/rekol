@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from rekol.atomic_write import write_text_atomically
+
 # Name of the skip manifest the indexer writes into the local cache (index_dir)
 # after each run: the count + paths of on-disk files invisible to search because
 # they were rejected at index time. Read by the SessionStart coverage hook (#123).
@@ -441,6 +443,10 @@ def persist_include_scope(
     existing["include_dirs"] = list(include_dirs)
     existing["include_deny"] = list(include_deny)
     memory_home.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    # Staged and replaced, not truncated (#238, product 2026-11-07). This file
+    # holds the user's OTHER config keys too -- it is read, mutated and written
+    # back whole -- so a fault between the truncation and the write emptied it
+    # and lost settings that have nothing to do with include-scope.
+    write_text_atomically(
+        config_file, yaml.safe_dump(existing, sort_keys=False, allow_unicode=True)
     )

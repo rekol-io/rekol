@@ -58,12 +58,6 @@ EXEMPT_MODULES: dict[str, str] = {
     "sessions/archive.py": "transcript archive, not curated memory",
     # Writes the file the user asked for, at a path they named.
     "docs_convert/writer.py": "writes its explicit output path",
-    # KNOWN GAP, and the one exemption here that is a real hazard: this
-    # truncates rekol.config.yaml inside the memory home. It is config rather
-    # than memory, and it is written at install/init time where a fault is
-    # visible, but a destroyed config is still a destroyed user file. Left out
-    # of this change deliberately to keep it small.
-    "config.py": "KNOWN GAP: truncates rekol.config.yaml in the memory home",
     # The migration's own writes, which #224 made staged-and-replaced; these
     # two line numbers are prose in docstrings, not calls. Exempt so a reader
     # does not go looking for a defect that is not there.
@@ -522,3 +516,43 @@ def test_an_existing_file_keeps_its_mode_whatever_the_umask(
 
     assert target.stat().st_mode & 0o777 == 0o640, oct(target.stat().st_mode & 0o777)
     assert target.read_text() == "replacement"
+
+
+def test_persisting_include_scope_does_not_truncate_the_config(tmp_path, monkeypatch) -> None:
+    """`rekol.config.yaml` is read, mutated and written back WHOLE.
+
+    So a fault between the truncation and the write emptied it and lost keys
+    that have nothing to do with include-scope — the user's embedding model,
+    their archive settings, whatever else they had set. It is config rather than
+    memory, which is why it was exempt at first; product ruled that a destroyed
+    config is still a destroyed user file.
+    """
+    from rekol.config import persist_include_scope
+
+    home = tmp_path / "home"
+    home.mkdir()
+    config_file = home / "rekol.config.yaml"
+    config_file.write_text(
+        "embedding_model: test-hashing\narchive_enabled: false\nupdate_check: false\n"
+    )
+
+    real_fsync = os.fsync
+
+    def _fail(fd: int) -> None:
+        raise OSError("simulated ENOSPC")
+
+    monkeypatch.setattr(os, "fsync", _fail)
+    with pytest.raises(AtomicWriteError):
+        persist_include_scope(home, ["/some/dir"], [])
+    monkeypatch.setattr(os, "fsync", real_fsync)
+
+    text = config_file.read_text()
+    assert "embedding_model: test-hashing" in text, "the user's other keys were lost"
+    assert "archive_enabled: false" in text
+    assert "update_check: false" in text
+
+    # And the ordinary path still works, keeping those keys.
+    persist_include_scope(home, ["/some/dir"], [])
+    text = config_file.read_text()
+    assert "embedding_model: test-hashing" in text
+    assert "/some/dir" in text

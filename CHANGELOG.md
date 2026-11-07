@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **`rekol.config.yaml` was truncated before being rewritten (#238, product).** It is read, mutated
+  and written back whole, so a fault between the truncation and the write emptied it and lost keys
+  with nothing to do with the change being made — the embedding model, archive settings, whatever
+  else the user had set. It goes through the same staged-and-replaced helper now, and its exemption
+  from the rule check is gone rather than annotated.
 - **A new memory was forced to mode `0644`, exposing it to every local account (#238, Codex).**
   Under `umask 077` `Path.write_text` produces `0600`, so `capture` kept a new memory private; the
   atomic-write change staged with `mkstemp` and then `chmod 0644`, which made it world-readable. A
