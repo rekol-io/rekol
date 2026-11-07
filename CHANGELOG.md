@@ -59,6 +59,40 @@ follow [Semantic Versioning](https://semver.org/).
   restricted PATH. The module now pins PATH to an empty directory, so the host cannot influence
   it; tests that care about PATH still set their own. Reproduced before fixing and confirmed after:
   a broken `rekol` early on PATH fails five tests before, none after.
+- **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
+  by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
+  `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
+  `MEMORY.md`, the file was neither imported nor archived first — after
+  `rekol migrate auto --commit`, content that lived only there existed **nowhere on disk**. A
+  directory holding only `MEMORY.md` was emptied and marked migrated, exit 0.
+  The unlink could never do the job it was written for. Its stated purpose was removing a
+  *tombstone* left by an older version of this tool, but both callers sit behind
+  `has_migration_marker`, which already treats an old-format tombstone as retired — so a real
+  tombstone never reaches it. **Everything it could delete was a user's own file.** And it was
+  pinned by a test that wrote `"Real content."` and asserted the file was gone, so this was a
+  decision carried from tombstones to real files, not a slip.
+  `MEMORY.md` is now **moved into `old-memory-archive/`**, never unlinked. That still stops
+  Claude Code's autoMemory injecting it — autoMemory cannot inject what is not at that path — and
+  it is the same guarantee `install.sh` already printed ("originals stay in place or move to
+  `old-memory-archive/`") and `archive.py`'s header already claimed ("the only byte-complete
+  copy of each original"). Both were false; now they are true.
+  An earlier archived copy is never overwritten (`MEMORY-1.md`, `MEMORY-2.md`, …), because the
+  archive holds the only original and one silent overwrite is one unrecoverable file.
+  **The move is reported in dry-run and in the real run, and deliberately not gated on
+  `--quiet`** — `install.sh --migrate` passes `--quiet`, and QA measured the deletion producing
+  no output at all on that path, so the one destructive step was also the most silent. Dry-run
+  previously said "would migrate N" and never mentioned `MEMORY.md`, so the only destructive step
+  was the only one a user could not preview.
+  Reach: `migrate auto --commit`, `migrate repo <path> --commit`, and `install.sh --migrate` —
+  which is the flag the README advertises for importing auto-memory, so the users who hit this
+  were the ones trying to keep theirs. A plain `install.sh` was unaffected.
+- **A retired directory could abandon files in subdirectories without saying so (#225).**
+  Discovery is deliberately non-recursive, but retirement is permanent: a nested `.md` was left on
+  disk, never imported, never archived, and no later run looks — while the marker claimed the
+  originals were in `old-memory-archive/`. Migration now names every such file and says plainly
+  that they are neither imported nor archived, and the marker says "files discovered here"
+  rather than implying everything. The retirement invariant held only because discovery defined
+  what counted.
 
 ### Added
 - **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks

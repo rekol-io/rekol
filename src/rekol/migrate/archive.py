@@ -1,7 +1,9 @@
 """Archive legacy memory files and leave a migration marker.
 
 The archive lives under ``<memory_dir>/old-memory-archive/`` and holds the only
-byte-complete copy of each original.
+byte-complete copy of each original — including any ``MEMORY.md`` found in the
+directory, which is MOVED here rather than deleted. Nothing in this module
+unlinks a user file; if you are adding a path that does, it is wrong.
 
 NO TIME-BASED DELETION PROMISE (#166). The marker used to say "safe to delete
 after 1 week", and the prose here used to describe a one-week retention policy.
@@ -38,27 +40,54 @@ def archive_file(lf: LegacyFile) -> Path:
     """
     archive_dir = lf.source_root / ARCHIVE_DIR_NAME
     archive_dir.mkdir(exist_ok=True)
-
-    target = archive_dir / lf.source_path.name
-    counter = 1
-    stem = lf.source_path.stem
-    suffix = lf.source_path.suffix
-    while target.exists():
-        target = archive_dir / f"{stem}-{counter}{suffix}"
-        counter += 1
-
+    target = _free_archive_name(archive_dir, lf.source_path.name)
     shutil.move(str(lf.source_path), str(target))
     return target
 
 
-def write_retirement_pointer(memory_dir: Path, *, memory_home: Path) -> None:
+def _free_archive_name(archive_dir: Path, name: str) -> Path:
+    """A path in ``archive_dir`` that does not exist yet: ``x.md``, ``x-1.md``, and so on.
+
+    Never returns an existing path, so archiving can never overwrite an earlier
+    archived copy — the archive holds the only byte-complete original, so one
+    silent overwrite is one unrecoverable file.
+    """
+    target = archive_dir / name
+    if not target.exists():
+        return target
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    counter = 1
+    while True:
+        candidate = archive_dir / f"{stem}-{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def write_retirement_pointer(memory_dir: Path, *, memory_home: Path) -> Path | None:
     """Mark ``memory_dir`` as already migrated using a hidden ``.MIGRATED`` file.
 
-    Idempotent: if the marker already exists, leaves it alone.  Also removes
-    any pre-existing ``MEMORY.md`` left over from prior versions of this tool —
-    those would otherwise be auto-injected by Claude Code's built-in autoMemory.
+    Idempotent: if the marker already exists, leaves it alone.
 
-    The marker is written FIRST and the legacy pointer is unlinked SECOND.
+    Any ``MEMORY.md`` in ``memory_dir`` is **moved into the archive**, never
+    deleted. Returns the archived path, or ``None`` when there was no such file.
+
+    WHY THIS IS A MOVE AND NOT AN UNLINK (data loss, found by QA 2026-11-06).
+    This used to call ``legacy_pointer.unlink()``. The stated purpose was to
+    remove a *tombstone* written by an older version of this tool, so Claude
+    Code's autoMemory would stop injecting it. But both callers sit behind the
+    ``has_migration_marker`` early return in ``migrator.py``, and that check
+    already treats an old-format tombstone as retired — so a real tombstone is
+    skipped and never reaches here. **Every file this unlink could actually
+    delete was a user's own ``MEMORY.md``**, and because ``discover_files_in_dir``
+    skips that name, it was neither imported nor archived first: the content
+    existed nowhere afterwards. A directory holding only ``MEMORY.md`` was
+    emptied and marked migrated, exit 0.
+    Moving it achieves the original goal — autoMemory cannot inject what is no
+    longer at that path — without the deletion the goal never required.
+
+    The marker is written FIRST and the legacy pointer archived SECOND.
     If the process is killed mid-call, the worst case is a directory with both
     ``.MIGRATED`` and ``MEMORY.md`` — a clean re-run still skips it.  The
     opposite order would leave neither file on partial failure, causing a
@@ -71,12 +100,18 @@ def write_retirement_pointer(memory_dir: Path, *, memory_home: Path) -> None:
         today = dt.date.today().isoformat()
         marker.write_text(
             f"migrated to {memory_home} on {today}\n"
-            f"original files are in {ARCHIVE_DIR_NAME}/ — KEEP them unless you have\n"
+            f"files discovered here are in {ARCHIVE_DIR_NAME}/ — KEEP them unless you\n"
+            f"have\n"
             f"checked the migrated copies contain everything you need.\n"
             f"Migration rewrites frontmatter: recognised fields are regenerated and\n"
             f"any UNRECOGNISED key is dropped, so such values survive ONLY here.\n"
         )
 
     legacy_pointer = memory_dir / "MEMORY.md"
-    if legacy_pointer.exists():
-        legacy_pointer.unlink()
+    if not legacy_pointer.exists():
+        return None
+    archive_dir = memory_dir / ARCHIVE_DIR_NAME
+    archive_dir.mkdir(exist_ok=True)
+    target = _free_archive_name(archive_dir, legacy_pointer.name)
+    shutil.move(str(legacy_pointer), str(target))
+    return target
