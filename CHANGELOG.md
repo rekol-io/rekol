@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **An atomic save during the final verification hash was silently deleted (#224, Codex).** Hashing
+  reads through an open descriptor, so an editor replacing the pathname mid-read left the descriptor
+  returning the OLD inode's bytes to EOF. The comparison against the archived copy then *succeeded*
+  and the unlink deleted the NEW file. Reproduced by Codex with a 3 MiB source replaced after the
+  first 1 MiB: publication reported success, the source was gone, the archive held the old content,
+  and the new content existed **nowhere**. That is a whole-hash window, not the brief post-check
+  interval that was accepted.
+  A digest is now taken together with proof of which file it is a digest of: `fstat` on the
+  descriptor before reading, `fstat` on it again after, and `os.stat` on the pathname — device,
+  inode, size and mtime must all agree. On any mismatch, or any failure to establish them, the
+  source is kept and the directory is not retired.
+  **What remains accepted, stated per path rather than as a blanket claim:** on the copy path, a
+  write in the interval between that final `os.stat` and the unlink, and an in-place write leaving
+  size, mtime and content unchanged; on the hard-link path, a pathname replacement between the
+  inode confirmation and the unlink. The docstring no longer says "no content window at all" for
+  the hard-link path, which was too strong — it is not an atomic compare-and-unlink.
 - **Archiving deleted new bytes when an editor saved over the source.** The hard-link path's
   guarantee — same inode, so removing the source name cannot lose content — holds only while the
   pathname still *denotes* that inode. An editor's atomic save replaces the pathname with a brand

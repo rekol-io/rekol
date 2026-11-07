@@ -89,12 +89,16 @@ def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
 
     TWO GUARANTEES, DELIBERATELY NOT THE SAME ONE (product ruling, 2026-11-06).
 
-    **Hard-link publication — the ordinary path, no content window at all.**
-    ``os.link`` is atomic, fails when the destination name is taken (a dangling
-    symlink included, because the check is on the name), and publishes the very
-    same inode. Removing the source *name* afterwards cannot lose bytes, because
-    there are no second bytes: a writer who edits the file between the link and
-    the unlink edits the archived inode too, so nothing is lost either way.
+    **Hard-link publication — the ordinary path.** ``os.link`` is atomic, fails
+    when the destination name is taken (a dangling symlink included, because the
+    check is on the name), and publishes the very same inode. A writer who edits
+    THAT INODE between the link and the unlink edits the archived copy too, so
+    nothing is lost. What can still lose bytes is a writer who replaces the
+    PATHNAME, because the name then denotes a different file from the one that
+    was archived — so device and inode are confirmed immediately before the
+    unlink. What remains, and is accepted: a replacement in the interval between
+    that confirmation and the unlink. This is not an atomic compare-and-unlink
+    and is not described as one.
 
     **Verified copy — symlink sources and filesystems without hard links.**
     Here there genuinely are two copies, so a writer editing the source between
@@ -105,11 +109,17 @@ def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
     copy and before anything is removed; on any mismatch the source is KEPT, the
     failure is reported, and the directory is not retired.
 
-    Concurrent-writer contract, stated plainly because it is weaker than it
-    looks: on the copy path a write that lands *after* the re-verification and
-    before the unlink is still lost. The window is microseconds rather than the
-    duration of a file copy, and it does not exist at all on the hard-link path,
-    which is every ordinary filesystem.
+    Concurrent-writer contract, per path, stated plainly because it is weaker
+    than it looks:
+
+    * **copy path** — the source is re-read, re-hashed, and its identity
+      confirmed against the pathname after publication. Accepted: a write in the
+      interval between that final ``os.stat`` and the unlink, and an in-place
+      write that leaves size, mtime AND content unchanged. Codex showed an
+      earlier version lost a whole hash's worth of window here; that is closed.
+    * **hard-link path** — device and inode are confirmed against the published
+      copy immediately before the unlink. Accepted: a pathname replacement in
+      the interval between that confirmation and the unlink.
 
     A final archive name never receives bytes incrementally. It is claimed by an
     atomic ``os.link``, or where that is unsupported by an empty ``O_EXCL``
@@ -203,15 +213,108 @@ def _publish_by_hard_link(source_path: Path, archive_dir: Path) -> Path:
     )
 
 
-def _digest_of(path: Path) -> tuple[str, int]:
-    """``(sha256, size)`` of ``path``'s CONTENT, following symlinks."""
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
+@dataclass(frozen=True)
+class _HashedFile:
+    """A digest together with proof of WHICH file it is a digest of."""
+
+    digest: str
+    size: int
+    dev: int
+    ino: int
+    mtime_ns: int
+
+
+def _digest_of(path: Path) -> _HashedFile:
+    """Hash ``path``, and prove the bytes belong to the file that name denotes NOW.
+
+    A digest alone is not evidence about a pathname (Codex, 2026-11-07). Hashing
+    reads through an open descriptor, so if an editor replaces the pathname while
+    the read is in flight the descriptor keeps returning the OLD inode's bytes to
+    EOF. The comparison against the archived copy then SUCCEEDS, and the unlink
+    that follows deletes the NEW file. Codex reproduced it with a 3 MiB source
+    replaced after the first 1 MiB had been read: publication reported success,
+    the source was gone, the archive held the old content, and the new content
+    existed nowhere.
+
+    That is a whole-hash window, not the brief interval product accepted, so
+    three observations are taken rather than one:
+
+    * ``fstat`` on the descriptor BEFORE reading — the identity and state of the
+      file whose bytes are about to be hashed;
+    * ``fstat`` on the same descriptor AFTER reading — size and mtime must be
+      unchanged. Asked for by product, and honestly: it is REDUNDANT in every
+      case I could construct. An in-place write changes the content, so the
+      digest comparison catches it, and it changes mtime, so the pathname stat
+      below catches it too. Kept because it is one stat, it makes the order of
+      observations explicit, and it closes a write that is reverted between the
+      read and the final stat. Not load-bearing; the pathname check is;
+    * ``os.stat`` on the PATHNAME after reading — device, inode, size and mtime
+      must match the first observation, which is what catches the atomic-save
+      replacement.
+
+    Any mismatch, or any failure to establish them, raises. The caller keeps the
+    source and refuses retirement; it never guesses.
+
+    What remains accepted, deliberately and per product's ruling: the interval
+    from that final ``os.stat`` to the unlink, and an in-place write that leaves
+    both size and mtime unchanged.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        raise ArchivePublishError(
+            f"cannot read {path} to verify it: {exc}. Nothing was removed."
+        ) from exc
+    try:
+        before = os.fstat(fd)
+        digest = hashlib.sha256()
+        size = 0
+        # os.read on the raw descriptor, not a buffered wrapper, so the fstat
+        # below is on the very descriptor these bytes came from.
+        while chunk := os.read(fd, 1024 * 1024):
             digest.update(chunk)
             size += len(chunk)
-    return digest.hexdigest(), size
+        after = os.fstat(fd)
+        current = os.stat(path)
+    except OSError as exc:
+        raise ArchivePublishError(
+            f"could not confirm the identity of {path} while verifying it "
+            f"({exc}); nothing was removed and the directory was not retired."
+        ) from exc
+    finally:
+        os.close(fd)
+
+    if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+        raise ArchivePublishError(
+            f"{path} was written to while it was being verified "
+            f"({before.st_size} bytes at {before.st_mtime_ns}, "
+            f"{after.st_size} at {after.st_mtime_ns}); it was KEPT and the "
+            f"directory was not retired — re-run to archive the current content."
+        )
+    if size != before.st_size:
+        raise ArchivePublishError(
+            f"read {size} of {before.st_size} bytes from {path} while verifying "
+            f"it; it was KEPT and the directory was not retired."
+        )
+    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ):
+        raise ArchivePublishError(
+            f"{path} was replaced while it was being verified, so the bytes just "
+            f"read are no longer the file that name refers to. It was KEPT and "
+            f"the directory was not retired — re-run to archive the current "
+            f"content."
+        )
+    return _HashedFile(
+        digest=digest.hexdigest(),
+        size=size,
+        dev=before.st_dev,
+        ino=before.st_ino,
+        mtime_ns=before.st_mtime_ns,
+    )
 
 
 def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
@@ -232,7 +335,10 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
             os.fsync(staged.fileno())
         shutil.copystat(source_path, staged_path, follow_symlinks=True)
 
-        staged_digest, staged_size = _digest_of(staged_path)
+        # The staged file is ours and nobody else holds its name, so the
+        # identity checks inside _digest_of are belt and braces here. Using the
+        # same function anyway: one way to hash a file, not two.
+        staged_hash = _digest_of(staged_path)
         # TWO DIFFERENT CHECKS, and collapsing them into one is a hole my first
         # attempt at Codex's P1b actually opened: moving verification after
         # publication without keeping this one let a SHORT STAGE be published as
@@ -240,9 +346,9 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
         #
         # (1) Before publishing: is the staged copy complete? A failed or short
         #     copy must never reach a real name.
-        if staged_size != expected_size:
+        if staged_hash.size != expected_size:
             raise ArchivePublishError(
-                f"incomplete copy of {source_path} ({staged_size} of "
+                f"incomplete copy of {source_path} ({staged_hash.size} of "
                 f"{expected_size} bytes); the source was KEPT and nothing was "
                 f"published."
             )
@@ -264,13 +370,13 @@ def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
     # claim itself used to copy the whole file again, so a source mutated during
     # that copy was lost with the check already behind us (Codex's P1b).
     # Verifying here covers everything up to the instant before the name goes.
-    source_digest, source_size = _digest_of(source_path)
-    if (staged_digest, staged_size) != (source_digest, source_size):
+    source_hash = _digest_of(source_path)
+    if (staged_hash.digest, staged_hash.size) != (source_hash.digest, source_hash.size):
         # The published copy holds the bytes as they were; the source holds the
         # new ones. Both are kept, so nothing is lost either way.
         raise ArchivePublishError(
             f"{source_path} changed while it was being archived "
-            f"({source_size} bytes now, {staged_size} archived to {published}); "
+            f"({source_hash.size} bytes now, {staged_hash.size} archived to {published}); "
             f"the source was KEPT and the directory was not retired, so nothing "
             f"is lost — re-run to archive the current content."
         )

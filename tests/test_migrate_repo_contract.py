@@ -1472,3 +1472,105 @@ def test_an_interrupted_fallback_import_never_leaves_a_fragment_memory(
 
         assert stats.files_indexed == 0, f"an empty placeholder was indexed as a memory: {stats}"
         assert stats.chunks_written == 0
+
+
+def test_an_atomic_save_during_the_final_hash_does_not_lose_the_new_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1 (batch 4): a digest is not evidence about a PATHNAME.
+
+    Hashing reads through an open descriptor, so an editor that replaces the
+    pathname mid-read leaves the descriptor returning the OLD inode's bytes to
+    EOF. The comparison against the archived copy then succeeds and the unlink
+    deletes the NEW file. Codex reproduced it with a 3 MiB source replaced after
+    the first 1 MiB: publication reported success, the source was gone, the
+    archive held the old content, and the new content existed nowhere.
+
+    This is a WHOLE-HASH window, not the brief post-check interval product
+    accepted, so it is checked rather than accepted.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    # Several read chunks' worth, so there is a mid-hash moment to intervene at.
+    source.write_text("A" * (3 * 1024 * 1024))
+
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    real_read = archive_module.os.read
+    state = {"reads": 0, "swapped": False}
+
+    def read_then_swap(fd, length):  # noqa: ANN001
+        chunk = real_read(fd, length)
+        state["reads"] += 1
+        # Only during the SOURCE hash, which is the second file hashed: the
+        # staged copy is hashed first. Swapping on any read after the first
+        # megabyte of a multi-chunk file is enough to land mid-hash.
+        if state["reads"] > 4 and not state["swapped"]:
+            state["swapped"] = True
+            replacement = tmp_path / "editor-temp"
+            replacement.write_text("the new content the user just saved\n")
+            os.replace(replacement, source)
+        return chunk
+
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
+    monkeypatch.setattr(archive_module.os, "read", read_then_swap)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    monkeypatch.undo()
+    assert state["swapped"], "the probe never fired; this test proved nothing"
+    assert source.exists(), "the source was unlinked"
+    assert source.read_text() == "the new content the user just saved\n", (
+        "the newly saved bytes were lost"
+    )
+    assert "KEPT" in str(caught.value), str(caught.value)
+    assert "not retired" in str(caught.value), str(caught.value)
+
+
+def test_an_in_place_write_during_the_final_hash_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: no replacement, the same inode written through.
+
+    Deliberately NOT claiming which check catches this. I measured it: removing
+    the before/after descriptor comparison leaves this test passing, because an
+    in-place write changes both the content (caught by the digest comparison)
+    and the mtime (caught by the pathname stat). What this test owns is the
+    OUTCOME — the write is not lost and retirement is refused — which is the
+    property worth pinning regardless of which check fires.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("A" * (3 * 1024 * 1024))
+
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    real_read = archive_module.os.read
+    state = {"reads": 0, "written": False}
+
+    def read_then_write_in_place(fd, length):  # noqa: ANN001
+        chunk = real_read(fd, length)
+        state["reads"] += 1
+        if state["reads"] > 4 and not state["written"]:
+            state["written"] = True
+            with open(source, "r+b") as handle:  # noqa: PTH123
+                handle.seek(0)
+                handle.write(b"ZZZZ")
+        return chunk
+
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
+    monkeypatch.setattr(archive_module.os, "read", read_then_write_in_place)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    monkeypatch.undo()
+    assert state["written"], "the probe never fired; this test proved nothing"
+    assert source.exists(), "the source was unlinked"
+    assert source.read_bytes()[:4] == b"ZZZZ", "the in-place write was lost"
+    assert "KEPT" in str(caught.value), str(caught.value)
