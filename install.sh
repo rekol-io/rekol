@@ -983,8 +983,21 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
   # install. A migration that cannot run must be skipped, never fatal — repairing
   # old hooks is a best-effort courtesy, not a precondition for installing.
   # (Caught by the uninstall suite: install died right here after an uninstall.)
+  # The PREVIOUS rendering, which Step 6.95 originally did not touch (Codex,
+  # 2026-11-06). Existing installs carry `$(command -v rekol || echo '<path>')`,
+  # which is PATH-first: an orphaned `rekol` earlier on PATH wins over the
+  # install's own binary. The bare-`rekol` rewrite below cannot reach it, and the
+  # handler-presence checks then see a correctly-named handler and no-op, so a
+  # reinstall left every such hook exactly as it was. Only the memory loader was
+  # upgraded, which is why this looked fixed. Upgrading it here is what makes the
+  # reinstall remedy true for installs that already exist.
+  #
+  # Matched by pattern, not by exact text, because the recorded path in an
+  # existing install is whatever BIN_DIR was then — possibly not this one.
+  REKOL_OLD_INVOCATION_RE="\\\$\\(command -v rekol \\|\\| echo '[^']*'\\)"
   MIGRATED="$(
-    jq --arg rekol "${REKOL_INVOCATION}" '
+    jq --arg rekol "${REKOL_INVOCATION}" \
+       --arg oldform "${REKOL_OLD_INVOCATION_RE}" '
       ["_hook time-context","_hook record-stop","_hook session-confidence",
        "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
        "_hook stop-failure-record","_hook update-check",
@@ -1001,7 +1014,12 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
               if (.hooks? | type) == "array" then
                 .hooks |= map(
                   if (.command? // "") != "" then
-                    .command |= ( . as $c | reduce $subs[] as $s
+                    # The old-rendering upgrade runs FIRST, so the bare-`rekol`
+                    # rewrite below sees already-upgraded text and no-ops. The
+                    # reverse order would leave `command -v rekol` inside the
+                    # new invocation open to a second rewrite.
+                    .command |= gsub($oldform; $rekol)
+                    | .command |= ( . as $c | reduce $subs[] as $s
                         ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
                   else . end)
               else . end) else . end)
@@ -1201,10 +1219,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # The command is handed to `jq` through a VARIABLE, not interpolated into the
     # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
     # single quotes, so embedding it inside '...' splits it apart and whatever
-    # shell operators land outside the quoted pieces become live. That was always
-    # fragile and only held because the old invocation's `||` happened to fall
-    # inside a quoted segment; preferring the recorded path put `] && echo`
-    # outside one and broke 18 hook tests.
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
     REKOL_JQ_CMD="${COV_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1241,10 +1264,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # The command is handed to `jq` through a VARIABLE, not interpolated into the
     # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
     # single quotes, so embedding it inside '...' splits it apart and whatever
-    # shell operators land outside the quoted pieces become live. That was always
-    # fragile and only held because the old invocation's `||` happened to fall
-    # inside a quoted segment; preferring the recorded path put `] && echo`
-    # outside one and broke 18 hook tests.
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
     REKOL_JQ_CMD="${TASKS_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1284,10 +1312,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # The command is handed to `jq` through a VARIABLE, not interpolated into the
     # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
     # single quotes, so embedding it inside '...' splits it apart and whatever
-    # shell operators land outside the quoted pieces become live. That was always
-    # fragile and only held because the old invocation's `||` happened to fall
-    # inside a quoted segment; preferring the recorded path put `] && echo`
-    # outside one and broke 18 hook tests.
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
     REKOL_JQ_CMD="${UPDATE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1655,10 +1688,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # The command is handed to `jq` through a VARIABLE, not interpolated into the
     # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
     # single quotes, so embedding it inside '...' splits it apart and whatever
-    # shell operators land outside the quoted pieces become live. That was always
-    # fragile and only held because the old invocation's `||` happened to fall
-    # inside a quoted segment; preferring the recorded path put `] && echo`
-    # outside one and broke 18 hook tests.
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
     REKOL_JQ_CMD="${NUDGE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1730,10 +1768,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # The command is handed to `jq` through a VARIABLE, not interpolated into the
     # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
     # single quotes, so embedding it inside '...' splits it apart and whatever
-    # shell operators land outside the quoted pieces become live. That was always
-    # fragile and only held because the old invocation's `||` happened to fall
-    # inside a quoted segment; preferring the recorded path put `] && echo`
-    # outside one and broke 18 hook tests.
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
     REKOL_JQ_CMD="${REKOL_INVOCATION_QUOTED} review --nudge"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \

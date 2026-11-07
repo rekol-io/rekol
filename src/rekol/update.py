@@ -74,6 +74,31 @@ _FALLBACK_RE = re.compile(
     r"command\s+-v\s+\S+\s*\|\|\s*echo\s+(?:'([^']+)'|\"([^\"]+)\"|([^\s)]+))"
 )
 
+# The CURRENT rendering, which puts the install's own binary first:
+#
+#   $(if [ -x '<path>' ]; then printf %s '<path>'
+#     else command -v rekol || printf %s '<path>'; fi)
+#
+# Parsed from the `[ -x '<path>' ]` test, which is unambiguously the recorded
+# binary. Without this, ``unrunnable_hooks`` found no fallback in a perfectly
+# healthy new-style hook and reported every one of them as "bare invocation with
+# no absolute fallback — exits 127" (Codex measured seven findings against a real
+# fixture install). That is the same false-positive shape this module exists to
+# end: a working install reported broken.
+#
+# The old pattern above is KEPT, not replaced: installs written before the
+# change still carry it, and a parser that understood only the new form would
+# mis-report them in the opposite direction.
+#
+# The path is shell-single-quoted, so an apostrophe in it arrives as the
+# `'\''` splice; `_unquote_shell_single` puts it back.
+_RECORDED_BINARY_RE = re.compile(r"if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\]")
+
+
+def _unquote_shell_single(inner: str) -> str:
+    r"""Undo shell single-quote splicing: ``o'\''brien`` → ``o'brien``."""
+    return inner.replace("'\\''", "'")
+
 
 @dataclass
 class Drift:
@@ -209,6 +234,11 @@ def _hook_fallback_path(command: str) -> str | None:
     working install as broken on a real machine. That is the same false-positive
     shape as reporting a working hook "BROKEN" by string comparison.
     """
+    # Current rendering first: it also contains `command -v rekol || printf …`,
+    # so checking the old pattern first would be a coin toss on which form won.
+    recorded = _RECORDED_BINARY_RE.search(command)
+    if recorded:
+        return _unquote_shell_single(recorded.group(1))
     match = _FALLBACK_RE.search(command)
     if match:
         return next((g for g in match.groups() if g), None)

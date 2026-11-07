@@ -5,6 +5,36 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **Re-running the installer did not actually upgrade existing installs (#203).** Step 6.95 rewrote
+  only a bare `rekol <subcommand>`, never the previous `$(command -v rekol || echo '<path>')`
+  rendering — which is the form every existing install carries. The handler-presence checks then
+  saw a correctly named handler and no-op'd, so a reinstall left those hooks byte-for-byte
+  PATH-first; only the memory loader was upgraded, which is what made this look fixed. Codex
+  reproduced it against a fixture install.
+  The old rendering is now migrated in place first, so the existing checks see already-correct
+  commands. **Existing installs must re-run `./install.sh` to be upgraded** — the fix is in the
+  installer, not in the running code, so nothing happens until it is re-run.
+  Proven by a regression that downgrades a complete install back to the old rendering, re-runs the
+  installer, and then **executes** the upgraded hooks with an orphan `rekol` first on PATH. With
+  the migration removed it reports 7 hooks still PATH-first and names them.
+- **`doctor` reported every newly rendered hook as broken.** `unrunnable_hooks()` parsed only
+  `command -v … || echo …`, so the current `if [ -x … ]; then printf …` rendering yielded no
+  fallback and each healthy handler was reported as "bare invocation with no absolute fallback —
+  exits 127". Codex measured seven such findings against a real fixture install whose hooks
+  executed fine. That is the exact false-positive shape this check exists to end: a working install
+  reported broken. The parser now understands both renderings — the old one is kept, because
+  installs predating the change carry it — and handles a path containing an apostrophe (arriving as
+  the `'\''` splice), an ampersand, or spaces.
+- The `#203` orphan regression now also asserts a **positive** trace that the recorded binary ran.
+  "The orphan did not run" is satisfied when *nothing* runs, and every hook there is executed with
+  errors suppressed, so the two outcomes were indistinguishable.
+- Five `jq`-site comments blamed the 18 hook-test failures on quote interpolation through `eval`.
+  That was disproved in a container — `eval` of this invocation returns 0 on bash 3.2 and 5.2
+  alike — and the real cause was bash 5.2's `patsub_replacement` expanding an unescaped `&`.
+  Passing the command by variable is still right, but for its own reasons, and the comments now say
+  so.
+
 ### Added
 - **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
   actually recorded (#203).** A console script can be left pointing at an interpreter where the

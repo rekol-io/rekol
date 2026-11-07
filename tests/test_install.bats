@@ -1580,6 +1580,21 @@ JSON
   [ -x "$BIN_DIR/rekol" ] || {
     echo "PRECONDITION FAILED: no recorded shim at $BIN_DIR/rekol to prefer"; false; }
 
+  # POSITIVE TRACE (Codex, 2026-11-06). "The orphan did not run" is also
+  # satisfied when NOTHING ran — every hook here is executed with errors
+  # suppressed, so a command that silently fails to resolve anything at all
+  # looks identical to a pass. Make the RECORDED binary leave its own trace and
+  # require it, so the test distinguishes "preferred the recorded path" from
+  # "executed neither".
+  recorded_marker="$TESTROOT/recorded-ran.marker"
+  mv "$BIN_DIR/rekol" "$BIN_DIR/rekol.real"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo recorded-was-executed >> "%s"\n' "$recorded_marker"
+    printf 'exec "%s" "$@"\n' "$BIN_DIR/rekol.real"
+  } > "$BIN_DIR/rekol"
+  chmod 755 "$BIN_DIR/rekol"
+
   jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("rekol|REKOL"))' \
     "$SBHOME/.claude/settings.json" > "$TESTROOT/cmds-order.txt"
   n="$(wc -l < "$TESTROOT/cmds-order.txt" | tr -d ' ')"
@@ -1604,6 +1619,122 @@ JSON
     echo "      resolution order still prefers PATH over the recorded path"
     cat "$marker"
     false; }
+
+  # ...and the recorded binary must actually have been executed, or the
+  # assertion above proves only that nothing ran.
+  [ -f "$recorded_marker" ] || {
+    echo "FAIL: no wired hook executed the recorded binary at $BIN_DIR/rekol"
+    echo "      the orphan assertion above passes vacuously when neither runs"
+    false; }
+}
+
+@test "re-running install UPGRADES hooks left in the old PATH-first form (#203)" {
+  # Codex P1: Step 6.95 rewrote only BARE `rekol <subcommand>`, never the
+  # previous `$(command -v rekol || echo '<path>')` rendering. Every existing
+  # install carries that form, so the handler-presence checks saw a correctly
+  # named handler and no-op'd: re-running left the PATH-first hooks byte-for-byte
+  # as they were. Only the memory loader was upgraded, which is what made this
+  # look fixed. So the changelog remedy and closing #203 were overclaims for
+  # installs that already exist — which is every install.
+  SBHOME="$TESTROOT/sandhome-upgrade"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-upgrade"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # Rewrite every wired rekol hook BACK to the old PATH-first rendering, which
+  # is exactly the state an existing install is in before an upgrade.
+  jq --arg bin "$BIN_DIR/rekol" '
+    .hooks |= with_entries(
+      .value |= map(
+        if (.hooks? | type) == "array" then
+          .hooks |= map(
+            if ((.command? // "") | test("_hook|review --nudge|session-index")) then
+              .command |= sub("\\$\\(if \\[ -x .*? fi\\)";
+                              "$(command -v rekol || echo '"'"'" + $bin + "'"'"')")
+            else . end)
+        else . end))' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/downgraded.json"
+  mv "$TESTROOT/downgraded.json" "$SBHOME/.claude/settings.json"
+
+  downgraded="$(grep -c "command -v rekol || echo" "$SBHOME/.claude/settings.json" || true)"
+  [ "$downgraded" -ge 1 ] || {
+    echo "PRECONDITION FAILED: nothing was downgraded, so this proves nothing"; false; }
+
+  # The upgrade under test.
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  left="$(grep -c "command -v rekol || echo" "$SBHOME/.claude/settings.json" || true)"
+  [ "$left" -eq 0 ] || {
+    echo "FAIL: $left hook(s) still carry the old PATH-first rendering"
+    jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("command -v rekol"))' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+
+  # ONE handler per owned slot: the upgrade must rewrite in place, not append a
+  # second copy alongside the old one. A duplicate would run every session.
+  for handler in session-tasks record-stop time-context capture-nudge; do
+    count="$(jq -r --arg h "_hook $handler" \
+      '[.hooks[]?[]?.hooks[]?.command // "" | select(contains($h))] | length' \
+      "$SBHOME/.claude/settings.json")"
+    [ "$count" -eq 1 ] || {
+      echo "FAIL: $handler is wired $count time(s), expected exactly 1"; false; }
+  done
+
+  # And the upgraded hooks must really prefer the recorded binary when executed.
+  orphan_dir="$TESTROOT/upgrade-orphan/bin"
+  mkdir -p "$orphan_dir"
+  orphan_marker="$TESTROOT/upgrade-orphan-ran.marker"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo orphan-was-executed >> "%s"\n' "$orphan_marker"
+    printf 'exit 0\n'
+  } > "$orphan_dir/rekol"
+  chmod 755 "$orphan_dir/rekol"
+
+  recorded_marker="$TESTROOT/upgrade-recorded-ran.marker"
+  mv "$BIN_DIR/rekol" "$BIN_DIR/rekol.real"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo recorded-was-executed >> "%s"\n' "$recorded_marker"
+    printf 'exec "%s" "$@"\n' "$BIN_DIR/rekol.real"
+  } > "$BIN_DIR/rekol"
+  chmod 755 "$BIN_DIR/rekol"
+
+  HOOK_PATH="$orphan_dir:/usr/bin:/bin:/usr/sbin:/sbin"
+  jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/upgrade-env.txt"
+  HOOK_ENV=""
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    [ -n "$kv" ] && HOOK_ENV="$HOOK_ENV $kv"
+  done < "$TESTROOT/upgrade-env.txt"
+
+  jq -r '[.hooks[]?[]?.hooks[]?.command] | .[] | select(test("rekol|REKOL"))' \
+    "$SBHOME/.claude/settings.json" > "$TESTROOT/upgrade-cmds.txt"
+  while IFS= read -r cmd || [ -n "$cmd" ]; do
+    [ -n "$cmd" ] || continue
+    # shellcheck disable=SC2086
+    env -i PATH="$HOOK_PATH" HOME="$SBHOME" $HOOK_ENV /bin/sh -c "$cmd" >/dev/null 2>&1 || true
+  done < "$TESTROOT/upgrade-cmds.txt"
+
+  [ ! -f "$orphan_marker" ] || {
+    echo "FAIL: an UPGRADED hook executed the orphan — the migration did not take"
+    cat "$orphan_marker"; false; }
+  [ -f "$recorded_marker" ] || {
+    echo "FAIL: no upgraded hook executed the recorded binary"
+    echo "      the orphan assertion passes vacuously when neither runs"; false; }
 }
 
 # Shared body for the awkward-path installs below. $1 = the bin dir to install

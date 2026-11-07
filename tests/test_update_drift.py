@@ -301,3 +301,91 @@ def test_decoy_echo_does_not_hide_a_genuinely_broken_fallback() -> None:
     broken = unrunnable_hooks(_settings_with([command]))
     assert [name for name, _ in broken] == ["session-tasks"]
     assert "/nonexistent/rekol" in broken[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Hook fallback parsing across BOTH renderings (Codex P2, 2026-11-06)
+# ---------------------------------------------------------------------------
+# `unrunnable_hooks` reported every newly rendered handler as "bare invocation
+# with no absolute fallback — exits 127", because the parser only understood
+# `command -v … || echo …`. Codex measured seven such findings against a real
+# fixture install while the hooks themselves executed fine. That is precisely
+# the false-positive shape this module exists to end: a working install reported
+# broken. The old form is still parsed, because installs predating the change
+# carry it and understanding only the new form would mis-report those instead.
+
+_CURRENT_FORM = (
+    "\"$(if [ -x '{path}' ]; then printf %s '{path}'; "
+    "else command -v rekol || printf %s '{path}'; fi)\" _hook session-tasks"
+)
+
+
+def test_current_rendering_yields_the_recorded_binary() -> None:
+    from rekol.update import _hook_fallback_path
+
+    command = _CURRENT_FORM.format(path="/Users/leon/bin/rekol")
+    assert _hook_fallback_path(command) == "/Users/leon/bin/rekol"
+
+
+def test_an_apostrophe_in_the_recorded_path_survives_parsing() -> None:
+    """The path is shell-single-quoted, so an apostrophe arrives as `'\\''`."""
+    from rekol.update import _hook_fallback_path
+
+    spliced = "/Users/o'\\''brien/bin/rekol"
+    command = _CURRENT_FORM.format(path=spliced)
+    assert _hook_fallback_path(command) == "/Users/o'brien/bin/rekol"
+
+
+def test_an_ampersand_and_spaces_in_the_recorded_path_survive_parsing() -> None:
+    """The two shapes #221 was actually about."""
+    from rekol.update import _hook_fallback_path
+
+    command = _CURRENT_FORM.format(path="/tmp/a b & c/rekol")
+    assert _hook_fallback_path(command) == "/tmp/a b & c/rekol"
+
+
+def test_the_previous_rendering_is_still_parsed() -> None:
+    from rekol.update import _hook_fallback_path
+
+    command = "\"$(command -v rekol || echo '/old/path/rekol')\" _hook session-tasks"
+    assert _hook_fallback_path(command) == "/old/path/rekol"
+
+
+def test_a_bare_invocation_still_reports_no_fallback() -> None:
+    """The #159 bug itself must keep being detected."""
+    from rekol.update import _hook_fallback_path
+
+    assert _hook_fallback_path("rekol _hook session-tasks") is None
+
+
+def test_the_memory_loaders_own_echo_is_not_mistaken_for_a_fallback() -> None:
+    """The regression that made a working install look broken on a real machine."""
+    from rekol.update import _hook_fallback_path
+
+    command = "echo '[rekol] memory home not configured'; rekol _hook session-tasks"
+    assert _hook_fallback_path(command) is None
+
+
+def test_no_newly_rendered_handler_is_reported_unrunnable(tmp_path) -> None:
+    """The end of Codex's seven false findings, asserted through the real API."""
+    from rekol.update import unrunnable_hooks
+
+    binary = tmp_path / "rekol"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    settings = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _CURRENT_FORM.format(path=str(binary)),
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    assert unrunnable_hooks(settings, probe=False) == []
