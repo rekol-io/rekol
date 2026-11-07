@@ -6,6 +6,87 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The sandbox guard never resolved the FINAL path component, and the checker could still be
+  blinded (#223, Codex).**
+  `cd -P` resolves every component of a *directory* path, so an escaping directory symlink was
+  caught — but the leaf was only ever examined by name. `$TESTROOT/external-link.json`, a symlink to
+  a file outside the sandbox, passed the check while the destructive call wrote or deleted the
+  target. The chain is now walked by hand (there is no `readlink -f` on macOS bash 3.2) and a loop
+  or an absurd chain **fails closed**, because the target is unknowable. A contained symlinked leaf
+  is still accepted, so the guard does not start crying wolf.
+  And **zero recognised invocations is now a violation.** Codex assembled the path across two
+  assignments — `exe="$COMPONENT_DIR"; exe="$exe/uninstall.sh"` — so no single line carried both
+  halves, the inventory came back empty, and the checker printed `guard violations: 0`: the same line
+  it prints when every invocation is correctly guarded. That is the second time a refactor blinded
+  it, the first being the indirect `${script}` form this PR itself introduced, so the empty
+  inventory is reported rather than passed. The fixture is in the suite.
+- **The bats sandbox guard: a `..` component is refused on sight, there is one invocation site, and
+  an existing file target no longer false-refuses (#223, Codex).** Containment already caught an
+  escape, but only by *reading the filesystem*, so its answer was true only for the instant it was
+  asked — a `..` traversal through a symlink replaced between the check and the delete is a real
+  TOCTOU. The spelling is now refused before anything is resolved, in both the target check and the
+  override check, matched on the path **component** so `..foo` and `foo..bar` stay ordinary names.
+  The six wrappers are **one**, `rekol_bats_run_destructive`, whose first statement must be
+  verbatim `assert_destructive_targets_sandboxed || return 1` — and the checker verifies that exact
+  form rather than accepting a guard call anywhere above the invocation. Six wrappers meant six
+  copies of the guard and six places one line could be deleted while the suite stayed green.
+  **That change nearly shipped the checker blind**, and it is worth recording why: the one wrapper
+  runs `"${COMPONENT_DIR}/${script}"`, the checker was keyed on the literal script names, so it
+  found *zero invocations* and printed "guard violations: 0" — the same line it prints when
+  everything is guarded. Codex's rejected-shape fixtures caught it. The checker now recognises the
+  indirect shape, and a wrapper defined with nothing recognisable inside it is itself a violation.
+  Canonicalisation also **refused a legitimate file**: it stopped at the deepest existing path and
+  `cd`-ed into it, so a regular target — a manifest, `REKOL.md`, a recorded binary — failed the
+  `cd` and read as outside the sandbox. It resolves through the containing directory now, and a
+  file behind a directory symlink pointing out is still refused.
+  The rejection fixtures are **files** under `tests/fixtures/guard/`, one accept and seven reject,
+  shared by a bats test and a pytest. They began as heredocs inside `test_uninstall.bats`; the
+  checker scans that file line by line, so a heredoc holding a second wrapper read as a real second
+  wrapper and the suite flagged itself.
+- **The new bats sandbox guard was loaded but never called in `test_install.bats` (#233).** That is
+  the same defect the guard was written to remove — the copy it replaced there was never called
+  either — and it mattered most in `setup_file`, which performs a real install and
+  `rekol index rebuild`: the exact path that rebuilt a developer's real index with test vectors on
+  2026-08-18. The refusal now runs in both `setup_file` and `setup`, with a test asserting the call
+  exists rather than merely that the file loads the guard.
+- **The sandbox check compared spelling, not containment (#233).** `$TESTROOT/../../outside` carries
+  the right prefix and resolves somewhere else entirely, so it passed. Both sides are now
+  canonicalized — resolving `..`, `.` and symlinks, and handling paths that do not exist yet by
+  resolving their deepest existing ancestor — and the comparison requires a path component
+  boundary, so a sibling named `${TESTROOT}-evil` cannot pass as inside the sandbox either. A
+  symlink whose name is inside the sandbox but whose target is outside is now refused, which the
+  string comparison could never have caught.
+- **The invocation checker accepted a comment as a guard (#233).** It matched the guard's name as a
+  substring within the eight lines above an invocation, so a comment mentioning it satisfied the
+  check — text proximity is not a rule. It is now structural: `uninstall.sh` may be invoked only
+  inside a `run_uninstall*` wrapper, every such wrapper must call the guard as an executable
+  statement, and no wrapper may invoke before that call. The five remaining hand-rolled invocations
+  were converted into wrappers, so there is no longer any path to the uninstaller that a new test
+  could take unguarded. Proven against three controls, each of which must fail and does:
+  a comment-as-guard, a direct invocation in a `@test` body, and a guard placed after the
+  invocation.
+
+### Fixed
+- **The bats suites' safety rested on one `unset` line continuing to exist.** QA measured that
+  deleting it makes the suite delete the developer's real tools home — venv and hooks included —
+  because `uninstall.sh` removes what it is pointed at and an inherited `REKOL_TOOLS_HOME` points
+  it at the live install. The suite still reports pass, so the failure is silent: every rekol hook
+  on the machine fails afterwards, the same reports-healthy-while-dead shape as #203 and #143.
+  Two guards existed and neither stopped it. Traced: `assert_sandboxed` was called at **2 of 20**
+  destructive sites and both calls passed the *index dir* — nothing ever asked it about the tools
+  home. It was not defeated, it was never consulted about the path that got deleted. A second copy
+  in `test_install.bats` was never called at all.
+  Both copies are replaced by `tests/sandbox_guard.bash`, shared so they cannot drift, and the
+  habit is replaced by a property: every destructive invocation now goes through a helper that
+  refuses when an override resolves outside the sandbox, and a test asserts no invocation in the
+  file can skip that check. The refusal sits at the destructive call rather than in `setup()` on
+  purpose — refusing merely because `REKOL_INDEX_DIR` is *set* would refuse on every ordinary
+  machine, since #164 exports it into every session, and a guard that cries wolf gets deleted.
+  The allowlist also no longer accepts a blanket `/tmp/*`, which reached any other suite's sandbox;
+  `mktemp -d` output was already covered by the `TESTROOT` branch, so it bought nothing.
+  Both halves are proven able to fail, not just to pass: with one guard call deleted the
+  invocation check reports the exact line, and with the clearing deleted the suite fails in clean
+  CI rather than only on a machine that happens to have a leaked override.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
