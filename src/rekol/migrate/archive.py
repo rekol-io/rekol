@@ -236,6 +236,18 @@ def archive_copy_looks_complete(archived: Path, source_size: int) -> bool:
         return False
 
 
+def claim_free_name(staged_path: Path, directory: Path, name: str) -> Path:
+    """Publish ``staged_path`` into ``directory`` under the first free name.
+
+    Shared by the archive and by the migrator's import write, because both need
+    the same two properties: the name is claimed atomically so a competing
+    writer is never overwritten, and the file only ever appears under a real
+    name COMPLETE — a fault while writing leaves the staged temporary behind,
+    not a truncated file that looks like a memory.
+    """
+    return _claim_archive_name(staged_path, directory, name)
+
+
 def _claim_archive_name(staged_path: Path, archive_dir: Path, name: str) -> Path:
     """Hard-link ``staged_path`` to the first free archive name, atomically.
 

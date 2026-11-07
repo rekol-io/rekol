@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from rekol.config import resolve_index_dir
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
     archive_file,
+    claim_free_name,
     predict_archive_name,
     write_retirement_pointer,
 )
@@ -227,18 +229,32 @@ def _write_imported_file(
     base = classification.target_filename
     stem = base[:-3] if base.endswith(".md") else base
 
-    for counter in range(1, MAX_TARGET_NAME_ATTEMPTS):
-        candidate = layer_dir / (f"{stem}.md" if counter == 1 else f"{stem}-{counter}.md")
-        try:
-            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            continue
-        with os.fdopen(descriptor, "w") as target:
-            target.write(body)
-        return candidate
-    raise OSError(
-        f"no free name for {stem}.md in {layer_dir} after {MAX_TARGET_NAME_ATTEMPTS} attempts"
-    )
+    # STAGED, then published atomically — the same shape as the archive and the
+    # marker, and for the reason QA measured (2026-11-06): reserving the final
+    # name with O_EXCL and then writing into it leaves a TRUNCATED file under an
+    # ordinary name when the write fails part-way. A full disk is an ordinary
+    # fault, and the result is not an absent memory but a WRONG one: the
+    # fragment parses, the indexer indexes it, and in QA's fixtures search
+    # ranked it above the whole copy. Memory silently wrong on an ordinary path.
+    #
+    # The temporary is invisible to the indexer twice over: a leading dot, and a
+    # `.tmp` suffix the `**/*.md` walk cannot match. So a fault leaves nothing
+    # that could be mistaken for a memory.
+    staged_fd, staged_name = tempfile.mkstemp(dir=layer_dir, prefix=".partial-", suffix=".md.tmp")
+    staged_path = Path(staged_name)
+    try:
+        with os.fdopen(staged_fd, "w") as staged:
+            staged.write(body)
+            staged.flush()
+            os.fsync(staged.fileno())
+        published = claim_free_name(staged_path, layer_dir, f"{stem}.md")
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt mid-write must not
+        # leave the staging file behind either.
+        staged_path.unlink(missing_ok=True)
+        raise
+    staged_path.unlink(missing_ok=True)
+    return published
 
 
 def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separately

@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A fault mid-import left a truncated memory under an ordinary name.** The import reserved the
+  target name with `O_CREAT|O_EXCL` and then wrote into it, so a write that failed part-way — a full
+  disk, a hard kill — left a fragment that *looks* like a memory. QA measured the consequence: the
+  fragment keeps its frontmatter, so it parses, the indexer indexes it, and in their fixtures search
+  ranked the fragment **above** the whole copy. Not an absent memory but a wrong one, on an ordinary
+  path.
+  Imported files are now staged and published the same way the archive and the marker are: written
+  to a temporary the indexer cannot see (leading dot *and* a `.tmp` suffix the `**/*.md` walk cannot
+  match), fsynced, then published by an atomic no-clobber claim. A fault leaves nothing under an
+  ordinary name and nothing that could be mistaken for a memory, and a retry imports exactly one
+  whole file. The cleanup catches `BaseException`, so a `KeyboardInterrupt` mid-write does not leave
+  the staging file either.
+  Suffixing for a name collision now matches the archive's convention (`-1`, `-2`, …) rather than
+  starting at `-2`, because both paths share one publication primitive.
+
+### Fixed
 - **The no-clobber archiving fix introduced a data-loss window, and this closes it.** Copying the
   file and then unconditionally unlinking the source loses an edit made in between: the source is
   gone and the archive holds the old bytes. The `rename` it replaced had no such window, so this

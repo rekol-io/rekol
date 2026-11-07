@@ -23,6 +23,7 @@ neighbouring state regressed — the #157/#158 pattern.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import stat
@@ -560,7 +561,7 @@ def test_an_imported_file_gets_a_suffix_when_the_name_is_taken(tmp_path: Path) -
 
     assert report.migrated == 1
     assert existing.read_text() == "ALREADY IMPORTED, must survive\n"
-    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
+    assert (memory_home / "knowledge" / "proj-sailing-1.md").is_file()
 
 
 def test_a_competitor_creating_the_target_name_does_not_lose_the_import(
@@ -577,17 +578,19 @@ def test_a_competitor_creating_the_target_name_does_not_lose_the_import(
     source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
     contested = memory_home / "knowledge" / "proj-sailing.md"
 
-    real_open = migrator_module.os.open
+    # Injected at os.link, which is where the name is now claimed: the import is
+    # staged first and published by the same primitive the archive uses.
+    real_link = archive_module.os.link
     raced = {"done": False}
 
-    def racing_open(path, flags, mode=0o777):  # noqa: ANN001
-        if not raced["done"] and str(path) == str(contested):
+    def racing_link(src, dst, **kwargs):  # noqa: ANN001
+        if not raced["done"] and str(dst) == str(contested):
             raced["done"] = True
             # A competitor wins the name in the instant before our claim.
             contested.write_text("COMPETITOR'S IMPORT\n")
-        return real_open(path, flags, mode)
+        return real_link(src, dst, **kwargs)
 
-    monkeypatch.setattr(migrator_module.os, "open", racing_open)
+    monkeypatch.setattr(archive_module.os, "link", racing_link)
 
     report = migrate_dir(
         source_dir=source_dir,
@@ -600,7 +603,7 @@ def test_a_competitor_creating_the_target_name_does_not_lose_the_import(
     assert report.migrated == 1
     # The competitor's content must survive untouched.
     assert contested.read_text() == "COMPETITOR'S IMPORT\n"
-    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
+    assert (memory_home / "knowledge" / "proj-sailing-1.md").is_file()
 
 
 def test_an_imported_file_is_not_written_through_a_dangling_symlink(tmp_path: Path) -> None:
@@ -624,7 +627,7 @@ def test_an_imported_file_is_not_written_through_a_dangling_symlink(tmp_path: Pa
     assert report.migrated == 1
     # Nothing was written through the link.
     assert not victim.exists(), "wrote through a dangling symlink to an unrelated path"
-    assert (memory_home / "knowledge" / "proj-sailing-2.md").is_file()
+    assert (memory_home / "knowledge" / "proj-sailing-1.md").is_file()
 
 
 def test_the_marker_text_does_not_wrap_mid_clause(tmp_path: Path) -> None:
@@ -1193,3 +1196,130 @@ def test_a_self_looping_memory_md_is_reported_not_an_uncaught_eloop(tmp_path: Pa
     assert any("symlink" in err for err in report.errors), report.errors
     assert not (source_dir / MIGRATION_MARKER_NAME).exists()
     assert loop.is_symlink()
+
+
+# --------------------------------------------------------------------------
+# A fault mid-import must leave NO file under an ordinary name (QA, product)
+# --------------------------------------------------------------------------
+# Reserving the final name with O_EXCL and then writing into it left a
+# TRUNCATED memory under a real name when the write failed part-way. A full disk
+# is an ordinary fault, and the result is not an absent memory but a WRONG one:
+# the fragment parses, the indexer indexes it, and in QA's fixtures search
+# ranked it ABOVE the whole copy. That is memory silently wrong on an ordinary
+# path, which is why it holds the tag.
+
+
+def _cut_after_frontmatter(body: str) -> str:
+    """QA's shape: the frontmatter survives, so the fragment still parses."""
+    marker = "---\n"
+    second = body.find(marker, body.find(marker) + len(marker))
+    return body[: second + len(marker)]
+
+
+class _FaultingWriter:
+    """Writes only as far as the frontmatter, then raises ``fault``."""
+
+    def __init__(self, handle: object, fault: BaseException) -> None:
+        self._handle = handle
+        self._fault = fault
+
+    def write(self, text: str) -> int:
+        self._handle.write(_cut_after_frontmatter(text))
+        self._handle.flush()
+        raise self._fault
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._handle, name)
+
+    def __enter__(self) -> _FaultingWriter:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self._handle.close()
+        return False
+
+
+def _import_with_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: BaseException
+) -> tuple[Path, Path, Path]:
+    """Run one import whose write fails mid-body.
+
+    Returns ``(memory_home, layer_dir, source_dir)``.
+    """
+    memory_home = _memory_home(tmp_path)
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    real_fdopen = migrator_module.os.fdopen
+
+    def faulting_fdopen(fd, mode="r", *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        if "w" in mode:
+            return _FaultingWriter(handle, fault)
+        return handle
+
+    monkeypatch.setattr(migrator_module.os, "fdopen", faulting_fdopen)
+    with contextlib.suppress(BaseException):
+        migrate_dir(
+            source_dir=source_dir,
+            memory_home=memory_home,
+            dry_run=False,
+            allow_llm=False,
+        )
+    monkeypatch.undo()
+    return memory_home, memory_home / "knowledge", source_dir
+
+
+def _ordinary_md_files(layer: Path) -> list[Path]:
+    return [p for p in layer.iterdir() if p.suffix == ".md" and not p.name.startswith(".")]
+
+
+def test_a_full_disk_mid_import_leaves_no_truncated_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENOSPC after the frontmatter: no ordinary name, and no staging debris."""
+    import errno as errno_mod
+
+    _memory, layer, _source = _import_with_fault(
+        tmp_path, monkeypatch, OSError(errno_mod.ENOSPC, "No space left on device")
+    )
+
+    assert _ordinary_md_files(layer) == [], "a truncated memory was published"
+    assert [p.name for p in layer.iterdir() if p.name.startswith(".partial-")] == [], (
+        "staging debris left behind"
+    )
+
+
+def test_a_hard_kill_mid_import_leaves_no_truncated_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same for a KeyboardInterrupt, which is why the cleanup catches BaseException."""
+    _memory, layer, _source = _import_with_fault(tmp_path, monkeypatch, KeyboardInterrupt())
+
+    assert _ordinary_md_files(layer) == [], "a truncated memory was published"
+    assert [p.name for p in layer.iterdir() if p.name.startswith(".partial-")] == []
+
+
+def test_a_retry_after_a_full_disk_imports_exactly_one_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of leaving nothing: the retry is clean, not a duplicate or a fragment."""
+    import errno as errno_mod
+
+    memory_home, layer, source_dir = _import_with_fault(
+        tmp_path, monkeypatch, OSError(errno_mod.ENOSPC, "No space left on device")
+    )
+    assert _ordinary_md_files(layer) == []
+    # The source survives the failed run, so the retry has something to import.
+    assert (source_dir / "sailing.md").is_file(), "the failed run consumed the source"
+
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=memory_home,
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.migrated == 1
+    files = _ordinary_md_files(layer)
+    assert len(files) == 1, f"expected exactly one whole file, got {[f.name for f in files]}"
+    # Whole, not cut: the body survived, not just the frontmatter.
+    assert "Boats are good." in files[0].read_text()
