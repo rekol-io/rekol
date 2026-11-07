@@ -120,6 +120,27 @@ _FALLBACK_RE = re.compile(
 # `my-gate --config rekol.yaml _hook session-tasks` reads as ours.
 _BARE_REKOL_RE = re.compile(r"^(?:nohup\s+)?[\"']?rekol[\"']?\s")
 
+# THE PATH-FIRST FORMS THE UPGRADE ITSELF OWNS, anchored at the start of the
+# command (product ruling, 2026-11-07, after Codex found the false positive).
+#
+# Reporting on a `command -v rekol || echo` found ANYWHERE in the string made
+# doctor flag `printf '%s\n' '"$(command -v rekol || echo /p/rekol)" _hook
+# session-tasks'` — a command whose rekol text is an ARGUMENT being printed, not
+# an invocation. A doctor that cries wolf is the bug this project keeps fixing,
+# so the rule is the installer's own: report only what the upgrade would
+# recognise as ours, as the command itself.
+#
+# The path is matched by the same literal-path allowlist the installer uses for
+# the unquoted form, and permissively inside apostrophes for the quoted one,
+# because the quotes protect it there. A form exotic enough to fall outside this
+# goes UNREPORTED, which is the safe way round: the cost is a stale hook nobody
+# mentions, against the cost of telling a user their own command is broken.
+_OWNED_PATH_FIRST_RE = re.compile(
+    r"^(?:nohup\s+)?\"\$\(\s*command\s+-v\s+rekol\s*\|\|\s*echo\s+"
+    r"(?:'[^']*'|(?:\$HOME|\$\{HOME\}|~)?(?:/[A-Za-z0-9._-]+)+)"
+    r"\s*\)\"\s"
+)
+
 _SQ_RUN = r"'(?:[^']|'\\'')*'"
 _RECORDED_BINARY_RE = re.compile(
     r"\$\(\s*if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\]"
@@ -303,6 +324,16 @@ def path_first_hooks(settings: dict) -> list[tuple[str, str]]:
     Deliberately keyed on the ABSENCE of the current rendering rather than on a
     list of old ones. That is the one direction that stays correct when a form
     nobody anticipated turns up — which is exactly what happened here.
+
+    TWO HOOKS THIS CANNOT SEE, stated rather than left to be discovered.
+    ``_HANDLER_RE`` matches ``_hook <name>``, so the two owned hooks that are
+    not ``_hook`` handlers — ``session-index --incremental`` and
+    ``review --nudge`` — are never reported here even in a PATH-first form.
+    Widening that regex would change ``unrunnable_hooks`` too, which product
+    ruled out of scope for this change (it carries #241's own false positive).
+    So the gap is deliberate and narrow: both are still UPGRADED by the
+    installer, which keys on the owned-handler allowlist and not on this regex.
+    What is missed is only doctor's report about them.
     """
     stale: list[tuple[str, str]] = []
     for blocks in (settings.get("hooks") or {}).values():
@@ -314,7 +345,7 @@ def path_first_hooks(settings: dict) -> list[tuple[str, str]]:
                     continue
                 if _RECORDED_BINARY_RE.search(command):
                     continue  # current rendering: recorded path first
-                if _FALLBACK_RE.search(command):
+                if _OWNED_PATH_FIRST_RE.match(command):
                     form = "PATH first, with an absolute fallback (#159 … #203 form)"
                 elif _BARE_REKOL_RE.match(command):
                     # `unrunnable_hooks` reports this one too, as the harsher

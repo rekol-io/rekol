@@ -11,13 +11,30 @@ follow [Semantic Versioning](https://semver.org/).
   command with `echo '<path>'` quoted was. The quotes were the only difference, and the hooks left
   behind kept resolving PATH first — an orphaned `rekol` earlier on PATH running instead of the
   install's own, which is the entire bug #203 exists to fix.
-  **Provenance, measured from git history rather than assumed:** no release tag ever wrote this
-  form. It existed in `21e6e8a` and `ec2f9db` (both 2026-08-12, contained in no tag); `faa834b`
-  added the quotes the same day, and `b0db220` is what v0.5.2, v0.5.4 and v0.5.13 contain. Every
-  tag from v0.5.2 on wrote `echo '${BIN_DIR}/rekol'`; v0.4.0 and earlier wrote a **bare** `rekol`
-  with no fallback at all, which is #159. So the unquoted form comes from installing an untagged
-  `main` — which is what anyone installing from a checkout gets, and is how it reached a real
-  `settings.json`.
+  **Provenance — and the first answer here was wrong.** I reported that no release tag wrote this
+  form, from reading `install.sh`'s SOURCE at each tag, where the invocation is quoted. That
+  answered the wrong question: what matters is what the installer **writes**. QA doubted it,
+  measured real upgrades, and was right.
+  `run()` is `eval "$@"`. Releases insert a missing handler as `run "jq --arg cmd '${CMD}' …"`, and
+  `${CMD}` itself contains `echo '<path>'` — so interpolated between apostrophes its own
+  apostrophes close and reopen the quoting, and eval's quote removal drops them. Reproduced
+  standalone: the variable holds `… echo '/p/rekol') …` and what lands on disk is
+  `… echo /p/rekol) …`. So **v0.5.2 — the first tag with both an add-handler step and the quoted
+  invocation — through v0.5.13 all write this form** whenever they add a missing handler. The
+  snippet-merge sites pass a file (`--slurpfile`), so their text never meets the eval, which is why
+  only the `--arg cmd` handlers are affected and why they are the later-added ones.
+  This head already writes it correctly, by accident: `bfcd3a9` changed those five sites to pass the
+  command **by variable name** (`--arg cmd "$REKOL_JQ_CMD"`) for an unrelated bash-5.2
+  `patsub_replacement` fix, and a named expansion inside double quotes keeps the value verbatim.
+  Incidental and untested is how a fix regresses, so all five sites now carry a note saying why the
+  shape must stay, and two tests pin it: no hook command may be interpolated into a `run()` string,
+  and the two call shapes are **executed** through `eval` to show one strips the quotes and the
+  other does not. A real tag-to-tag upgrade turned out not to be reproducible here — on a fresh
+  `settings.json` the snippet merge adds those handlers first, so the add-handler step no-ops, and
+  chaining real old installers needs a provisioned venv per tag. QA measured the real upgrades from
+  the outside; rather than ship a test whose fixture does not reproduce the bug, the source check
+  asserts the mechanism is absent. (`#222`'s other interpolated values — paths — stay out of this
+  change.)
   The form is recognised now as a **literal absolute path only**, by #239's allowlist rule: unquoted
   means the shell word-splits and expands it, so `echo $(…)/rekol`, a path containing a space, and
   anything carrying an operator are **not** ours and are left byte-identical. The quoted form can
@@ -33,8 +50,17 @@ follow [Semantic Versioning](https://semver.org/).
   can disagree, and the disagreement is #203.
   A negative control caught a real defect in the first attempt: keying on the handler name alone
   reported `my-own-gate --strict _hook session-tasks` as a broken rekol hook, because it contains
-  `_hook session-tasks`. A command is reported only when a rekol **invocation** is recognisable in
-  it — the `command -v` substitution, or a bare `rekol` in command position.
+  `_hook session-tasks`. Codex then found a second one — `printf '%s\n' '"$(command -v rekol || echo
+  /p/rekol)" _hook session-tasks'` was reported, where the rekol text is an **argument being
+  printed**, not an invocation. Doctor now reports only what the upgrade itself would own, by the
+  same allowlist rule, **as the command itself** and anchored at its start; anything more exotic
+  goes unreported, which is the safe way round for a check whose failure mode is telling a user
+  their own command is broken.
+  One gap is recorded rather than left to be found: `_HANDLER_RE` matches `_hook <name>`, so the two
+  owned hooks that are not `_hook` handlers — `session-index --incremental` and `review --nudge` —
+  are not reported here even in a PATH-first form. Widening it would change `unrunnable_hooks`,
+  which carries #241's own false positive and is out of scope. Both are still **upgraded**; only
+  doctor's report about them is missed.
 - **A recorded path containing `)` made `doctor` call a working hook broken (#203, Codex).** The
   parser bridged the `if [ -x … ]` preflight and `command -v rekol` with `[^)]*?`, which cannot
   cross a `)` — so for a path like `/Users/a)b/bin/rekol` the match failed, the parser returned

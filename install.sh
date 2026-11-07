@@ -1036,12 +1036,28 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
   # this one kept resolving PATH first — the bug #203 exists to fix — on three
   # handlers in a real file.
   #
-  # MEASURED PROVENANCE (git history, 2026-11-07): no RELEASE TAG ever wrote
-  # this form. It existed in 21e6e8a and ec2f9db (both 2026-08-12, `git tag
-  # --contains` reports none), and faa834b later the same day added the quotes;
-  # b0db220 is what v0.5.2/v0.5.4/v0.5.13 contain. So this is a form written by
-  # an installer built from an untagged main — which is what anyone installing
-  # from a checkout gets, and is how it reached a real settings.json.
+  # MEASURED PROVENANCE, and my first answer here was wrong (Codex + QA
+  # confirmed it, 2026-11-07). I had written "no release tag ever wrote this
+  # form", from reading install.sh's SOURCE at each tag — where the invocation
+  # is quoted. That answered the wrong question: what matters is what the
+  # installer WRITES.
+  #
+  # `run()` is `eval "$@"` (line ~165, SC2294). Releases insert a missing
+  # handler as
+  #     run "jq --arg cmd '${UPDATE_CMD}' …"
+  # and `${UPDATE_CMD}` itself contains `echo '<path>'`. Interpolated between
+  # apostrophes, its own apostrophes close and reopen the quoting, and eval's
+  # quote removal then drops them. Reproduced standalone:
+  #     variable: "$(command -v rekol || echo '/p/rekol')" _hook update-check …
+  #     on disk:  "$(command -v rekol || echo /p/rekol)"  _hook update-check …
+  #
+  # So v0.5.2 — the first tag with both an add-handler step and the quoted
+  # invocation — through v0.5.13 all WRITE this form whenever they add a
+  # missing handler. The snippet-merge sites pass a file (`--slurpfile`), so
+  # their text never meets the eval, which is why only the `--arg cmd` handlers
+  # are affected, and why they are the later-added ones.
+  #
+  # This head does not write it: see the note at the five `REKOL_JQ_CMD` sites.
   REKOL_UQ_HEAD="\"\$(command -v rekol || echo "
   REKOL_UQ_FOOT=")\" "
 
@@ -1397,6 +1413,16 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
     # in `${var//pat/rep}` to the matched text — which is why
     # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
+    # what pins it. Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${COV_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1442,6 +1468,16 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
     # in `${var//pat/rep}` to the matched text — which is why
     # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
+    # what pins it. Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${TASKS_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1490,6 +1526,16 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
     # in `${var//pat/rep}` to the matched text — which is why
     # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
+    # what pins it. Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${UPDATE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1866,6 +1912,16 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
     # in `${var//pat/rep}` to the matched text — which is why
     # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
+    # what pins it. Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${NUDGE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1946,6 +2002,16 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
     # in `${var//pat/rep}` to the matched text — which is why
     # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
+    # what pins it. Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${REKOL_INVOCATION_QUOTED} review --nudge"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \

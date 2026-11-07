@@ -1511,6 +1511,14 @@ def test_a_users_command_mentioning_a_handler_is_not_reported_as_ours() -> None:
         "printf '%s' 'rekol _hook update-check' >> /tmp/log",
         "my-gate --config rekol.yaml _hook capture-nudge",
         "false && rekol _hook time-context",
+        # CODEX'S FALSE POSITIVE (batch 7): the rekol text here is an ARGUMENT
+        # being printed, not an invocation. The first version of this check
+        # searched for the `command -v` substitution anywhere in the string and
+        # reported it. Doctor now matches only what the UPGRADE would own, as
+        # the command itself, anchored at the start.
+        "printf '%s\\n' '\"$(command -v rekol || echo /opt/generic/bin/rekol)\" _hook session-tasks'",
+        # A gate in front of our invocation is not our command either.
+        'false && "$(command -v rekol || echo /opt/generic/bin/rekol)" _hook update-check',
     ]
     assert path_first_hooks(_settings_with(*not_ours)) == []
 

@@ -2288,3 +2288,73 @@ JSON
   # rekol's own being added alongside — which is what the loop above checks and
   # what my first attempt at this assertion got wrong by counting both.
 }
+
+@test "no hook command is interpolated into a run() string (#221 writer)" {
+  # THE WRITER, pinned where it can honestly be pinned. `run()` is `eval "$@"`,
+  # so a command interpolated into that string is parsed TWICE: the apostrophes
+  # inside `echo '<path>'` close and reopen the quoting, and eval's quote
+  # removal drops them. That is how every release from v0.5.2 to v0.5.13 writes
+  # the PATH-first UNQUOTED form when it adds a missing handler — install.sh's
+  # source reads quoted while what lands on disk is not.
+  #
+  # This head passes the command BY VARIABLE NAME (--arg cmd "$REKOL_JQ_CMD"),
+  # which expands inside double quotes at eval time and keeps the value
+  # verbatim. That came from bfcd3a9, made for the unrelated bash-5.2
+  # patsub_replacement fix, so the fix was incidental and untested until now.
+  #
+  # A SOURCE CHECK, AND WHY NOT A REAL UPGRADE. I tried a real tag-to-tag
+  # upgrade first and could not make it reproduce: on a fresh settings.json the
+  # snippet merge adds these handlers before the add-handler step, so that step
+  # no-ops and the bug never appears. Chaining real old installers needs a
+  # provisioned venv per tag and a stub will not do (v0.5.2 exits at "could not
+  # resolve the local index dir from the venv"). QA measured the real upgrades
+  # from the outside. Shipping a test whose fixture does not reproduce the bug
+  # would be worse than this, so this asserts the mechanism is absent instead.
+  # Scoped to a HOOK COMMAND (`*_CMD`) and to non-comment lines. My first
+  # version matched any interpolated value on any line and found two things it
+  # should not: this file's own comment quoting the broken shape as
+  # documentation, and `run "jq --arg val '${RESOLVED_HOME}' --arg th
+  # '${TOOLS_HOME}'"` — a real interpolation, but of PATHS. A path with an
+  # apostrophe breaks the same way and that is #222, which product ruled stays
+  # out of this change; widening here would have made this test fail for a bug
+  # it is not about.
+  pattern='^[^#]*run "jq .*--arg [a-z]+ .\$\{[A-Z_]*CMD\}'
+  bad="$(grep -nE "$pattern" "$COMPONENT_DIR/install.sh" || true)"
+  [ -z "$bad" ] || {
+    echo "FAIL: a hook command is interpolated into a run() string, so eval re-parses it:"
+    echo "$bad"
+    echo 'Pass it by variable name instead: --arg cmd "$REKOL_JQ_CMD"'
+    false; }
+
+  # NOT VACUOUS: the detector must match the broken shape, or this passes
+  # because the pattern is wrong rather than because the code is right.
+  probe="$TESTROOT/interp-probe.sh"
+  printf '%s\n' '    run "jq --arg cmd '"'"'${UPDATE_CMD}'"'"' .foo"' > "$probe"
+  grep -qE "$pattern" "$probe" || {
+    echo "FAIL: the detector does not match the shape it exists to catch"; false; }
+}
+
+@test "eval strips the quotes from an interpolated command but not a named one (#221)" {
+  # The mechanism, EXECUTED rather than described, so the comments above cannot
+  # drift away from what bash actually does.
+  inv="\$(command -v rekol || echo '/opt/generic/bin/rekol')"
+  cmd="\"${inv}\" _hook update-check 2>/dev/null || true"
+
+  # The release shape: the value interpolated between apostrophes.
+  got_interp="$(eval "printf '%s' '${cmd}'")"
+  # This head's shape: passed by name, expanded inside double quotes.
+  REKOL_JQ_CMD="$cmd"
+  got_named="$(eval 'printf %s "$REKOL_JQ_CMD"')"
+
+  case "$got_interp" in
+    *"echo '/opt/generic/bin/rekol'"*)
+      echo "FAIL: interpolation kept the quotes, so the premise is wrong:"
+      echo "  $got_interp"
+      false ;;
+  esac
+  [ "$got_named" = "$cmd" ] || {
+    echo "FAIL: passing by name did not preserve the command"
+    echo "  wanted: $cmd"
+    echo "  got   : $got_named"
+    false; }
+}
