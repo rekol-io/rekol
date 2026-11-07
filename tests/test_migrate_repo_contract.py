@@ -31,6 +31,7 @@ import pytest
 from click.testing import CliRunner
 
 from rekol.cli_migrate import main
+from rekol.migrate import archive as archive_module
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
     MIGRATION_MARKER_NAME,
@@ -705,3 +706,155 @@ def test_the_would_be_moved_memory_md_line_says_not_searchable(
     )
     assert "WOULD be moved" in previewed.output
     assert "not searchable" in previewed.output, previewed.output
+
+
+# --------------------------------------------------------------------------
+# Archive publication: no clobber, ever (Codex P1/P2, 2026-11-06)
+# --------------------------------------------------------------------------
+# These use Codex's probe shapes rather than sequential suffix cases, because
+# sequential tests cannot see the race: `exists()` then `shutil.move` overwrote
+# a file created in between, and `os.rename` replaces its destination silently.
+# The archive holds the only byte-complete original, so one such overwrite is one
+# unrecoverable file.
+
+
+def test_a_competitor_claiming_the_name_is_never_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex's race probe: a file appears at the chosen name before publication.
+
+    Reproduced without a production seam by making name generation itself lose
+    the race — the competitor is created as the first candidate is handed out,
+    which is exactly the window `exists()`-then-move left open.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("NEW\n")
+
+    real_names = archive_module._candidate_archive_names
+    raced = {"done": False}
+
+    def racing_names(directory: Path, name: str):
+        for candidate in real_names(directory, name):
+            if not raced["done"]:
+                raced["done"] = True
+                candidate.write_text("EARLIER ORIGINAL\n")
+            yield candidate
+
+    monkeypatch.setattr(archive_module, "_candidate_archive_names", racing_names)
+
+    published = archive_module.publish_into_archive(source, archive_dir)
+
+    # The competitor's only bytes must still be there.
+    assert (archive_dir / "topic.md").read_text() == "EARLIER ORIGINAL\n"
+    assert published != archive_dir / "topic.md"
+    assert published.read_text() == "NEW\n"
+    assert not source.exists()
+
+
+def test_a_dangling_symlink_destination_counts_as_occupied(tmp_path: Path) -> None:
+    """`exists()` is False for a dangling symlink, so it used to read as free."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    (archive_dir / "topic.md").symlink_to(tmp_path / "nowhere.md")
+    source = tmp_path / "topic.md"
+    source.write_text("real content\n")
+
+    published = archive_module.publish_into_archive(source, archive_dir)
+
+    assert published == archive_dir / "topic-1.md"
+    assert published.read_text() == "real content\n"
+    # The dangling link is still there, not replaced.
+    assert (archive_dir / "topic.md").is_symlink()
+
+
+def test_a_symlink_source_is_archived_as_real_content(tmp_path: Path) -> None:
+    """Codex P2: moving the LINK re-resolved a relative target and broke it.
+
+    Following it instead makes "kept byte-complete in the archive" true, and
+    leaves the target file where it is — only the link is removed, which is all
+    that is needed to stop autoMemory injecting it.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    target_file = tmp_path / "real.txt"
+    target_file.write_text("the only copy\n")
+    link = tmp_path / "MEMORY.md"
+    link.symlink_to("real.txt")  # RELATIVE, the shape that broke
+
+    published = archive_module.publish_into_archive(link, archive_dir)
+
+    assert not published.is_symlink(), "archived a link, not content"
+    assert published.read_text() == "the only copy\n"
+    # The target survives untouched, and the link is gone from the inject path.
+    assert target_file.read_text() == "the only copy\n"
+    assert not link.exists() and not link.is_symlink()
+
+
+def test_a_dangling_symlink_source_is_refused_and_nothing_is_touched(tmp_path: Path) -> None:
+    """No content to preserve, so removing it could still lose a reference."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    link = tmp_path / "MEMORY.md"
+    link.symlink_to(tmp_path / "gone.md")
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(link, archive_dir)
+
+    assert "Nothing was moved" in str(caught.value)
+    assert link.is_symlink()
+    assert list(archive_dir.iterdir()) == []
+
+
+def test_partial_debris_is_not_mistaken_for_an_archived_original(tmp_path: Path) -> None:
+    """A failed cross-filesystem copy can leave debris; it must not occupy a name."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    (archive_dir / ".partial-abcdef.tmp").write_text("half a fi")
+    source = tmp_path / "topic.md"
+    source.write_text("whole file\n")
+
+    published = archive_module.publish_into_archive(source, archive_dir)
+
+    # Debris never takes a real name, so the first one is still free.
+    assert published == archive_dir / "topic.md"
+    assert published.read_text() == "whole file\n"
+
+
+def test_a_short_copy_is_refused_rather_than_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An incomplete copy must never appear under a real archive name."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("the whole thing matters\n")
+
+    def truncating_copy(src, dst, length=0):  # noqa: ARG001
+        dst.write(src.read(4))
+
+    monkeypatch.setattr(archive_module.shutil, "copyfileobj", truncating_copy)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    assert "incomplete copy" in str(caught.value)
+    # Source intact, and no real name taken, and no debris left behind.
+    assert source.read_text() == "the whole thing matters\n"
+    assert not (archive_dir / "topic.md").exists()
+    assert list(archive_dir.iterdir()) == []
+
+
+def test_sequential_same_name_originals_still_get_suffixes(tmp_path: Path) -> None:
+    """The ordinary case, kept so the no-clobber rewrite did not lose it."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    published = []
+    for body in ("first\n", "second\n", "third\n"):
+        source = tmp_path / "topic.md"
+        source.write_text(body)
+        published.append(archive_module.publish_into_archive(source, archive_dir))
+
+    assert [p.name for p in published] == ["topic.md", "topic-1.md", "topic-2.md"]
+    assert [p.read_text() for p in published] == ["first\n", "second\n", "third\n"]

@@ -10,6 +10,15 @@ Modes:
   --commit       Actually perform the migration.
   --no-llm       Disable the Sonnet fallback; unknown files default to knowledge/.
   --quiet        Suppress per-file output; still prints the summary line.
+
+`repo` only:
+  --allow-repo-root
+                 Permit --commit on a git work-tree root. Refused by default,
+                 because migration MOVES what it imports and a repo root
+                 usually holds tracked .md files (README.md, CLAUDE.md) that
+                 are nothing to do with memory. Use it when the repo really is
+                 your notes — then every moved file is named in the output,
+                 even under --quiet.
 """
 
 from __future__ import annotations
@@ -228,6 +237,16 @@ def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool, allow_repo_root: b
     PATH may be either:
       - a directory that directly contains .md memory files; or
       - a directory whose ``memory/`` subdir contains them.
+
+    Migration MOVES every file it imports into old-memory-archive/, so --commit
+    is REFUSED when PATH resolves to a git work-tree root: a repo root usually
+    holds tracked .md files such as README.md and CLAUDE.md that are nothing to
+    do with memory, and moving them deletes them from your work tree. Point it
+    at the memory subdirectory instead.
+
+    Pass --allow-repo-root when the repository really is your notes. Every file
+    moved is then named in the output, even under --quiet. A dry run is never
+    refused, and names every file it would move.
     """
     memory_home = _memory_home()
     target = Path(path)
@@ -276,5 +295,17 @@ def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool, allow_repo_root: b
         archive_legacy_pointer=is_auto_memory_dir(source),
     )
     _print_report(report, target.name, dry_run, quiet)
+    if allow_repo_root and not dry_run and report.moved:
+        # NOT gated on --quiet, for the same reason the MEMORY.md move is not:
+        # the user overrode a refusal that exists because these files are
+        # probably tracked, so the run has to say which ones it took. Reading
+        # `git status` afterwards should not be how they find out.
+        click.echo(
+            f"{target.name}: --allow-repo-root was passed, so "
+            f"{len(report.moved)} file(s) were MOVED out of the work tree into "
+            f"{ARCHIVE_DIR_NAME}/:"
+        )
+        for source_path in report.moved:
+            click.echo(f"{target.name}:   moved {source_path}")
     if report.errors:
         sys.exit(1)

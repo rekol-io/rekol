@@ -122,6 +122,10 @@ class MigrationReport:
     # CLAUDE.md; dry-run had reported only "would migrate 2 (defaulted=2)" and
     # named neither, so previewing could not reveal it.
     would_move: list[Path] = field(default_factory=list)
+    # Every source file actually MOVED into the archive on a commit run. Needed
+    # so a run that was explicitly allowed to touch a repository root can name
+    # what it took, rather than leaving the user to read `git status` for it.
+    moved: list[Path] = field(default_factory=list)
     skipped_retired: int = 0
     skipped_missing: int = 0
     skipped_duplicate: int = 0  # body-hash matched an already-migrated file
@@ -295,6 +299,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
             if not dry_run:
                 try:
                     archive_file(lf)
+                    report.moved.append(lf.source_path)
                     report.archived += 1
                 except Exception as exc:  # noqa: BLE001
                     report.errors.append(f"archive failed for duplicate {lf.source_path}: {exc}")
@@ -318,6 +323,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
         try:
             target.write_text(_serialize_memory_file(c))
             archive_file(lf)
+            report.moved.append(lf.source_path)
             seen_hashes.add(body_hash)
             report.migrated += 1
             report.archived += 1

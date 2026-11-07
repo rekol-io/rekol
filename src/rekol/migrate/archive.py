@@ -24,7 +24,11 @@ migrate tool but is not auto-injected.
 from __future__ import annotations
 
 import datetime as dt
+import errno
+import os
 import shutil
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,37 +52,167 @@ class RetirementOutcome:
     error: str | None = None
 
 
+class ArchivePublishError(Exception):
+    """Publishing into the archive failed and the source was left untouched."""
+
+
+# Bounded so a pathological archive dir cannot spin forever; far above any real
+# number of same-named originals in one directory.
+MAX_ARCHIVE_NAME_ATTEMPTS = 1000
+
+
 def archive_file(lf: LegacyFile) -> Path:
-    """Move ``lf.source_path`` into ``<source_root>/old-memory-archive/``.
+    """Publish ``lf.source_path`` into ``<source_root>/old-memory-archive/``.
 
-    Returns the new path.  If the target name already exists, appends
-    ``-1``, ``-2``, ... before the suffix.
+    Returns the new path. If the target name is taken, tries ``-1``, ``-2``, …
+    Raises ``ArchivePublishError`` without touching the source if it cannot
+    publish a complete copy.
     """
-    archive_dir = lf.source_root / ARCHIVE_DIR_NAME
-    archive_dir.mkdir(exist_ok=True)
-    target = _free_archive_name(archive_dir, lf.source_path.name)
-    shutil.move(str(lf.source_path), str(target))
-    return target
+    return publish_into_archive(lf.source_path, lf.source_root / ARCHIVE_DIR_NAME)
 
 
-def _free_archive_name(archive_dir: Path, name: str) -> Path:
-    """A path in ``archive_dir`` that does not exist yet: ``x.md``, ``x-1.md``, and so on.
+def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
+    """Move ``source_path`` into ``archive_dir``, never overwriting anything.
 
-    Never returns an existing path, so archiving can never overwrite an earlier
-    archived copy — the archive holds the only byte-complete original, so one
-    silent overwrite is one unrecoverable file.
+    WHY THIS IS NOT ``shutil.move`` TO A CHECKED NAME (Codex, 2026-11-06).
+    The previous version picked a name with ``exists()`` and then called
+    ``shutil.move``. Three defects, all of which could destroy the only
+    byte-complete copy of a user's file:
+
+    1. **The check was not a reservation.** A file created at that name between
+       the check and the move was silently overwritten, because ``os.rename``
+       replaces its destination. A deterministic probe lost an earlier archived
+       original this way. Sequential suffix tests cannot see it.
+    2. **``exists()`` is False for a dangling symlink**, so such a name read as
+       free and the move clobbered the link.
+    3. **Across filesystems ``shutil.move`` becomes copy-then-unlink**, and a
+       failed copy can leave partial debris at the destination — which the next
+       run's ``exists()`` would then treat as an occupied, complete archive copy.
+
+    So the publication is staged instead: copy into a unique temporary file in
+    the archive dir, fsync it, then claim the final name with ``os.link``, which
+    is atomic and **fails** if the name is taken — including by a dangling
+    symlink, where ``O_EXCL`` semantics apply to the name and not to what it
+    points at. The final name therefore only ever appears as a complete file,
+    and partial debris can only ever sit at a ``.partial-`` temporary, which is
+    cleaned up here and never collides with a real archive name.
+
+    The source is unlinked only after the final name exists, and with
+    ``os.unlink``, which removes a symlink itself rather than its target.
+
+    SYMLINK SOURCES are followed and archived as real content, which is the
+    choice that makes "kept byte-complete in the archive" literally true — the
+    alternative, moving the link, re-resolves a relative target against the
+    archive directory and breaks it (Codex's P2). The link's target file is left
+    exactly where it is; only the link is removed, which is all that is needed
+    to stop autoMemory injecting it. A **dangling** source symlink has no
+    content to preserve, so it is refused and nothing is touched.
     """
-    target = archive_dir / name
-    if not target.exists():
-        return target
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        source_size = source_path.stat().st_size  # follows symlinks on purpose
+    except OSError as exc:
+        raise ArchivePublishError(
+            f"cannot read {source_path} to archive it: {exc}. Nothing was moved."
+        ) from exc
+
+    staged_fd, staged_name = tempfile.mkstemp(dir=archive_dir, prefix=".partial-", suffix=".tmp")
+    staged_path = Path(staged_name)
+    try:
+        with os.fdopen(staged_fd, "wb") as staged, open(source_path, "rb") as original:
+            shutil.copyfileobj(original, staged)
+            staged.flush()
+            os.fsync(staged.fileno())
+        # A short copy means the archive copy is not byte-complete, so it must
+        # never be published under a real name.
+        staged_size = staged_path.stat().st_size
+        if staged_size != source_size:
+            raise ArchivePublishError(
+                f"incomplete copy of {source_path} ({staged_size} of "
+                f"{source_size} bytes); nothing was moved."
+            )
+        shutil.copystat(source_path, staged_path, follow_symlinks=True)
+
+        published = _claim_archive_name(staged_path, archive_dir, source_path.name)
+    except ArchivePublishError:
+        staged_path.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        staged_path.unlink(missing_ok=True)
+        raise ArchivePublishError(
+            f"could not archive {source_path}: {exc}. Nothing was moved."
+        ) from exc
+
+    staged_path.unlink(missing_ok=True)
+    # Only now is the content definitely in the archive under a complete name.
+    os.unlink(source_path)
+    return published
+
+
+def _claim_archive_name(staged_path: Path, archive_dir: Path, name: str) -> Path:
+    """Hard-link ``staged_path`` to the first free archive name, atomically.
+
+    ``os.link`` is the reservation: it fails with ``FileExistsError`` when the
+    destination name exists, so a competing writer can never be overwritten.
+    That is the whole point — ``exists()`` followed by a move is a race, and the
+    race loses an unrecoverable original.
+    """
+    for candidate in _candidate_archive_names(archive_dir, name):
+        try:
+            os.link(staged_path, candidate)
+            return candidate
+        except FileExistsError:
+            continue  # someone holds that name; take the next one
+        except OSError as exc:
+            # Some filesystems (exFAT, some network mounts) have no hard links.
+            # Fall back to an exclusive create, which is still an atomic claim
+            # on the NAME; the cost is that a hard kill mid-copy can leave a
+            # short file under a real name, which the link path cannot.
+            if exc.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV):
+                raise
+            return _claim_by_exclusive_copy(staged_path, archive_dir, name)
+    raise ArchivePublishError(
+        f"no free name for {name} in {archive_dir} after "
+        f"{MAX_ARCHIVE_NAME_ATTEMPTS} attempts; nothing was moved."
+    )
+
+
+def _claim_by_exclusive_copy(staged_path: Path, archive_dir: Path, name: str) -> Path:
+    """Fallback for filesystems without hard links: O_CREAT|O_EXCL then copy."""
+    for candidate in _candidate_archive_names(archive_dir, name):
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as destination, staged_path.open("rb") as staged:
+                shutil.copyfileobj(staged, destination)
+                destination.flush()
+                os.fsync(destination.fileno())
+        except OSError:
+            candidate.unlink(missing_ok=True)
+            raise
+        return candidate
+    raise ArchivePublishError(
+        f"no free name for {name} in {archive_dir} after "
+        f"{MAX_ARCHIVE_NAME_ATTEMPTS} attempts; nothing was moved."
+    )
+
+
+def _candidate_archive_names(archive_dir: Path, name: str) -> Iterator[Path]:
+    """``x.md``, ``x-1.md``, ``x-2.md``, … — names only, with no existence check.
+
+    Deliberately does not test ``exists()``: the caller claims each name
+    atomically and moves on if it is taken, so there is no window between
+    checking and claiming. A ``.partial-`` staging file is never one of these,
+    so abandoned debris can never be mistaken for an archived original.
+    """
+    yield archive_dir / name
     stem = Path(name).stem
     suffix = Path(name).suffix
-    counter = 1
-    while True:
-        candidate = archive_dir / f"{stem}-{counter}{suffix}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
+    for counter in range(1, MAX_ARCHIVE_NAME_ATTEMPTS):
+        yield archive_dir / f"{stem}-{counter}{suffix}"
 
 
 def write_retirement_pointer(
@@ -135,12 +269,8 @@ def write_retirement_pointer(
     legacy_pointer = memory_dir / "MEMORY.md"
     if archive_legacy_pointer and legacy_pointer.exists():
         try:
-            archive_dir = memory_dir / ARCHIVE_DIR_NAME
-            archive_dir.mkdir(exist_ok=True)
-            target = _free_archive_name(archive_dir, legacy_pointer.name)
-            shutil.move(str(legacy_pointer), str(target))
-            archived = target
-        except OSError as exc:
+            archived = publish_into_archive(legacy_pointer, memory_dir / ARCHIVE_DIR_NAME)
+        except (ArchivePublishError, OSError) as exc:
             # Caught, not raised: an unwritable archive dir used to surface as a
             # traceback. Returning instead keeps the message readable AND leaves
             # the directory unretired, so the work is retried rather than lost.
