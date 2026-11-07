@@ -116,6 +116,12 @@ class MigrationReport:
     # which only means there was no such file — the CLI has to tell a user that
     # their repo's own MEMORY.md was spared, not merely stay quiet about it.
     legacy_pointer_left_in_place: Path | None = None
+    # Every source file a dry run WOULD move into the archive, named so the
+    # preview reveals what it is about to touch. QA pointed `migrate repo` at a
+    # git work-tree root and --commit moved the repo's tracked README.md and
+    # CLAUDE.md; dry-run had reported only "would migrate 2 (defaulted=2)" and
+    # named neither, so previewing could not reveal it.
+    would_move: list[Path] = field(default_factory=list)
     skipped_retired: int = 0
     skipped_missing: int = 0
     skipped_duplicate: int = 0  # body-hash matched an already-migrated file
@@ -283,6 +289,9 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
         if body_hash in seen_hashes:
             # Same body already migrated — archive the duplicate but don't write.
             report.skipped_duplicate += 1
+            if dry_run:
+                # A duplicate is archived too, so a dry run would move it.
+                report.would_move.append(lf.source_path)
             if not dry_run:
                 try:
                     archive_file(lf)
@@ -293,6 +302,7 @@ def migrate_dir(  # noqa: C901  # complex but stable; refactor tracked separatel
 
         if dry_run:
             report.would_migrate += 1
+            report.would_move.append(lf.source_path)
             if c.method == "heuristic":
                 report.by_heuristic += 1
             elif c.method == "defaulted":

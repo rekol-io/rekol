@@ -28,7 +28,9 @@ import stat
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from rekol.cli_migrate import main
 from rekol.migrate.archive import (
     ARCHIVE_DIR_NAME,
     MIGRATION_MARKER_NAME,
@@ -543,3 +545,163 @@ def test_is_auto_memory_dir_honours_a_relocated_config_dir(
     default_shape = tmp_path / "claude" / "projects" / "slug" / "memory"
     default_shape.mkdir(parents=True)
     assert is_auto_memory_dir(default_shape) is False
+
+
+# --------------------------------------------------------------------------
+# A git work-tree root: --commit refuses rather than moving tracked files
+# --------------------------------------------------------------------------
+# QA pointed `migrate repo` at a real repo and --commit moved the tracked
+# README.md and CLAUDE.md into the archive, leaving them deleted in the work
+# tree (`D CLAUDE.md`, `D README.md`, plus an untracked old-memory-archive/).
+# Losing CLAUDE.md also takes a project's instructions out of Claude Code's
+# view. #234's own reasoning for sparing MEMORY.md applies verbatim to its
+# siblings, so the contract could not be stated truthfully while this stood.
+#
+# Refused, not forbidden: a git-tracked notes repo is a legitimate source, and
+# rekol's own git_track makes REKOL_HOME a work-tree root.
+
+
+def _git_repo_root(tmp_path: Path) -> Path:
+    root = tmp_path / "myrepo"
+    (root / ".git").mkdir(parents=True)
+    (root / "README.md").write_text("# project readme\n")
+    (root / "CLAUDE.md").write_text("# project instructions for Claude\n")
+    (root / "MEMORY.md").write_text("# index\n")
+    return root
+
+
+def _run_repo(args: list[str], memory_home: Path) -> object:
+    runner = CliRunner()
+    return runner.invoke(main, ["repo", *args], env={"MEMORY_HOME": str(memory_home)})
+
+
+def test_commit_refuses_at_a_git_work_tree_root(tmp_path: Path) -> None:
+    root = _git_repo_root(tmp_path)
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(root), "--commit", "--no-llm"], memory_home)
+
+    assert result.exit_code == 2, result.output
+    assert "git work-tree root" in result.output
+    # The remedy has to be the one that works: point at the memory subdir.
+    assert "memory" in result.output
+    # Nothing was touched.
+    assert (root / "README.md").read_text() == "# project readme\n"
+    assert (root / "CLAUDE.md").read_text() == "# project instructions for Claude\n"
+    assert not (root / ARCHIVE_DIR_NAME).exists()
+    assert not (root / MIGRATION_MARKER_NAME).exists()
+
+
+def test_dry_run_at_a_git_root_is_allowed_and_names_every_file(tmp_path: Path) -> None:
+    """Dry-run must never be blocked: it is how you find out what would happen.
+
+    And it has to NAME the files — QA's preview showed only
+    `would migrate 2 (defaulted=2)`, so previewing could not reveal that
+    README.md and CLAUDE.md were about to be moved.
+    """
+    root = _git_repo_root(tmp_path)
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(root), "--dry-run", "--no-llm"], memory_home)
+
+    assert result.exit_code == 0, result.output
+    assert "README.md" in result.output
+    assert "CLAUDE.md" in result.output
+    assert "WOULD move" in result.output
+    # Still a dry run.
+    assert (root / "README.md").is_file()
+    assert not (root / ARCHIVE_DIR_NAME).exists()
+
+
+def test_allow_repo_root_opts_in(tmp_path: Path) -> None:
+    """The escape hatch for a genuine notes repo."""
+    root = _git_repo_root(tmp_path)
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(root), "--commit", "--no-llm", "--allow-repo-root"], memory_home)
+
+    assert result.exit_code == 0, result.output
+    assert (root / ARCHIVE_DIR_NAME).is_dir()
+
+
+def test_a_memory_subdir_inside_a_git_repo_is_not_refused(tmp_path: Path) -> None:
+    """The ordinary shape: the repo is git, the memory dir inside it is not a root."""
+    root = _git_repo_root(tmp_path)
+    (root / "memory").mkdir()
+    (root / "memory" / "sailing.md").write_text(TOPIC_FILE_BODY)
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(root), "--commit", "--no-llm"], memory_home)
+
+    assert result.exit_code == 0, result.output
+    # The repo's own tracked files are untouched because `memory/` was preferred.
+    assert (root / "README.md").is_file()
+    assert (root / "CLAUDE.md").is_file()
+    assert (root / "memory" / ARCHIVE_DIR_NAME).is_dir()
+
+
+def test_a_plain_directory_is_not_refused(tmp_path: Path) -> None:
+    """Negative control: refusing every directory would pass the tests above."""
+    plain = tmp_path / "notes"
+    plain.mkdir()
+    (plain / "sailing.md").write_text(TOPIC_FILE_BODY)
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(plain), "--commit", "--no-llm"], memory_home)
+
+    assert result.exit_code == 0, result.output
+    assert (plain / ARCHIVE_DIR_NAME).is_dir()
+
+
+def test_a_git_file_not_a_dir_is_also_a_work_tree_root(tmp_path: Path) -> None:
+    """A worktree or submodule has `.git` as a FILE, and is just as destructive."""
+    root = tmp_path / "wt"
+    root.mkdir()
+    (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+    (root / "README.md").write_text("# readme\n")
+    memory_home = _memory_home(tmp_path)
+
+    result = _run_repo([str(root), "--commit", "--no-llm"], memory_home)
+
+    assert result.exit_code == 2, result.output
+    assert (root / "README.md").is_file()
+
+
+# --------------------------------------------------------------------------
+# The moved-MEMORY.md line must say "not searchable" too (product's ruling)
+# --------------------------------------------------------------------------
+
+
+def test_the_moved_memory_md_line_says_not_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The left-alone line already said it; the moved line did not."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    source_dir = tmp_path / "claude" / "projects" / "slug" / "memory"
+    source_dir.mkdir(parents=True)
+    (source_dir / "MEMORY.md").write_text("# index\n")
+    (source_dir / "sailing.md").write_text(TOPIC_FILE_BODY)
+    memory_home = _memory_home(tmp_path)
+
+    committed = _run_repo(
+        [str(tmp_path / "claude" / "projects" / "slug"), "--commit", "--no-llm"], memory_home
+    )
+    assert "moved MEMORY.md" in committed.output
+    assert "not searchable" in committed.output, committed.output
+
+
+def test_the_would_be_moved_memory_md_line_says_not_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    source_dir = tmp_path / "claude" / "projects" / "slug" / "memory"
+    source_dir.mkdir(parents=True)
+    (source_dir / "MEMORY.md").write_text("# index\n")
+    (source_dir / "sailing.md").write_text(TOPIC_FILE_BODY)
+    memory_home = _memory_home(tmp_path)
+
+    previewed = _run_repo(
+        [str(tmp_path / "claude" / "projects" / "slug"), "--dry-run", "--no-llm"], memory_home
+    )
+    assert "WOULD be moved" in previewed.output
+    assert "not searchable" in previewed.output, previewed.output

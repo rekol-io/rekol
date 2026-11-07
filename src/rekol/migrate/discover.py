@@ -93,6 +93,28 @@ def discover_files_in_dir(source_root: Path) -> list[LegacyFile]:
     return files
 
 
+def is_git_work_tree_root(directory: Path) -> bool:
+    """Does ``directory`` hold a ``.git`` entry — i.e. is it a repo's root?
+
+    Checked without shelling out to git: a work-tree root is exactly the
+    directory containing ``.git``, which is a directory normally and a file in a
+    worktree or submodule, so both are accepted.
+
+    This exists because ``migrate repo`` treats any directory that directly
+    contains ``.md`` files as a memory dir, and a repository root usually does —
+    ``README.md``, ``CLAUDE.md``, ``CHANGELOG.md``. QA pointed it at a real repo
+    and ``--commit`` moved the tracked ``README.md`` and ``CLAUDE.md`` into the
+    archive, leaving them deleted in the work tree. Losing ``CLAUDE.md`` also
+    takes a project's instructions out of Claude Code's view.
+
+    Note this does NOT mean a git root can never be a memory dir: a notes repo
+    is a perfectly reasonable migration source, and rekol's own ``git_track``
+    makes ``REKOL_HOME`` a work-tree root. So the caller refuses by default and
+    offers an explicit opt-in, rather than treating the shape as illegitimate.
+    """
+    return (directory / ".git").exists()
+
+
 def is_auto_memory_dir(memory_dir: Path) -> bool:
     """Is ``memory_dir`` a Claude Code auto-memory dir — ``<projects>/<slug>/memory``?
 

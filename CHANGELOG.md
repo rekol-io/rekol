@@ -49,6 +49,23 @@ follow [Semantic Versioning](https://semver.org/).
   claimed marker-last "would leave neither file on partial failure, causing a re-run to re-migrate
   already-archived content", but `discover_files_in_dir` iterates files only and never recurses, so
   the archive cannot be re-discovered and that failure mode does not exist.
+- **`migrate repo <repo root> --commit` moved a repository's tracked files.** QA pointed it at a
+  real git repo and `README.md` and `CLAUDE.md` were moved into `old-memory-archive/`, leaving them
+  deleted in the work tree. Losing `CLAUDE.md` also takes a project's instructions out of Claude
+  Code's view. The reasoning this release uses for sparing `MEMORY.md` — likely a tracked project
+  file, and an untracked `old-memory-archive/` appearing inside someone's repository — applies
+  verbatim to its siblings, so the contract could not be stated truthfully while this stood.
+  `--commit` now refuses at a git work-tree root (exit 2) and names the memory subdirectory to
+  point at instead. It is a refusal rather than a prohibition: a git-tracked notes repo is a
+  legitimate migration source, and rekol's own `git_track` makes `REKOL_HOME` a work-tree root, so
+  `--allow-repo-root` opts in. `.git` as a file counts too, so a worktree or submodule is covered.
+- **Dry-run now names every file it would move**, for any path. It previously printed only a count
+  (`would migrate 2 (defaulted=2)`), so previewing could not reveal which files were about to be
+  moved — the preview was exactly the tool a user would reach for, and it withheld the one detail
+  that mattered.
+- The `moved MEMORY.md` and `MEMORY.md WOULD be moved` lines now also say **not searchable**, which
+  the left-in-place line already said. A user told only that a file was "not imported" has not been
+  told that searching will not find it.
 - The `.MIGRATED` marker text no longer wraps mid-clause (it read `KEEP them unless you` / `have` /
   `checked…`), with a test that no line is a single orphaned word.
 

@@ -23,7 +23,12 @@ from typing import Any
 import click
 
 from rekol.config import resolve_memory_home
-from rekol.migrate.discover import discover_auto_memory_sources, is_auto_memory_dir
+from rekol.migrate.archive import ARCHIVE_DIR_NAME
+from rekol.migrate.discover import (
+    discover_auto_memory_sources,
+    is_auto_memory_dir,
+    is_git_work_tree_root,
+)
 from rekol.migrate.migrator import MigrationReport, migrate_dir
 
 
@@ -50,13 +55,14 @@ def _print_legacy_pointer_outcome(report: MigrationReport, label: str, dry_run: 
         if dry_run:
             click.echo(
                 f"{label}: MEMORY.md WOULD be moved to "
-                f"{report.legacy_pointer_archived} (it is not imported — "
-                f"autoMemory would otherwise keep injecting it)"
+                f"{report.legacy_pointer_archived} — it is not imported and "
+                f"not searchable; autoMemory would otherwise keep injecting it"
             )
         else:
             click.echo(
                 f"{label}: moved MEMORY.md to {report.legacy_pointer_archived} "
-                f"(not imported; kept byte-complete in the archive)"
+                f"— not imported and not searchable; kept byte-complete in "
+                f"the archive"
             )
     if report.legacy_pointer_left_in_place is not None:
         click.echo(
@@ -83,6 +89,12 @@ def _print_report(report: MigrationReport, label: str, dry_run: bool, quiet: boo
                 f"(heuristic={report.by_heuristic}, llm={report.by_llm}, "
                 f"defaulted={report.by_defaulted}, archived={report.archived})"
             )
+    if dry_run and report.would_move:
+        # Not gated on --quiet: these are the files about to be MOVED out of
+        # wherever they live now, and a count alone ("would migrate 2") is what
+        # let a repo root's README.md and CLAUDE.md go unnoticed in preview.
+        for source_path in report.would_move:
+            click.echo(f"{label}: WOULD move {source_path} into {ARCHIVE_DIR_NAME}/")
     _print_legacy_pointer_outcome(report, label, dry_run)
     if report.by_defaulted and dry_run:
         # Dry-run writes, archives and retires NOTHING — claiming otherwise is a
@@ -204,7 +216,13 @@ def auto(dry_run: bool, no_llm: bool, quiet: bool) -> None:
     help="Disable Sonnet fallback; default unknown files to knowledge/.",
 )
 @click.option("--quiet", is_flag=True, default=False, help="Suppress per-file output.")
-def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool) -> None:
+@click.option(
+    "--allow-repo-root",
+    is_flag=True,
+    default=False,
+    help="Permit --commit on a git work-tree root (it will MOVE tracked .md files).",
+)
+def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool, allow_repo_root: bool) -> None:
     """Scan a user-supplied path for legacy memory files.
 
     PATH may be either:
@@ -216,6 +234,34 @@ def repo(path: str, dry_run: bool, no_llm: bool, quiet: bool) -> None:
     # Prefer target/memory/ if present; else treat target itself as the memory dir.
     candidate = target / "memory"
     source = candidate if candidate.is_dir() else target
+
+    # A repository root almost always holds .md files that are nothing to do with
+    # memory — README.md, CLAUDE.md, CHANGELOG.md — and migration MOVES what it
+    # imports, so --commit there deletes them from the work tree. QA measured
+    # exactly that. #234's reasoning for sparing MEMORY.md ("likely a tracked
+    # project file", "an untracked old-memory-archive/ inside someone's
+    # repository") applies verbatim to its siblings, so refusing is the only way
+    # to state that contract truthfully.
+    #
+    # Refused rather than forbidden: a git-tracked notes repo is a legitimate
+    # migration source, and rekol's own git_track makes REKOL_HOME a work-tree
+    # root. The opt-in exists for that, and dry-run is never blocked, so the way
+    # to find out what would happen is always available.
+    if not dry_run and not allow_repo_root and is_git_work_tree_root(source):
+        click.echo(
+            f"refusing to --commit in {source}: it is a git work-tree root.\n"
+            f"  Migration MOVES every .md file it imports into "
+            f"{ARCHIVE_DIR_NAME}/, which here would include tracked files such "
+            f"as README.md and CLAUDE.md, deleting them from your work tree.\n"
+            f"  Point it at the memory subdirectory instead, e.g. "
+            f"`rekol migrate repo {source}/memory --commit`.\n"
+            f"  To see exactly which files are affected, re-run without "
+            f"--commit; every one is named.\n"
+            f"  If you do mean this directory — a notes repo, say — pass "
+            f"--allow-repo-root.",
+            err=True,
+        )
+        sys.exit(2)
 
     report = migrate_dir(
         source_dir=source,
