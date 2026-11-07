@@ -6,6 +6,37 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A test could write into the developer's REAL memory home, and the suite's isolation was
+  revertible by the tests it isolated (#224, Codex + product).** `conftest.py` redirected
+  `REKOL_HOME`, the index cache and the archive using the **shared** function-scoped `monkeypatch`
+  fixture — so a test calling `monkeypatch.undo()` to drop one `setattr` of its own also undid all
+  of that. Thirteen tests in the suite call `undo()`. Codex's sandbox caught one of them then
+  running the CLI, which tried to write `.partial-*.md.tmp` into `~/Dropbox/memory/knowledge/`; a
+  local run has no sandbox. Measured with the fix reverted, such a test leaks
+  `REKOL_HOME=~/Dropbox/memory`, `MEMORY_HOME`, `REKOL_INDEX_DIR=~/.cache/rekol/<hash>` and
+  `REKOL_ARCHIVE_DIR=~/.local/share/rekol/archive`.
+  Fixed as a class rather than per test, because converting thirteen call sites leaves the
+  fourteenth free to do it again: **isolation must not be revertible by the code it isolates.**
+  `conftest` now holds its patches in a private `pytest.MonkeyPatch` undone at teardown, and a
+  `pytest_runtest_call` wrapper **fails** any test left pointing a steering var outside tmp.
+  The guard is a hook wrapper, not a fixture, and that mattered: as a fixture it caught the
+  undone-isolation case but **not** a test that set a real path deliberately, because the test's own
+  `monkeypatch` is torn down first and the env was already restored before it looked. It also keys
+  on the path **existing**, after firing on seven healthy tests that set `/a`, `/b` and whitespace
+  as deliberate resolution-order sentinels — a guard that fires on those is one somebody deletes.
+  On its first real run it found a pre-existing gap of its own: `REKOL_TOOLS_HOME` was never
+  cleared, so on any machine with rekol installed every test ran with it pointing at the real
+  `~/.local/share/rekol`.
+- **The archive's audit paragraph claimed a narrower accepted window than the code has (#224,
+  Codex).** It said the only accepted window was the interval between the last verification and the
+  unlink. That holds only up to the moment the final hash **opens** the file. The read is
+  sequential, so an in-place write landing **behind** the read position never reaches the digest at
+  all — and with size, inode and mtime restored, every observation agrees while the digest is of a
+  mixture no longer on disk. On the copy path **the edit is lost**.
+  Product accepts the behaviour — it takes an in-place rewrite mid-hash with the mtime put back,
+  which editors do not do, and closing it needs a second full read or a lock in the most-reviewed
+  function in this repo. What was not acceptable was the claim. Both limits are now stated, and the
+  hashing helper's docstring no longer says the opposite of what was measured.
 - **An archive entry was deleted on a guess, and the verification it guarded was optional (#224,
   Codex + product).** Five faults in the refusal handling, all reproduced before being fixed.
   **An archive entry was removed while it held the last copy of those bytes.** The hard-link path's

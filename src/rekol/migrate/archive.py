@@ -179,11 +179,28 @@ def publish_into_archive(
     copy and before anything is removed; on any mismatch the source is KEPT, the
     failure is reported, and the directory is not retired.
 
-    Concurrent-writer contract, in one sentence for both paths: the source's
-    content and identity are verified as late as possible, and **the only
-    accepted window is the interval between that last verification and the
-    unlink** — a write of any kind in that interval (in place or a replacement
-    of the pathname) is lost. Everything earlier is caught:
+    Concurrent-writer contract. TWO ACCEPTED LIMITS, both stated plainly
+    because the earlier single-sentence version was too strong (product ruling,
+    2026-11-07, after Codex measured the second one):
+
+    (a) **Any change between the last verification and the unlink.** A write of
+        any kind in that interval — in place, or a replacement of the pathname —
+        is lost.
+
+    (b) **An in-place write that keeps size, inode and mtime, at any point from
+        the start of the final hash.** The digest cannot see a write that lands
+        BEHIND its read position, and on the copy path **the edit is lost**.
+        Accepted deliberately: doing it means rewriting bytes in place mid-hash
+        and then putting the mtime back, which editors do not do, and closing it
+        would need a second full read or a lock in a function that is already
+        the most-reviewed in this repo.
+
+    My previous wording — "the only accepted window is the interval between the
+    last verification and the unlink" — and QA's measurement behind it hold only
+    up to the moment the final hash OPENS the file. From that moment (b) is the
+    wider limit, and saying so is the point of this paragraph.
+
+    What each path checks, given those two limits:
 
     * **copy path** — the source is re-read and re-hashed after publication and
       its digest compared both with the staged copy and with the caller's
@@ -378,11 +395,22 @@ def _digest_of(path: Path) -> _HashedFile:
     THE LIMIT OF THE IDENTITY EVIDENCE, stated here because this is where it
     lives: size and mtime are all that is compared, so an in-place write that
     leaves both unchanged satisfies all three observations even though the
-    content changed. That is a limit on the EVIDENCE, not a hole in the caller's
-    contract — the digest this function returns is of the bytes actually read,
-    so the caller's comparison catches those changed bytes regardless. The
-    window the caller does accept is the interval from the final ``os.stat``
-    here to its own unlink, and nothing wider.
+    content changed.
+
+    AND IT IS A HOLE IN THE CONTRACT, NOT ONLY IN THE EVIDENCE. I wrote the
+    opposite here — "the digest this function returns is of the bytes actually
+    read, so the caller's comparison catches those changed bytes regardless" —
+    and Codex measured it false (2026-11-07). The read is sequential: a write
+    that lands BEHIND the read position is already past, so those bytes never
+    reach the digest at all. With size, inode and mtime restored, every
+    observation agrees and the digest is of a mixture that no longer exists on
+    disk. On the copy path **the edit is lost.**
+
+    Product accepts it: it takes an in-place rewrite mid-hash with the mtime put
+    back, which editors do not do, and closing it needs a second full read or a
+    lock. What is NOT acceptable is the claim, so the caller's contract states
+    this as limit (b) rather than describing the window as the last-check-to-
+    unlink interval alone.
     """
     try:
         fd = os.open(path, os.O_RDONLY)

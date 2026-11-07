@@ -1975,7 +1975,7 @@ def test_the_undo_keeps_a_file_whose_line_endings_changed(tmp_path: Path) -> Non
 
 
 def test_an_interrupted_then_edited_retry_keeps_both_and_names_the_pair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Product's narrowed clause 3 (2026-11-07), with its reasoning.
 
@@ -1998,10 +1998,20 @@ def test_an_interrupted_then_edited_retry_keeps_both_and_names_the_pair(
     def die(*args, **kwargs):  # noqa: ANN002, ANN003
         raise SystemExit("killed between the import and the archive")
 
-    monkeypatch.setattr(migrator_module, "archive_file", die)
-    with pytest.raises(SystemExit):
-        migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
-    monkeypatch.undo()
+    # A SEPARATE CONTEXT, not `monkeypatch.undo()` (Codex + product,
+    # 2026-11-07). `undo()` reverts every patch the shared fixture holds —
+    # including conftest's `delenv("REKOL_HOME")` — so the line after it ran
+    # with Leon's real memory home restored, and the CLI call below tried to
+    # write `.partial-*.md.tmp` into `~/Dropbox/memory/knowledge/`. Only
+    # Codex's sandbox stopped it; a local run has none.
+    # conftest now holds its isolation in a private MonkeyPatch so no test can
+    # revert it, and a `pytest_runtest_call` wrapper fails any test left
+    # pointing outside tmp. This context is the narrow half of that fix: it
+    # restores exactly the one attribute this test patched.
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(migrator_module, "archive_file", die)
+        with pytest.raises(SystemExit):
+            migrate_dir(legacy, memory_home=home, dry_run=False, allow_llm=False)
 
     _edit_in_place(source, _NEW)
     result = _run_repo([str(legacy), "--commit", "--no-llm"], home)

@@ -29,11 +29,14 @@ Tests that need the resolved cache path import ``cache_dir_for`` from
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_index_cache(tmp_path_factory, monkeypatch) -> None:
+def _isolate_index_cache(tmp_path_factory) -> None:
     """Point the index cache + transcript archive at throwaway dirs for every
     test, and clear the ambient data-home env so it cannot pollute a test that
     sets its own home.
@@ -43,7 +46,21 @@ def _isolate_index_cache(tmp_path_factory, monkeypatch) -> None:
     default-ON transcript archive (verbatim, potentially secret-bearing) into the
     real ``~/.local/share/rekol/archive``, and so a developer's exported
     ``REKOL_HOME`` never silently overrides a test's home.
+
+    ITS OWN ``MonkeyPatch``, NOT THE ``monkeypatch`` FIXTURE, and that is the
+    whole point (Codex + product, 2026-11-07). This used to request the
+    function-scoped ``monkeypatch``, which a test shares — so a test calling
+    ``monkeypatch.undo()`` to drop one ``setattr`` of its own ALSO undid every
+    line below, restoring the developer's real ``REKOL_HOME``. Codex's sandbox
+    caught a migrate test doing exactly that and then running the CLI, which
+    tried to write into Leon's real memory home; a local run has no sandbox and
+    would have succeeded.
+    Thirteen tests in this suite call ``undo()``. Converting all of them would
+    leave the next one free to do it again: **isolation must not be revertible
+    by the code it isolates.** A private instance, undone in teardown, is what
+    makes that true, and it fixes every site at once.
     """
+    monkeypatch = pytest.MonkeyPatch()
     cache_root = tmp_path_factory.mktemp("xdg-cache")
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
     monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
@@ -58,6 +75,13 @@ def _isolate_index_cache(tmp_path_factory, monkeypatch) -> None:
     # MEMORY_HOME isn't shadowed by an exported REKOL_HOME (which has precedence).
     monkeypatch.delenv("REKOL_HOME", raising=False)
     monkeypatch.delenv("MEMORY_HOME", raising=False)
+    # REKOL_TOOLS_HOME too, found by the guard below on its first run: it was
+    # never cleared, so on any machine with rekol installed every test ran with
+    # it pointing at the real `~/.local/share/rekol`. Nothing in the pytest
+    # suite writes there today, which is why it went unnoticed — but it is a
+    # var that steers rekol at real data, and the suite is supposed to be
+    # hermetic rather than hermetic-where-it-happens-to-matter.
+    monkeypatch.delenv("REKOL_TOOLS_HOME", raising=False)
     # Hermetic Claude config tree. `claude_projects_dir` defaults to
     # <CLAUDE_CONFIG_DIR>/projects, so without this any test that calls
     # load_config() without setting it explicitly reads the DEVELOPER'S REAL
@@ -69,3 +93,105 @@ def _isolate_index_cache(tmp_path_factory, monkeypatch) -> None:
     # that needs a populated projects dir points claude_projects_dir at its own.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
     monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
+    try:
+        yield
+    finally:
+        monkeypatch.undo()
+
+
+# Every env var that can steer rekol at a real directory on this machine.
+_HOME_STEERING_VARS = (
+    "REKOL_HOME",
+    "MEMORY_HOME",
+    "REKOL_INDEX_DIR",
+    "REKOL_ARCHIVE_DIR",
+    "REKOL_TOOLS_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "CLAUDE_CONFIG_DIR",
+)
+
+
+def _is_under_a_temp_root(value: str) -> bool:
+    """Is ``value`` inside a directory pytest or the OS hands out for scratch?"""
+    try:
+        resolved = Path(value).resolve()
+    except (OSError, ValueError):
+        return False
+    roots = [Path(os.environ.get("TMPDIR", "/tmp")), Path("/tmp"), Path("/private/tmp")]
+    for root in roots:
+        try:
+            resolved.relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        return True
+    return False
+
+
+def _real_data_offenders() -> list[str]:
+    """Every steering var pointing at something that EXISTS outside tmp.
+
+    EXISTENCE IS THE DISCRIMINATOR, and leaving it out made this guard fire on
+    seven healthy tests the first time it ran. `test_rekol_home_takes_precedence`
+    sets `REKOL_HOME=/a` and `MEMORY_HOME=/b`, and the shipped-frontmatter tests
+    set `CLAUDE_CONFIG_DIR` to whitespace — deliberate sentinels for resolution
+    order, pointing at nothing, writing nothing. A guard that fires on those is
+    one someone deletes, which is worse than no guard at all.
+    A path that does not exist cannot be real data. One that DOES exist outside
+    tmp is the dangerous case, and that is every variable this was written for:
+    `~/Dropbox/memory`, `~/.cache/rekol/<hash>`, `~/.local/share/rekol/archive`.
+    A test that points at a non-existent real path and then CREATES it is still
+    caught, because this runs after the test body, when it exists.
+    """
+    offenders = []
+    for var in _HOME_STEERING_VARS:
+        value = os.environ.get(var)
+        if not value or _is_under_a_temp_root(value):
+            continue
+        try:
+            if not Path(value).exists():
+                continue
+        except OSError:
+            continue
+        offenders.append(f"{var}={value}")
+    return offenders
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):  # noqa: ANN001, ANN201
+    """FAIL a test that leaves rekol pointed at a directory outside tmp.
+
+    Asked for by product after Codex's sandbox caught a test writing to Leon's
+    real memory home. The fixture above makes the isolation unrevertible; this
+    checks the RESULT, because the two failures are different: one is
+    "isolation was undone", the other is "a test set a real path on purpose, or
+    read one from the ambient environment".
+
+    A HOOK WRAPPER RATHER THAN A FIXTURE, and that was not the first attempt.
+    As an autouse fixture it caught the undone-isolation case but NOT a test
+    that set a real path deliberately, because the `monkeypatch` fixture the
+    test itself requests is torn down FIRST — the env was already restored
+    before the fixture looked, so the check passed on the very thing it was
+    written for. A `pytest_runtest_call` wrapper runs immediately after the test
+    body, while every fixture is still live, so it sees both.
+
+    Measured, with conftest's private MonkeyPatch reverted to the shared one:
+    a test calling `monkeypatch.undo()` leaks `MEMORY_HOME=~/Dropbox/memory`,
+    `REKOL_INDEX_DIR=~/.cache/rekol/<hash>` and
+    `REKOL_ARCHIVE_DIR=~/.local/share/rekol/archive` — the real memory home and
+    the real transcript archive. That is what Codex's sandbox stopped, and a
+    local run has no sandbox.
+    """
+    outcome = yield
+    offenders = _real_data_offenders()
+    if offenders and outcome.excinfo is None:
+        # Only when the test otherwise passed: a test that already failed has
+        # its own error to show, and burying it under this one helps nobody.
+        raise AssertionError(
+            "this test left rekol pointed at a directory OUTSIDE tmp, which is a "
+            "real directory on this machine: "
+            + "; ".join(offenders)
+            + ". Point every one of these at tmp_path, and never call "
+            "`monkeypatch.undo()` — it reverts conftest's isolation along with "
+            "your own patches."
+        )
