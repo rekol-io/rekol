@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert no bats test can invoke ``uninstall.sh`` unguarded (#233).
+"""Assert no bats test can invoke ``install.sh`` or ``uninstall.sh`` unguarded (#233).
 
 Run by ``test_uninstall.bats``. Exists because the individual guard calls can
 each be deleted without any other test noticing: the suite would stay green
@@ -16,11 +16,16 @@ not a rule.
 The rule enforced instead is structural, and there is no way to word your way
 past it:
 
-1. ``uninstall.sh`` may be invoked **only** inside a function whose name starts
-   with ``run_uninstall`` — never directly in a ``@test`` body.
-2. Every such wrapper must call ``assert_destructive_targets_sandboxed`` as an
-   executable statement, not in a comment.
-3. No wrapper may invoke the uninstaller before that call.
+1. ``install.sh`` and ``uninstall.sh`` may be invoked **only** from inside a
+   shell function — never directly in a ``@test`` body, where no wrapper can
+   stand in front of them.
+2. That function must call ``assert_destructive_targets_sandboxed`` as an
+   executable statement, not inside a comment.
+3. It must call it BEFORE the invocation.
+
+Keyed on the guard call rather than on a ``run_uninstall*`` name, so a new
+helper with any name is covered the moment it invokes either script. Keying on
+the name is what let ``do_full_install`` slip through.
 
 Usage: ``assert_invocations_guarded.py <path-to-bats-file>``
 Exits 0 when the file satisfies all three, 1 otherwise, listing each violation.
@@ -34,8 +39,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 GUARD_CALL = "assert_destructive_targets_sandboxed"
-WRAPPER_PREFIX = "run_uninstall"
-INVOCATION = "uninstall.sh"
+
+# BOTH scripts, not just the uninstaller (QA, 2026-11-06). `INVOCATION` was
+# `"uninstall.sh"` alone, so `do_full_install` -- which runs `install.sh` with
+# `env -u MEMORY_HOME -u TEST_MODE` only -- was invisible to this check. A leaked
+# REKOL_INDEX_DIR passed straight through it and install.sh tried to rebuild the
+# developer's LIVE index with `test-hashing`. The data survived because the
+# PRODUCT's real-index guard refused the rebuild, which is the component
+# #216/#217/#220 show has gaps: the suite was being protected by the thing it
+# exists to test.
+INVOCATION_SCRIPTS = ("uninstall.sh", "install.sh")
 
 FUNCTION_START = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{")
 TEST_START = re.compile(r"^@test\s")
@@ -84,8 +97,6 @@ def _scan(lines: list[str]) -> tuple[list[Violation], dict[str, _Wrapper]]:
         match = FUNCTION_START.match(stripped)
         if match:
             current_function = match.group(1)
-            if current_function.startswith(WRAPPER_PREFIX):
-                wrappers.setdefault(current_function, _Wrapper(name=current_function))
             continue
         if TEST_START.match(stripped):
             current_function = None
@@ -94,28 +105,28 @@ def _scan(lines: list[str]) -> tuple[list[Violation], dict[str, _Wrapper]]:
             current_function = None
             continue
 
-        if GUARD_CALL in code and current_function in wrappers:
-            wrapper = wrappers[current_function]
+        if GUARD_CALL in code and current_function is not None:
+            wrapper = wrappers.setdefault(current_function, _Wrapper(name=current_function))
             if wrapper.guard_line is None:
                 wrapper.guard_line = index
 
-        if INVOCATION not in code:
+        if not any(script in code for script in INVOCATION_SCRIPTS):
             continue
         # Prose and assertions that merely name the script are not invocations;
         # reaching it goes through COMPONENT_DIR.
         if "COMPONENT_DIR" not in code:
             continue
 
-        if current_function is None or not current_function.startswith(WRAPPER_PREFIX):
-            where = current_function or "a @test body or top level"
+        if current_function is None:
             violations.append(
                 Violation(
                     index,
-                    f"invokes {INVOCATION} outside a {WRAPPER_PREFIX}* wrapper "
-                    f"(in {where}): {stripped}",
+                    f"invokes a destructive script outside any function "
+                    f"(a @test body or top level): {stripped}",
                 )
             )
             continue
+        wrappers.setdefault(current_function, _Wrapper(name=current_function))
         wrappers[current_function].invocation_lines.append(index)
 
     return violations, wrappers
@@ -133,8 +144,8 @@ def _validate_wrappers(wrappers: dict[str, _Wrapper]) -> list[Violation]:
             violations.append(
                 Violation(
                     wrapper.invocation_lines[0],
-                    f"{wrapper.name}() invokes {INVOCATION} but never calls "
-                    f"{GUARD_CALL} as a statement",
+                    f"{wrapper.name}() invokes a destructive script but never "
+                    f"calls {GUARD_CALL} as a statement",
                 )
             )
             continue
@@ -143,8 +154,9 @@ def _validate_wrappers(wrappers: dict[str, _Wrapper]) -> list[Violation]:
             violations.append(
                 Violation(
                     early[0],
-                    f"{wrapper.name}() invokes {INVOCATION} at line {early[0]}, "
-                    f"before its {GUARD_CALL} at line {wrapper.guard_line}",
+                    f"{wrapper.name}() invokes a destructive script at line "
+                    f"{early[0]}, before its {GUARD_CALL} at line "
+                    f"{wrapper.guard_line}",
                 )
             )
 

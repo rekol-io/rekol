@@ -95,11 +95,22 @@ do_full_install() {
         > "${REKOLH}/always/identity.md"
     printf 'a topic\n' > "${REKOLH}/topics/sailing.md"
 
+    run_install --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    [ "$status" -eq 0 ]
+}
+
+# install.sh is destructive too, and this suite's protection in that path was
+# the PRODUCT's real-index guard rather than the suite's own (QA, 2026-11-06):
+# `do_full_install` ran it with `env -u MEMORY_HOME -u TEST_MODE` only, so a
+# leaked REKOL_INDEX_DIR passed straight through and install.sh tried to rebuild
+# the developer's LIVE index with `test-hashing`. The data survived because the
+# index guard refused it — the very component #216/#217/#220 show has gaps. A
+# suite must not depend on the thing it is testing to stay safe.
+run_install() {
+    assert_destructive_targets_sandboxed || return 1
     run env -u MEMORY_HOME -u TEST_MODE \
         REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/install.sh" \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
-    [ "$status" -eq 0 ]
+        "${COMPONENT_DIR}/install.sh" "$@"
 }
 
 # Default uninstall helper — deliberately passes NO --tools-home/--bin-dir, so it
@@ -426,10 +437,7 @@ manifest_index_dir() {
     printf 'legacy-sessions-db\n' > "${REKOLH}/.index/sessions.db"
     md_hash_before="$(shasum "${REKOLH}/always/identity.md" | awk '{print $1}')"
 
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/install.sh" \
-        --no-skill --no-shellrc \
+    run_install --no-skill --no-shellrc \
         --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
     [ "$status" -eq 0 ]
 
@@ -582,10 +590,7 @@ manifest_index_dir() {
     run_uninstall --yes
     [ "$status" -eq 0 ]
 
-    run env -u MEMORY_HOME -u TEST_MODE \
-        REKOL_HOME="${REKOLH}" HOME="${SBHOME}" \
-        "${COMPONENT_DIR}/install.sh" \
-        --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
+    run_install --tools-home "${TOOLS_HOME}" --bin-dir "${BIN_DIR}"
     [ "$status" -eq 0 ]
     [ -L "${BIN_DIR}/rekol" ] || [ -e "${BIN_DIR}/rekol" ]
     run jq -e '[.. | objects | .command? // empty] | any(. | test("rekol"))' \
@@ -1041,4 +1046,26 @@ _guard_in_subshell() {
         "${BATS_TEST_DIRNAME}/test_install.bats"
     [ "$status" -eq 0 ] || { echo "test_install.bats never calls the guard"; false; }
     [ "$output" -ge 2 ] || { echo "expected it in setup_file AND setup, got $output"; false; }
+}
+
+@test "the guard check covers install.sh, not only uninstall.sh" {
+    # QA, 2026-11-06: `do_full_install` ran install.sh with `env -u MEMORY_HOME
+    # -u TEST_MODE` only, so a leaked REKOL_INDEX_DIR passed through and
+    # install.sh tried to rebuild the developer's LIVE index with test-hashing.
+    # The data survived because the PRODUCT's real-index guard refused it — the
+    # component #216/#217/#220 show has gaps. A suite must not be protected by
+    # the thing it exists to test.
+    #
+    # Asserted against the checker itself, so narrowing its scope back to the
+    # uninstaller fails here rather than silently un-covering this path.
+    run grep -c 'INVOCATION_SCRIPTS = ("uninstall.sh", "install.sh")' \
+        "${BATS_TEST_DIRNAME}/assert_invocations_guarded.py"
+    [ "$status" -eq 0 ] || { echo "the checker no longer covers both scripts"; false; }
+
+    # And every install.sh invocation in this file really is inside a guarded
+    # function — the same property the checker enforces, asserted end to end.
+    run python3 "${BATS_TEST_DIRNAME}/assert_invocations_guarded.py" \
+        "${BATS_TEST_DIRNAME}/test_uninstall.bats"
+    echo "$output"
+    [ "$status" -eq 0 ]
 }
