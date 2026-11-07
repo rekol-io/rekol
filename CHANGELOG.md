@@ -13,9 +13,18 @@ follow [Semantic Versioning](https://semver.org/).
   discards stderr, which is how Claude Code receives a block reason, so the hook silently stopped
   blocking after any install. **Present since #183 (2026-08-18), so in v0.5.13 and on `main`;** the
   original is backed up as `settings.json.bak-softfail-*`.
-  Soft-fail is now applied by ownership, not by mention: the memory loader's sentinel, or a command
-  that *starts* with rekol's invocation and carries one of rekol's subcommands. Verified against
-  eleven shapes — all six of rekol's own, and five user-owned ones that must be left alone.
+  Soft-fail is now applied by **whole-command equality**: a command is rekol's only when the entire
+  string equals one the installer is about to write. That set is built from the rendered snippets
+  themselves plus a handler allowlist — one definition, derived from the renderer, driving both the
+  softener and the count — with and without the soft-fail tail, since Step 6.95 rewrites a pre-#159
+  bare invocation to the current rendering *without* the tail and this step is what adds it.
+  An anchored regex was tried first and was wrong in **both** directions (product measured it): it
+  missed rekol's own `@TOOLS_HOME@/hooks/auto-reindex.sh …`, whose command starts with a path, and
+  SessionEnd's `if [ -n "${REKOL_HOME:-…` notice — so a user with no hooks of their own was told the
+  installer had left theirs alone — while *claiming* `rekol _hook x && my-gate` and
+  `"$(my-wrapper)" --check "_hook foo"`, because the subcommand test was an unanchored substring.
+  Both of those are now executed negative controls, and a pristine install and reinstall must print
+  no preserved-hook line at all.
   Both directions are **executed** in the test rather than inferred, because inference is what let
   this ship: a user's blocking hook is byte-identical and still exits non-zero with its stderr
   intact, and rekol's own hook still exits 0 with its binary removed, which is the failure that

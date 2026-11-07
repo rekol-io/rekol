@@ -1605,6 +1605,17 @@ JSON
   [[ "$output" == *"still blocks"* ]] || {
     echo "FAIL: the report does not say the user's hook still blocks"; false; }
 
+  # THE COUNT MUST BE EXACT (product, 2026-11-07). My first predicate missed two
+  # of rekol's OWN commands -- `@TOOLS_HOME@/hooks/auto-reindex.sh …`, which
+  # starts with a path, and SessionEnd's `if [ -n "${REKOL_HOME:-…` -- so this
+  # line appeared on a pristine install and told a user with no hooks of their
+  # own that we had left theirs alone. One real user hook is wired here, so the
+  # count has to be exactly one.
+  [[ "$output" == *"left 1 hook(s) of your own"* ]] || {
+    echo "FAIL: the preserved count is not exactly 1"
+    echo "$output" | grep -i "of your own" || echo "  (no count line at all)"
+    false; }
+
   # DIRECTION 2: rekol's OWN hooks must still be soft-failing, or a broken
   # install can fail a UserPromptSubmit and lock the user out of Claude Code.
   ours="$(jq -r '[.. | objects | .command? // empty | select(test("_hook "))] | .[0]' \
@@ -1624,4 +1635,104 @@ JSON
   [ "$ours_rc" -eq 0 ] || {
     echo "FAIL: rekol's own hook exited $ours_rc with its binary missing — that fails the event"
     false; }
+}
+
+@test "a pristine install reports NO preserved hooks of your own (#235)" {
+  # THE CONTROL product asked for. My first predicate missed two of rekol's own
+  # commands -- the auto-reindex script, whose command starts with a path, and
+  # SessionEnd's `if [ -n "${REKOL_HOME:-…` notice -- so a user with no hooks of
+  # their own was told the installer had left theirs alone. A reassurance about
+  # something that does not exist is not harmless: it is the line QA was told
+  # not to trust.
+  SBHOME="$TESTROOT/sandhome-pristine-count"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-pristine-count"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: a pristine install claims it preserved hooks of the user's"
+    echo "$output" | grep -i "of your own"
+    false; }
+
+  # And a REINSTALL must be the same: every command rekol wrote is recognised as
+  # rekol's, so nothing is miscounted the second time either.
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: a reinstall claims it preserved hooks of the user's"
+    echo "$output" | grep -i "of your own"
+    false; }
+}
+
+@test "the soften step leaves a compound or quoted user command alone (#235)" {
+  # Product ran my first regex over these two and both came back as rekol's:
+  #
+  #   rekol _hook x && my-gate              the anchor held, but the subcommand
+  #                                         test was an unanchored substring
+  #   "$(my-wrapper)" --check "_hook foo"   same, through a quoted argument
+  #
+  # Each would have had ` 2>/dev/null || true` appended, which is #235 again:
+  # the gate stops blocking, silently. EXECUTED, not inferred -- both must still
+  # exit non-zero with their stderr intact after an install.
+  SBHOME="$TESTROOT/sandhome-compound"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-compound"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  gate="$TESTROOT/my-gate"
+  printf '#!/bin/sh\nprintf "BLOCKED by my gate\\n" >&2\nexit 2\n' > "$gate"
+  chmod +x "$gate"
+  wrapper="$TESTROOT/my-wrapper"
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$gate" > "$wrapper"
+  chmod +x "$wrapper"
+
+  cmd_a="rekol _hook x && $gate"
+  cmd_b="\"\$($wrapper)\" --check \"_hook foo\""
+  jq -n --arg a "$cmd_a" --arg b "$cmd_b" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[
+      {type:"command",command:$a},
+      {type:"command",command:$b}]}]}}' > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  for want in "$cmd_a" "$cmd_b"; do
+    got="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
+            | select(. == $w)] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 1 ] || {
+      echo "FAIL: rekol rewrote a command it does not own:"
+      echo "  wanted byte-identical: $want"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # EXECUTED: the second one resolves to the gate, so both must still block.
+  after_b="$(jq -r --arg w "$cmd_b" '[.. | objects | .command? // empty
+             | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
+  set +e
+  stderr_file="$TESTROOT/gate.err"
+  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after_b" >/dev/null 2>"$stderr_file"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { echo "FAIL: the user's gate stopped blocking (exit 0)"; false; }
+  grep -q "BLOCKED by my gate" "$stderr_file" \
+    || { echo "FAIL: the gate's stderr was discarded"; cat "$stderr_file"; false; }
 }

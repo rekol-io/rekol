@@ -999,36 +999,88 @@ fi
 # text without extending that migration.
 
 if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
-  # OWNERSHIP, not a text match (QA's F9, #235). This predicate used to be
-  # `test("rekol|REKOL")` — any command MENTIONING rekol. So a user's own hook
-  # got ` 2>/dev/null || true` appended, and that is not cosmetic: `|| true`
-  # forces exit 0 and `2>/dev/null` discards stderr, which is how Claude Code
-  # receives a block reason. A BLOCKING hook of theirs silently stopped
-  # blocking after any install — `my-tool --uses rekol --flag`, or a path such
-  # as `~/src/rekol-tools/gate.sh`. In install.sh since #183, so released.
+  # OWNERSHIP BY WHOLE-COMMAND EQUALITY (QA's F9 #235; product, 2026-11-07).
   #
-  # What identifies OUR hooks is the shape, anchored at the start of the
-  # command, because that is how we write them and not how a mention appears:
+  # This predicate started as `test("rekol|REKOL")` — any command MENTIONING
+  # rekol. So a user's own hook got ` 2>/dev/null || true` appended, and that is
+  # not cosmetic: `|| true` forces exit 0 and `2>/dev/null` discards stderr,
+  # which is how Claude Code receives a block reason. A BLOCKING hook of theirs
+  # silently stopped blocking after any install. In install.sh since #183, so
+  # released.
   #
-  #   : rekol:backend=install.sh:v1; …          the memory loader (sentinel)
-  #   "$(…)" _hook <name> …                     every handler, old and new form
-  #   nohup "$(…)" session-index --incremental  the SessionEnd indexer
-  #   rekol _hook <name>                        the pre-#159 bare form
+  # My first fix anchored a regex at the start of the command. Product ran it and
+  # it was wrong in BOTH directions:
   #
-  # A user command that merely contains the word, or prints it, does not start
-  # that way. The subcommand pattern covers the same commands Step 6.95 lists,
-  # but as a regex rather than that explicit list, so it also accepts a future
-  # `_hook <name>` — deliberately, since softening our own new handler is right.
-  # It is the ANCHOR that keeps a user's command out, not the subcommand.
+  #   missed ours      `@TOOLS_HOME@/hooks/auto-reindex.sh …` (starts with a
+  #                    path) and SessionEnd's `if [ -n "${REKOL_HOME:-…` — so a
+  #                    user with no hooks of their own was told we left theirs
+  #                    alone
+  #   claimed theirs   `rekol _hook x && my-gate`, and
+  #                    `"$(my-wrapper)" --check "_hook foo"` — the anchor held,
+  #                    but the subcommand test was an unanchored substring, so
+  #                    #235 all over again
+  #
+  # A pattern cannot express "we wrote this". So, the same standard as #203:
+  # a command is ours only when the WHOLE string equals one the installer is
+  # about to write. That set is built BELOW from the rendered snippets
+  # themselves plus the handler allowlist — one definition, derived from the
+  # renderer, driving both the softener and the count.
+  #
+  # WITH AND WITHOUT the soft-fail tail, because that is the point of the step:
+  # Step 6.95 rewrites a pre-#159 bare invocation to the current rendering
+  # WITHOUT adding the tail, and this step is what adds it. Matching only the
+  # tailed form would leave such a hook unsoftened forever.
+  #
+  # The handler allowlist. One entry per handler rekol writes as
+  #     <pre><invocation> <argtail><suffix>
+  # for the commands built directly rather than rendered from a snippet.
+  # `_hook stop-failure-record` is written by `rekol resume enable`, not by this
+  # script, and is listed so an existing one is softened too.
+  REKOL_OWNED_HOOKS_JSON='[
+    {"argtail":"_hook time-context"},
+    {"argtail":"_hook capture-nudge"},
+    {"argtail":"_hook record-stop"},
+    {"argtail":"_hook session-coverage"},
+    {"argtail":"_hook session-tasks"},
+    {"argtail":"_hook update-check"},
+    {"argtail":"_hook session-confidence"},
+    {"argtail":"_hook stop-failure-record"},
+    {"argtail":"review --nudge"},
+    {"pre":"nohup ","argtail":"session-index --incremental","suffix":" >/dev/null 2>&1 &"}
+  ]'
+
+  # Every command this install writes, as exact strings. The rendered snippets
+  # are the authority for the ones with no path variability -- the memory
+  # loader, the SessionEnd notice, the auto-reindex script -- because they are
+  # the very files the merge steps are about to install.
+  REKOL_OWN_COMMANDS_JSON='[]'
+  if [[ -n "${RENDERED_HOOK_DIR}" ]] && compgen -G "${RENDERED_HOOK_DIR}/*.json" >/dev/null 2>&1; then
+    REKOL_OWN_COMMANDS_JSON="$(
+      jq -s --arg rekol "${REKOL_INVOCATION}" \
+            --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
+        def variants: . as $c
+          | [$c, ($c | rtrimstr(" 2>/dev/null || true"))];
+        [ ( .[] | .. | objects | select(has("command")) | .command ),
+          ( $owned[]
+            | ((.pre // "") + "\"" + $rekol + "\" " + .argtail
+               + (.suffix // " 2>/dev/null || true")) )
+        ]
+        | map(variants) | add | map(select(. != "")) | unique
+      ' "${RENDERED_HOOK_DIR}"/*.json 2>/dev/null || printf '[]'
+    )"
+  fi
+  REKOL_OWN_COMMANDS_JSON="${REKOL_OWN_COMMANDS_JSON:-[]}"
+
   SOFTEN_PROG='
-    def is_ours:
-      (.command? // "") as $c
-      | ($c | test("^: rekol:backend=install\\.sh"))
-        or (($c | test("^(nohup[[:space:]]+)?(\"\\$\\(|rekol[[:space:]])"))
-            and ($c | test("(_hook [a-z][a-z-]*|review --nudge|session-index --incremental)")));
+    # BIND THE COMMAND FIRST. `$own | index(.command)` re-binds `.` to $own
+    # inside the index argument, so it looked up $own.command -- null -- and the
+    # predicate was false for everything. Nothing was softened and the count was
+    # 0, which on a pristine install is the right answer for the wrong reason:
+    # exactly the check whose output is identical whether or not it works.
+    def is_ours: (.command? // "") as $c | ($own | index($c)) != null;
     def soften:
       if is_ours
-      then if (.command | test("\\|\\| true$")) then .              # already guarded
+      then if (.command | test("\\|\\| true$")) then .            # already guarded
            elif (.command | test("&[[:space:]]*$")) then .          # async: returns 0 already
            else .command += " 2>/dev/null || true" end
       else . end;
@@ -1051,7 +1103,8 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
            then .hooks.PostToolUse |= dedupe_autoreindex else . end
     else . end'
 
-  SOFTENED="$(jq "${SOFTEN_PROG}" "${SETTINGS_JSON}" 2>/dev/null || true)"
+  SOFTENED="$(jq --argjson own "${REKOL_OWN_COMMANDS_JSON}" \
+                 "${SOFTEN_PROG}" "${SETTINGS_JSON}" 2>/dev/null || true)"
   if [[ -z "$SOFTENED" ]]; then
     say "could not evaluate the hook soft-fail migration — leaving ${SETTINGS_JSON} untouched"
   elif ! diff -q <(printf '%s\n' "$SOFTENED") <(jq '.' "${SETTINGS_JSON}") >/dev/null 2>&1; then
@@ -1079,13 +1132,12 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
   # Reported on every run where such a hook exists, because "we left yours
   # alone" is the fact a user needs after #235 was released softening them.
   if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
-    local_not_ours="$(jq -r '
+    local_not_ours="$(jq -r --argjson own "${REKOL_OWN_COMMANDS_JSON}" '
       [.. | objects | select(has("command"))
        | .command
        | select(test("rekol|REKOL"))
-       | select((test("^: rekol:backend=install\\.sh")
-                 or ((test("^(nohup[[:space:]]+)?(\"\\$\\(|rekol[[:space:]])"))
-                     and test("(_hook [a-z][a-z-]*|review --nudge|session-index --incremental)"))) | not)]
+       | . as $c
+       | select(($own | index($c)) == null)]
       | length' "${SETTINGS_JSON}" 2>/dev/null || printf 0)"
     local_not_ours="${local_not_ours:-0}"
     if [[ "${local_not_ours}" -gt 0 ]]; then
