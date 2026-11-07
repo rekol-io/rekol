@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A recorded path containing `)` made `doctor` call a working hook broken (#203, Codex).** The
+  parser bridged the `if [ -x … ]` preflight and `command -v rekol` with `[^)]*?`, which cannot
+  cross a `)` — so for a path like `/Users/a)b/bin/rekol` the match failed, the parser returned
+  `None`, and the report said "bare invocation … exits 127" about a hook that exits 0. It now
+  consumes **single-quoted runs whole**, including the `'\''` splice, so a `)` inside quotes is part
+  of the path while a bare `)` still ends the substitution. Verified against four path shapes
+  (ordinary, `)`, apostrophe, spaces-and-`&`), and the `a)b` case is **executed**: the rendered
+  command runs and returns the version, and `unrunnable_hooks` reports nothing — parsing it while
+  the shell could not run it would be no better than the bug.
 - **An ordinary v0.5.13 upgrade is free of duplicate handlers, measured on a real install (#236).**
   That issue was filed as no-hold because the duplicates had only been seen on a hand-edited
   `settings.json`. Measured properly: a **real v0.5.13 install**, upgraded twice with this branch

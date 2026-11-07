@@ -416,3 +416,88 @@ def test_an_unrelated_executable_preflight_is_not_taken_as_rekols_binary() -> No
     found = unrunnable_hooks(settings, probe=False)
     assert found, "a hook whose fallback does not exist must be reported"
     assert "/missing/rekol" in found[0][1]
+
+
+def test_a_recorded_path_containing_a_paren_is_parsed_and_health_agrees(tmp_path) -> None:
+    """Codex P2: the parser scanned for a `)` and a path can contain one.
+
+    `[^)]*?` bridged the `if [ -x … ]` preflight and `command -v rekol`, and it
+    cannot cross a `)` — so a recorded path like `/Users/a)b/bin/rekol` made the
+    match fail, the parser return None, and `doctor` report a perfectly working
+    hook as "bare invocation … exits 127".
+
+    The command is RENDERED the way install.sh renders it, then EXECUTED, so
+    this asserts the thing that matters: the hook works, and health says so.
+    Parsing it correctly while the shell could not run it would be no better
+    than the bug.
+    """
+    import subprocess
+
+    from rekol.update import _hook_fallback_path
+
+    bin_dir = tmp_path / "a)b" / "bin"
+    bin_dir.mkdir(parents=True)
+    exe = bin_dir / "rekol"
+    exe.write_text("#!/bin/sh\nprintf 'rekol 9.9.9\\n'\n")
+    exe.chmod(0o755)
+
+    # The renderer's own shape, including its single-quote escaping.
+    quoted = str(exe).replace("'", "'\\''")
+    invocation = (
+        f"$(if [ -x '{quoted}' ]; then printf %s '{quoted}'; "
+        f"else command -v rekol || printf %s '{quoted}'; fi)"
+    )
+    command = f'"{invocation}" --version'
+
+    # 1. The shell really can run it, so the hook is not broken.
+    completed = subprocess.run(
+        ["/bin/sh", "-c", command],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "9.9.9" in completed.stdout, completed.stdout
+
+    # 2. And the parser agrees about which binary that was.
+    assert _hook_fallback_path(f'"{invocation}" _hook session-tasks 2>/dev/null || true') == str(
+        exe
+    )
+
+
+def test_a_paren_in_the_path_does_not_make_a_hook_look_unrunnable(tmp_path, monkeypatch) -> None:
+    """The end-to-end half: `unrunnable_hooks` must not flag it.
+
+    This is the report a user actually sees, and it was saying "exits 127" about
+    a hook that exits 0.
+    """
+    from rekol.update import unrunnable_hooks
+
+    bin_dir = tmp_path / "a)b" / "bin"
+    bin_dir.mkdir(parents=True)
+    exe = bin_dir / "rekol"
+    exe.write_text("#!/bin/sh\nprintf 'rekol 9.9.9\\n'\n")
+    exe.chmod(0o755)
+    quoted = str(exe).replace("'", "'\\''")
+    invocation = (
+        f"$(if [ -x '{quoted}' ]; then printf %s '{quoted}'; "
+        f"else command -v rekol || printf %s '{quoted}'; fi)"
+    )
+    settings = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'"{invocation}" _hook session-tasks 2>/dev/null || true',
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    assert unrunnable_hooks(settings, probe=True) == []

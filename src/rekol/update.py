@@ -103,8 +103,22 @@ _FALLBACK_RE = re.compile(
 # false-health class again through a different token, which is why the match now
 # requires BOTH the `$(if [ -x …` opening of our own rendering AND the
 # `command -v rekol` that only our substitution contains.
+#
+# AND it no longer scans for a parenthesis (Codex P2, 2026-11-07). The `[^)]*?`
+# that bridged the preflight and `command -v rekol` could not cross a `)`, so a
+# recorded path containing one — `/Users/a)b/bin/rekol` — made the match fail,
+# the parser return None, and `doctor` report a perfectly working hook as "bare
+# invocation … exits 127". The bridge now consumes SINGLE-QUOTED RUNS WHOLE, so
+# a `)` inside quotes is part of the path, while a bare `)` still ends the
+# substitution where it should.
+#
+# `_SQ_RUN` is the shell single-quoted token, including the close-escape-reopen
+# splice `'\''` that the renderer uses for an apostrophe in the path.
+_SQ_RUN = r"'(?:[^']|'\\'')*'"
 _RECORDED_BINARY_RE = re.compile(
-    r"\$\(\s*if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\][^)]*?command\s+-v\s+rekol"
+    r"\$\(\s*if\s+\[\s+-x\s+'((?:[^']|'\\'')*)'\s*\]"
+    r"(?:" + _SQ_RUN + r"|[^')])*"
+    r"command\s+-v\s+rekol"
 )
 
 
