@@ -1854,6 +1854,17 @@ JSON
     false; }
 
   # And the skip is reported rather than silent.
-  [[ "$output" == *"does not rewrite what it does not own"* ]] || {
+  [[ "$output" == *"this migration step did not rewrite them"* ]] || {
     echo "FAIL: the preserved occurrence was not reported"; echo "$output" | tail -20; false; }
+
+  # The message must NOT claim more than this step delivers. Step 7's soft-fail
+  # pass still appends to any command mentioning rekol (#235), so a blanket
+  # "rekol does not rewrite what it does not own" is false in this very run, and
+  # printing a guarantee the next step breaks is worse than printing nothing.
+  [[ "$output" != *"rekol does not rewrite what it does not own"* ]] || {
+    echo "FAIL: printed a byte-identical guarantee that Step 7 then breaks"
+    echo "$output" | tail -20; false; }
+  [[ "$output" == *"#235"* ]] || {
+    echo "FAIL: the known gap is not named, so the user cannot act on it"
+    echo "$output" | tail -20; false; }
 }

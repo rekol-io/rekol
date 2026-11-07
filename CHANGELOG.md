@@ -11,8 +11,21 @@ follow [Semantic Versioning](https://semver.org/).
   changed a `printf` that merely *prints* that text and a user's own command built on it. This step
   writes to the user's `settings.json`. The substitution must now be immediately followed by one of
   rekol's own subcommands (`_hook <name>`, `review --nudge`, `session-index --incremental`);
-  anything else is left byte-for-byte, and the count of preserved occurrences is **reported** —
-  preserving silently is indistinguishable from having missed it.
+  anything else is left untouched by that step, and the count of preserved occurrences is
+  **reported** — preserving silently is indistinguishable from having missed it.
+  **Not yet byte-identical overall, and the installer now says so.** A later step (Step 7's
+  soft-fail pass) still appends ` 2>/dev/null || true` to any command whose text merely mentions
+  `rekol`, so a preserved command does not come back unchanged. An earlier version of this message
+  claimed "rekol does not rewrite what it does not own", which the same install then falsified;
+  printing a guarantee the next step breaks is worse than printing nothing, so it now states only
+  what this step does and names the gap (#235).
+  **That gap is in released versions.** The soft-fail pass has matched on text since #183
+  (2026-08-18), so it is present in v0.5.13 and on `main`: any hook of yours whose command mentions
+  `rekol` — including a path such as `~/src/rekol-tools/gate.sh` — has had ` 2>/dev/null || true`
+  appended on every install since. For a **blocking** hook that matters: `|| true` forces exit 0
+  and `2>/dev/null` discards stderr, which is how Claude Code receives a block reason, so such a
+  hook stops blocking. Your original is backed up as `settings.json.bak-softfail-*`. The fix is
+  #235, landing in its own change.
 - **`doctor` took an unrelated executable preflight for rekol's binary.** With an
   `if [ -x '/usr/bin/true' ]` earlier in the command, the fallback parser returned `/usr/bin/true`,
   probed it, found it runnable, and reported a hook whose real fallback does not exist as healthy —

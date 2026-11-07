@@ -1056,11 +1056,23 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
       local_skipped="$(grep -c "command -v rekol || echo" "${SETTINGS_JSON}" 2>/dev/null || true)"
       local_skipped="${local_skipped:-0}"
       if [[ "${local_skipped}" -gt 0 ]]; then
+        # The claim here is deliberately narrow: THIS STEP left them alone. An
+        # earlier version of this message said "rekol does not rewrite what it
+        # does not own", which the same install then falsified — Step 7's
+        # soft-fail pass appends ` 2>/dev/null || true` to any command whose text
+        # merely mentions rekol, so a preserved command does NOT come back
+        # byte-identical (QA's F9, #235). Printing a guarantee the next step
+        # breaks is worse than printing nothing, so this says only what is true
+        # and names the gap.
         say "left ${local_skipped} occurrence(s) of the old 'command -v rekol' text alone:"
         say "  they are not rekol hook invocations (a literal string, or your own"
-        say "  command), and rekol does not rewrite what it does not own. If one of"
-        say "  them IS meant to be a rekol hook, update it by hand in ${SETTINGS_JSON}."
-        log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON}"
+        say "  command), so this migration step did not rewrite them."
+        say "  KNOWN GAP (#235): a later step still appends ' 2>/dev/null || true'"
+        say "  to any command whose text mentions rekol, so such a command is not"
+        say "  left byte-identical, and a BLOCKING hook of yours would stop"
+        say "  blocking. Check ${SETTINGS_JSON} if you have one."
+        say "  If one of them IS meant to be a rekol hook, update it by hand."
+        log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON} (see #235)"
       fi
     else
       rm -f "${local_tmp}"
