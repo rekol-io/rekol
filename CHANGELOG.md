@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The installer stopped a user's blocking hook from blocking (#235).** The soft-fail step matched
+  any command whose text contained `rekol` or `REKOL`, so a hook of the user's own got
+  ` 2>/dev/null || true` appended — `my-tool --uses rekol --flag`, or anything living under a path
+  such as `~/src/rekol-tools/`. That is not cosmetic: `|| true` forces exit 0 and `2>/dev/null`
+  discards stderr, which is how Claude Code receives a block reason, so the hook silently stopped
+  blocking after any install. **Present since #183 (2026-08-18), so in v0.5.13 and on `main`;** the
+  original is backed up as `settings.json.bak-softfail-*`.
+  Soft-fail is now applied by ownership, not by mention: the memory loader's sentinel, or a command
+  that *starts* with rekol's invocation and carries one of rekol's subcommands. Verified against
+  eleven shapes — all six of rekol's own, and five user-owned ones that must be left alone.
+  Both directions are **executed** in the test rather than inferred, because inference is what let
+  this ship: a user's blocking hook is byte-identical and still exits non-zero with its stderr
+  intact, and rekol's own hook still exits 0 with its binary removed, which is the failure that
+  could otherwise fail a `UserPromptSubmit` and lock someone out of Claude Code.
+  The install now also reports how many hooks of yours it left alone, and says they still block.
+
+### Fixed
 - **The hook migration rewrote commands rekol does not own.** Its `gsub` matched the old
   invocation anywhere in a command string, with no ownership or shell-context boundary, so it
   changed a `printf` that merely *prints* that text and a user's own command built on it. This step

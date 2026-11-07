@@ -1104,9 +1104,32 @@ fi
 # text without extending that migration.
 
 if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
+  # OWNERSHIP, not a text match (QA's F9, #235). This predicate used to be
+  # `test("rekol|REKOL")` — any command MENTIONING rekol. So a user's own hook
+  # got ` 2>/dev/null || true` appended, and that is not cosmetic: `|| true`
+  # forces exit 0 and `2>/dev/null` discards stderr, which is how Claude Code
+  # receives a block reason. A BLOCKING hook of theirs silently stopped
+  # blocking after any install — `my-tool --uses rekol --flag`, or a path such
+  # as `~/src/rekol-tools/gate.sh`. In install.sh since #183, so released.
+  #
+  # What identifies OUR hooks is the shape, anchored at the start of the
+  # command, because that is how we write them and not how a mention appears:
+  #
+  #   : rekol:backend=install.sh:v1; …          the memory loader (sentinel)
+  #   "$(…)" _hook <name> …                     every handler, old and new form
+  #   nohup "$(…)" session-index --incremental  the SessionEnd indexer
+  #   rekol _hook <name>                        the pre-#159 bare form
+  #
+  # A user command that merely contains the word, or prints it, does not start
+  # that way. The subcommand list is the same boundary Step 6.95 uses.
   SOFTEN_PROG='
+    def is_ours:
+      (.command? // "") as $c
+      | ($c | test("^: rekol:backend=install\\.sh"))
+        or (($c | test("^(nohup[[:space:]]+)?(\"\\$\\(|rekol[[:space:]])"))
+            and ($c | test("(_hook [a-z][a-z-]*|review --nudge|session-index --incremental)")));
     def soften:
-      if (.command? // "") | test("rekol|REKOL")
+      if is_ours
       then if (.command | test("\\|\\| true$")) then .              # already guarded
            elif (.command | test("&[[:space:]]*$")) then .          # async: returns 0 already
            else .command += " 2>/dev/null || true" end
@@ -1143,10 +1166,36 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
       local_tmp="${SETTINGS_JSON}.tmp.$$"
       printf '%s\n' "$SOFTENED" > "${local_tmp}" && mv "${local_tmp}" "${SETTINGS_JSON}"
       log_journal "MIGRATED rekol hooks to soft-fail + de-duplicated handlers in ${SETTINGS_JSON}"
-      say "made every rekol hook soft-fail (a failing hook can no longer block a session)"
+      say "made rekol's own hooks soft-fail (a failing rekol hook can no longer block a session)"
     fi
   else
     say "rekol hooks already soft-fail and de-duplicated — no-op"
+  fi
+
+  # NOT inside the "we changed something" branch, which is where this lived at
+  # first and why it never printed: the wiring step already writes rekol's hooks
+  # soft-failing, so the softener no-ops on an ordinary install and the whole
+  # branch is skipped. A message whose absence is indistinguishable from success
+  # is the defect this project keeps shipping, and I had just reproduced it.
+  #
+  # Reported on every run where such a hook exists, because "we left yours
+  # alone" is the fact a user needs after #235 was released softening them.
+  if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev/null 2>&1; then
+    local_not_ours="$(jq -r '
+      [.. | objects | select(has("command"))
+       | .command
+       | select(test("rekol|REKOL"))
+       | select((test("^: rekol:backend=install\\.sh")
+                 or ((test("^(nohup[[:space:]]+)?(\"\\$\\(|rekol[[:space:]])"))
+                     and test("(_hook [a-z][a-z-]*|review --nudge|session-index --incremental)"))) | not)]
+      | length' "${SETTINGS_JSON}" 2>/dev/null || printf 0)"
+    local_not_ours="${local_not_ours:-0}"
+    if [[ "${local_not_ours}" -gt 0 ]]; then
+      say "left ${local_not_ours} hook(s) of your own that mention rekol untouched:"
+      say "  they are not rekol invocations, so their exit status and stderr are"
+      say "  preserved — a blocking hook of yours still blocks."
+      log_journal "PRESERVED ${local_not_ours} non-owned hook(s) in ${SETTINGS_JSON} (#235)"
+    fi
   fi
 fi
 

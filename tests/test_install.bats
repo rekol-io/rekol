@@ -1868,3 +1868,93 @@ JSON
     echo "FAIL: the known gap is not named, so the user cannot act on it"
     echo "$output" | tail -20; false; }
 }
+
+@test "soft-fail is applied to rekol's own hooks ONLY, and both directions still work (#235)" {
+  # QA's F9. `SOFTEN_PROG` matched any command whose text contained rekol|REKOL,
+  # so a user's hook got ` 2>/dev/null || true` appended. That is not cosmetic:
+  # `|| true` forces exit 0 and `2>/dev/null` discards stderr, which is how
+  # Claude Code receives a block reason — so a BLOCKING hook of theirs silently
+  # stopped blocking after any install. In install.sh since #183, so released.
+  #
+  # Both directions are EXECUTED here, not reasoned about. Inferring from the
+  # rewrite is what let this ship: the text looked harmless.
+  SBHOME="$TESTROOT/sandhome-soften"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-soften"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # A user's BLOCKING hook whose text mentions rekol — QA's exact shape.
+  gate="$TESTROOT/rekol-tools/gate.sh"
+  mkdir -p "$(dirname "$gate")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "blocked by my gate\\n" >&2\n'
+    printf 'exit 2\n'
+  } > "$gate"
+  chmod 755 "$gate"
+  cat > "$SBHOME/.claude/settings.json" <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"","hooks":[
+  {"type":"command","command":"$gate --uses rekol --flag"}
+]}]}}
+JSON
+  before="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$SBHOME/.claude/settings.json")"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # DIRECTION 1: the user's hook is byte-identical...
+  after="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$SBHOME/.claude/settings.json")"
+  [ "$before" = "$after" ] || {
+    echo "FAIL: rekol rewrote a user hook"; echo "  before: $before"; echo "  after:  $after"; false; }
+
+  # ...and it STILL BLOCKS when run, with its stderr intact. This is the
+  # assertion that matters: the rewrite's damage was to behaviour, not text.
+  user_err="$TESTROOT/user-hook.err"
+  set +e
+  /bin/sh -c "$after" 2>"$user_err"
+  user_rc=$?
+  set -e
+  [ "$user_rc" -ne 0 ] || {
+    echo "FAIL: the user's blocking hook exited 0 — it no longer blocks"; false; }
+  grep -q "blocked by my gate" "$user_err" || {
+    echo "FAIL: the user's hook lost its stderr, so Claude Code sees no block reason"
+    echo "  stderr was: $(cat "$user_err")"; false; }
+
+  # ...and the install SAYS it left it alone. Asserted because my first version
+  # of this diagnostic sat inside the softener's "we changed something" branch,
+  # which never runs on an ordinary install (the wiring step already writes
+  # rekol's hooks soft-failing), so it printed nothing — and this test passed
+  # anyway, because it only checked byte-identity. A message whose absence is
+  # indistinguishable from success is the defect this project keeps shipping.
+  [[ "$output" == *"hook(s) of your own that mention rekol untouched"* ]] || {
+    echo "FAIL: the install did not report leaving the user's hook alone"
+    echo "$output" | tail -25; false; }
+  [[ "$output" == *"still blocks"* ]] || {
+    echo "FAIL: the report does not say the user's hook still blocks"; false; }
+
+  # DIRECTION 2: rekol's OWN hooks must still be soft-failing, or a broken
+  # install can fail a UserPromptSubmit and lock the user out of Claude Code.
+  ours="$(jq -r '[.. | objects | .command? // empty | select(test("_hook "))] | .[0]' \
+          "$SBHOME/.claude/settings.json")"
+  [ -n "$ours" ] && [ "$ours" != "null" ] || { echo "FAIL: no rekol handler wired"; false; }
+  [[ "$ours" == *"|| true"* ]] || {
+    echo "FAIL: rekol's own hook is not soft-failing: $ours"; false; }
+
+  # Executed with the recorded binary REMOVED, which is the failure that used to
+  # lock people out: it must still exit 0.
+  mv "$BIN_DIR/rekol" "$BIN_DIR/rekol.hidden"
+  set +e
+  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$ours" >/dev/null 2>&1
+  ours_rc=$?
+  set -e
+  mv "$BIN_DIR/rekol.hidden" "$BIN_DIR/rekol"
+  [ "$ours_rc" -eq 0 ] || {
+    echo "FAIL: rekol's own hook exited $ours_rc with its binary missing — that fails the event"
+    false; }
+}
