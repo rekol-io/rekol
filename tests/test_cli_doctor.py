@@ -1582,8 +1582,11 @@ def test_a_default_projects_dir_that_vanished_after_indexing_is_a_problem(
     assert source[0].status is Status.PROBLEM, source[0].detail
     assert "GONE" in source[0].detail
     assert source[0].remedy is not None
-    # The count is what makes the claim checkable rather than a guess.
-    assert "message(s) were indexed from it" in source[0].detail
+    # The count is what makes the claim checkable rather than a guess. The
+    # wording deliberately says the INDEX holds them rather than that they were
+    # "indexed from it" — provenance per-message is not something this checks.
+    assert "the session index holds" in source[0].detail
+    assert "message(s)" in source[0].detail
 
 
 def test_an_unused_default_projects_dir_is_still_neutral_with_an_empty_index(
@@ -1643,3 +1646,78 @@ def test_an_unreadable_projects_dir_is_a_problem(tmp_path: Path, monkeypatch) ->
     assert source[0].status is Status.PROBLEM, source[0].detail
     assert "cannot be read" in source[0].detail
     assert source[0].remedy is not None
+
+
+def test_an_initialised_but_empty_sessions_db_is_still_first_use(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The control product asked for explicitly.
+
+    The neutral-line test above has NO sessions DB at all, so it exercises
+    ABSENT and never EMPTY. An initialised schema holding zero messages is a
+    different state and must also read as first use — otherwise anyone who has
+    run `session-index` once on an empty machine gets a spurious problem.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    store = SessionStore(db_path=cfg.sessions_db_path, dim=384)
+    store.init_schema()
+    assert store.count_messages() == 0
+    store.close()
+    projects_root.rename(tmp_path / "never-used")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert "does not exist yet" in source[0].detail
+
+
+def test_an_unreadable_sessions_db_is_reported_as_unknown_not_first_use(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unknown is not evidence of absence.
+
+    A corrupt DB turned into a count of 0, which read as a fresh machine — so
+    the one case where doctor genuinely cannot tell was reported as the
+    reassuring one (Codex, 2026-11-06).
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    cfg.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.sessions_db_path.write_bytes(b"this is not an sqlite database at all")
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "UNKNOWN" in source[0].detail
+    assert "does not exist yet" not in source[0].detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_a_listable_but_untraversable_projects_dir_is_a_problem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Listing is not traversal.
+
+    Mode 0400 lets `iterdir` enumerate names while every child is unopenable, so
+    enumeration alone still reported a locked-out source as healthy.
+    `session-index` has to traverse INTO the slug dirs, so that is what is
+    tested.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.chmod(0o400)
+    try:
+        findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    finally:
+        projects_root.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be read" in source[0].detail

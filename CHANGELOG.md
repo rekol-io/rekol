@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **An unreadable sessions DB read as a fresh machine.** The prior-index check returned 0 for a
+  corrupt or unreadable DB, which is indistinguishable from "nothing was ever indexed" — so the one
+  case where `doctor` genuinely cannot tell was reported as the reassuring one. Absent, empty,
+  populated and **unknown** are now four distinct states, unknown is reported as unknown, and the
+  store is closed on every path. There is an explicit control for an initialised-but-empty DB,
+  which the neutral-line test never exercised because it has no DB at all.
+- **Listing a directory is not traversing it.** Mode 0400 lets `iterdir` enumerate names while
+  every child is unopenable, so enumeration alone still reported a locked-out transcript source as
+  healthy. `session-index` has to traverse into the per-project directories to read transcripts, so
+  that is what is now tested.
+- The vanished-storage wording no longer says messages "were indexed from it", which claims
+  per-message provenance this does not check. It says the session index holds them.
+
+### Fixed
 - **A brand-new install reported `index is DEGRADED` because Claude Code had not created
   `~/.claude/projects` yet.** An absent projects dir has two causes with opposite meanings, and
   both were reported as a problem. At the **default** location it simply has not been created yet

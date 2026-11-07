@@ -19,6 +19,7 @@ the whole point is to be the tool you reach for when things look broken.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sqlite3
@@ -475,26 +476,40 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
     ]
 
 
-def _indexed_message_count(cfg: Config, embedder: BaseEmbedder) -> int:
-    """Messages already in the sessions DB, or 0 when there is no readable DB.
+class _PriorIndex(Enum):
+    """What the sessions DB says about whether anything was ever indexed.
 
-    Prior-index evidence: it distinguishes a machine that has never indexed
-    anything from one whose transcript storage has DISAPPEARED. Without it, the
-    two look identical from the filesystem, and the first-run neutrality added
-    for #231 hid the second case (Codex, 2026-11-06).
+    Four states, kept distinct because collapsing them is what hid a real
+    failure: returning 0 for a corrupt or unreadable DB made it indistinguishable
+    from a fresh machine, so "unknown" was reported as first use (Codex,
+    2026-11-06). Unknown is not evidence of absence.
     """
+
+    ABSENT = "absent"  # no DB file at all
+    EMPTY = "empty"  # a DB exists and holds no messages
+    POPULATED = "populated"  # a DB exists and holds messages
+    UNKNOWN = "unknown"  # a DB exists but could not be read
+
+
+def _prior_index_state(cfg: Config, embedder: BaseEmbedder) -> tuple[_PriorIndex, int]:
+    """``(state, message_count)``; the count is meaningful only when POPULATED."""
     db_path = cfg.sessions_db_path
     if not db_path.exists():
-        return 0
+        return _PriorIndex.ABSENT, 0
+    store: SessionStore | None = None
     try:
         store = SessionStore(db_path=db_path, dim=embedder.dim)
         store.init_schema()
-        return store.count_messages()
+        count = store.count_messages()
     except (sqlite3.DatabaseError, OSError):
-        # An unreadable DB is reported by the checks further down; here it just
-        # means "no evidence either way", and must not be mistaken for evidence
-        # that nothing was ever indexed.
-        return 0
+        return _PriorIndex.UNKNOWN, 0
+    finally:
+        # Closed on every path: an open handle on a DB doctor only inspected is
+        # a leak, and on Windows it would block the very remedy we print.
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.close()
+    return (_PriorIndex.POPULATED if count > 0 else _PriorIndex.EMPTY), count
 
 
 def _transcript_source_finding(
@@ -557,21 +572,38 @@ def _transcript_source_finding(
         # and only the index can tell them apart. A populated sessions DB proves
         # transcripts were being read from here, so the directory did not fail to
         # appear — it went away, and everything indexed from it is now orphaned.
-        indexed = _indexed_message_count(cfg, embedder)
-        if indexed > 0:
+        prior, indexed = _prior_index_state(cfg, embedder)
+        if prior is _PriorIndex.POPULATED:
             return Finding(
                 label="transcript source",
                 status=Status.PROBLEM,
                 detail=(
                     f"claude_projects_dir has GONE: {projects_root} does not "
-                    f"exist, but {indexed} message(s) were indexed from it — so "
-                    "it existed and has since been moved, renamed or deleted. No "
-                    "new session can be indexed, and searches still return the "
-                    "orphaned old results"
+                    f"exist, yet the session index holds {indexed} message(s) — "
+                    "so transcripts were indexed at some point and this path is "
+                    "no longer there. No new session can be indexed, and searches "
+                    "still return the older results"
                 ),
                 remedy=(
                     "restore the directory, or set claude_projects_dir to its new "
                     "location and run rekol session-index --full"
+                ),
+            )
+        if prior is _PriorIndex.UNKNOWN:
+            # Not first use, and not provably lost either. Saying "nothing to
+            # index yet" here would be a claim the evidence does not support.
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir does not exist ({projects_root}) and the "
+                    "session index could not be read, so whether anything was ever "
+                    "indexed from it is UNKNOWN — this is not a first run, it is a "
+                    "missing answer"
+                ),
+                remedy=(
+                    "check the sessions DB (rekol doctor reports it below), then "
+                    "restore claude_projects_dir or run rekol session-index --full"
                 ),
             )
         return Finding(
@@ -587,8 +619,15 @@ def _transcript_source_finding(
     # Present and a directory, but access is a separate question: enumeration is
     # what `session-index` actually does, so that is what gets tested. Treating a
     # PermissionError as "empty" would report a locked-out source as first use.
+    # LISTING IS NOT TRAVERSAL (product, 2026-11-06). Mode 0400 lets `iterdir`
+    # enumerate names while every child is unopenable, so enumeration alone
+    # still reported a locked-out source as healthy. `session-index` has to
+    # traverse INTO the slug dirs to read transcripts, so that is what gets
+    # tested: stat the first entry, which needs the execute/search bit.
     try:
-        next(projects_root.iterdir(), None)
+        first_entry = next(projects_root.iterdir(), None)
+        if first_entry is not None:
+            first_entry.stat()
     except OSError as exc:
         return Finding(
             label="transcript source",
