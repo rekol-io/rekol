@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import datetime as dt
 import errno
+import hashlib
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -71,68 +73,139 @@ def archive_file(lf: LegacyFile) -> Path:
     return publish_into_archive(lf.source_path, lf.source_root / ARCHIVE_DIR_NAME)
 
 
+class _HardLinksUnsupportedError(Exception):
+    """This filesystem cannot hard-link, so the weaker copy contract applies."""
+
+
+# errno values that mean "hard links are not available here" rather than "this
+# particular link failed": exFAT and some network mounts, and cross-device.
+_NO_HARD_LINK_ERRNOS = frozenset(
+    {errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV, errno.EMLINK}
+)
+
+
 def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
     """Move ``source_path`` into ``archive_dir``, never overwriting anything.
 
-    WHY THIS IS NOT ``shutil.move`` TO A CHECKED NAME (Codex, 2026-11-06).
-    The previous version picked a name with ``exists()`` and then called
-    ``shutil.move``. Three defects, all of which could destroy the only
-    byte-complete copy of a user's file:
+    TWO GUARANTEES, DELIBERATELY NOT THE SAME ONE (product ruling, 2026-11-06).
 
-    1. **The check was not a reservation.** A file created at that name between
-       the check and the move was silently overwritten, because ``os.rename``
-       replaces its destination. A deterministic probe lost an earlier archived
-       original this way. Sequential suffix tests cannot see it.
-    2. **``exists()`` is False for a dangling symlink**, so such a name read as
-       free and the move clobbered the link.
-    3. **Across filesystems ``shutil.move`` becomes copy-then-unlink**, and a
-       failed copy can leave partial debris at the destination — which the next
-       run's ``exists()`` would then treat as an occupied, complete archive copy.
+    **Hard-link publication — the ordinary path, no content window at all.**
+    ``os.link`` is atomic, fails when the destination name is taken (a dangling
+    symlink included, because the check is on the name), and publishes the very
+    same inode. Removing the source *name* afterwards cannot lose bytes, because
+    there are no second bytes: a writer who edits the file between the link and
+    the unlink edits the archived inode too, so nothing is lost either way.
 
-    So the publication is staged instead: copy into a unique temporary file in
-    the archive dir, fsync it, then claim the final name with ``os.link``, which
-    is atomic and **fails** if the name is taken — including by a dangling
-    symlink, where ``O_EXCL`` semantics apply to the name and not to what it
-    points at. The final name therefore only ever appears as a complete file,
-    and partial debris can only ever sit at a ``.partial-`` temporary, which is
-    cleaned up here and never collides with a real archive name.
+    **Verified copy — symlink sources and filesystems without hard links.**
+    Here there genuinely are two copies, so a writer editing the source between
+    the copy and the unlink would otherwise be silently discarded: the source
+    would be gone and the archive would hold the old bytes. That is the data-loss
+    window the first version of this function introduced, and it is why copying
+    is no longer the ordinary path. The source is re-read and re-hashed after the
+    copy and before anything is removed; on any mismatch the source is KEPT, the
+    failure is reported, and the directory is not retired.
 
-    The source is unlinked only after the final name exists, and with
-    ``os.unlink``, which removes a symlink itself rather than its target.
+    Concurrent-writer contract, stated plainly because it is weaker than it
+    looks: on the copy path a write that lands *after* the re-verification and
+    before the unlink is still lost. The window is microseconds rather than the
+    duration of a file copy, and it does not exist at all on the hard-link path,
+    which is every ordinary filesystem. An interruption during the fallback's
+    final write can leave a partial file under a real archive name; nothing calls
+    that complete, and ``archive_copy_looks_complete`` is what a later run must
+    use rather than assuming a present name is a good copy.
 
-    SYMLINK SOURCES are followed and archived as real content, which is the
-    choice that makes "kept byte-complete in the archive" literally true — the
-    alternative, moving the link, re-resolves a relative target against the
-    archive directory and breaks it (Codex's P2). The link's target file is left
-    exactly where it is; only the link is removed, which is all that is needed
-    to stop autoMemory injecting it. A **dangling** source symlink has no
-    content to preserve, so it is refused and nothing is touched.
+    SYMLINK SOURCES are archived as a real-content snapshot, which is what makes
+    "kept byte-complete in the archive" true — moving the link re-resolves a
+    relative target against the archive dir and breaks it. The target file is
+    left where it is; only the link is removed. A **dangling** or **looping**
+    link has no readable content, so it is refused with nothing touched.
     """
     archive_dir.mkdir(parents=True, exist_ok=True)
 
+    # lstat, not stat: a dangling or self-looping link must be diagnosed here
+    # rather than raising ENOENT/ELOOP from somewhere deeper (Codex P2).
     try:
-        source_size = source_path.stat().st_size  # follows symlinks on purpose
+        link_stat = source_path.lstat()
     except OSError as exc:
         raise ArchivePublishError(
-            f"cannot read {source_path} to archive it: {exc}. Nothing was moved."
+            f"cannot inspect {source_path} to archive it: {exc}. Nothing was moved."
         ) from exc
 
+    is_symlink = stat.S_ISLNK(link_stat.st_mode)
+    if is_symlink:
+        try:
+            source_path.stat()  # follows the link: ELOOP or ENOENT surfaces here
+        except OSError as exc:
+            raise ArchivePublishError(
+                f"{source_path} is a symlink whose target cannot be read ({exc}); "
+                f"nothing was moved and the directory was not retired, so its "
+                f"content is still wherever the link points."
+            ) from exc
+    else:
+        try:
+            return _publish_by_hard_link(source_path, archive_dir)
+        except _HardLinksUnsupportedError:
+            pass  # fall through to the copy, with the weaker contract above
+
+    return _publish_by_verified_copy(source_path, archive_dir)
+
+
+def _publish_by_hard_link(source_path: Path, archive_dir: Path) -> Path:
+    """Link the source's inode into the archive, then drop the source name."""
+    for candidate in _candidate_archive_names(archive_dir, source_path.name):
+        try:
+            os.link(source_path, candidate)
+        except FileExistsError:
+            continue  # someone holds that name; take the next one
+        except OSError as exc:
+            if exc.errno in _NO_HARD_LINK_ERRNOS:
+                raise _HardLinksUnsupportedError from exc
+            raise ArchivePublishError(
+                f"could not archive {source_path}: {exc}. Nothing was moved."
+            ) from exc
+        # The archive now holds the same inode, so removing the source name
+        # cannot lose content. os.unlink removes the name, never a link target.
+        os.unlink(source_path)
+        return candidate
+    raise ArchivePublishError(
+        f"no free name for {source_path.name} in {archive_dir} after "
+        f"{MAX_ARCHIVE_NAME_ATTEMPTS} attempts; nothing was moved."
+    )
+
+
+def _digest_of(path: Path) -> tuple[str, int]:
+    """``(sha256, size)`` of ``path``'s CONTENT, following symlinks."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _publish_by_verified_copy(source_path: Path, archive_dir: Path) -> Path:
+    """Copy, re-verify the source is unchanged, and only then remove it."""
     staged_fd, staged_name = tempfile.mkstemp(dir=archive_dir, prefix=".partial-", suffix=".tmp")
     staged_path = Path(staged_name)
     try:
-        with os.fdopen(staged_fd, "wb") as staged, open(source_path, "rb") as original:
+        with os.fdopen(staged_fd, "wb") as staged, source_path.open("rb") as original:
             shutil.copyfileobj(original, staged)
             staged.flush()
             os.fsync(staged.fileno())
-        # A short copy means the archive copy is not byte-complete, so it must
-        # never be published under a real name.
-        staged_size = staged_path.stat().st_size
-        if staged_size != source_size:
-            raise ArchivePublishError(
-                f"incomplete copy of {source_path} ({staged_size} of "
-                f"{source_size} bytes); nothing was moved."
-            )
         shutil.copystat(source_path, staged_path, follow_symlinks=True)
+
+        staged_digest, staged_size = _digest_of(staged_path)
+        # RE-VERIFY BEFORE ANYTHING IS REMOVED OR PUBLISHED. Checked here rather
+        # than after publication so a mismatch leaves no archive artifact at all.
+        source_digest, source_size = _digest_of(source_path)
+        if (staged_digest, staged_size) != (source_digest, source_size):
+            raise ArchivePublishError(
+                f"{source_path} changed while it was being archived "
+                f"({source_size} bytes now, {staged_size} copied); the source was "
+                f"KEPT and the directory was not retired, so nothing is lost — "
+                f"re-run to archive the current content."
+            )
 
         published = _claim_archive_name(staged_path, archive_dir, source_path.name)
     except ArchivePublishError:
@@ -145,9 +218,22 @@ def publish_into_archive(source_path: Path, archive_dir: Path) -> Path:
         ) from exc
 
     staged_path.unlink(missing_ok=True)
-    # Only now is the content definitely in the archive under a complete name.
     os.unlink(source_path)
     return published
+
+
+def archive_copy_looks_complete(archived: Path, source_size: int) -> bool:
+    """Is ``archived`` a plausible complete copy of a ``source_size``-byte file?
+
+    The fallback path can be interrupted while writing under a real archive
+    name, so a later run must not assume a present name is a good copy (product
+    condition 2). Size is the cheapest check that distinguishes a truncated
+    write; it is not a content guarantee and does not claim to be.
+    """
+    try:
+        return archived.is_file() and archived.stat().st_size == source_size
+    except OSError:
+        return False
 
 
 def _claim_archive_name(staged_path: Path, archive_dir: Path, name: str) -> Path:
@@ -317,7 +403,12 @@ def write_retirement_pointer(
 
     archived: Path | None = None
     legacy_pointer = memory_dir / "MEMORY.md"
-    if archive_legacy_pointer and legacy_pointer.exists():
+    # `exists()` FOLLOWS the link, so a dangling or looping MEMORY.md looked
+    # absent and the directory was retired with no errors at all — the link's
+    # content abandoned, silently (Codex, 2026-11-06). `is_symlink()` is what
+    # notices it; publication then refuses and the caller does not retire.
+    legacy_present = legacy_pointer.exists() or legacy_pointer.is_symlink()
+    if archive_legacy_pointer and legacy_present:
         try:
             archived = publish_into_archive(legacy_pointer, memory_dir / ARCHIVE_DIR_NAME)
         except (ArchivePublishError, OSError) as exc:

@@ -23,6 +23,7 @@ neighbouring state regressed — the #157/#158 pattern.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -1013,7 +1014,7 @@ def test_a_dangling_symlink_source_is_refused_and_nothing_is_touched(tmp_path: P
     with pytest.raises(archive_module.ArchivePublishError) as caught:
         archive_module.publish_into_archive(link, archive_dir)
 
-    assert "Nothing was moved" in str(caught.value)
+    assert "nothing was moved" in str(caught.value).lower()
     assert link.is_symlink()
     assert list(archive_dir.iterdir()) == []
 
@@ -1033,26 +1034,36 @@ def test_partial_debris_is_not_mistaken_for_an_archived_original(tmp_path: Path)
     assert published.read_text() == "whole file\n"
 
 
-def test_a_short_copy_is_refused_rather_than_published(
+def test_a_short_copy_on_the_fallback_is_refused_rather_than_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An incomplete copy must never appear under a real archive name."""
+    """An incomplete copy must never appear under a real archive name.
+
+    Forced onto the COPY path, because a regular file now publishes by hard
+    link, where there is no copy to be short. Without forcing it this test would
+    pass while exercising nothing — the shape of the two tests I already had to
+    throw away today.
+    """
     archive_dir = tmp_path / ARCHIVE_DIR_NAME
     archive_dir.mkdir()
     source = tmp_path / "topic.md"
     source.write_text("the whole thing matters\n")
 
-    def truncating_copy(src, dst, length=0):  # noqa: ARG001
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    def truncating_copy(src, dst, length=0):  # noqa: ANN001, ARG001
         dst.write(src.read(4))
 
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
     monkeypatch.setattr(archive_module.shutil, "copyfileobj", truncating_copy)
 
     with pytest.raises(archive_module.ArchivePublishError) as caught:
         archive_module.publish_into_archive(source, archive_dir)
 
-    assert "incomplete copy" in str(caught.value)
-    # Source intact, and no real name taken, and no debris left behind.
+    # The source is what matters: it must still be there, whole.
     assert source.read_text() == "the whole thing matters\n"
+    assert "KEPT" in str(caught.value) or "changed while" in str(caught.value)
     assert not (archive_dir / "topic.md").exists()
     assert list(archive_dir.iterdir()) == []
 
@@ -1069,3 +1080,116 @@ def test_sequential_same_name_originals_still_get_suffixes(tmp_path: Path) -> No
 
     assert [p.name for p in published] == ["topic.md", "topic-1.md", "topic-2.md"]
     assert [p.read_text() for p in published] == ["first\n", "second\n", "third\n"]
+
+
+# --------------------------------------------------------------------------
+# The data-loss window the no-clobber fix introduced (Codex P1, product ruling)
+# --------------------------------------------------------------------------
+# Copy, then unconditional unlink, loses an edit made in between: the source is
+# gone and the archive holds the old bytes. The rename it replaced had no such
+# window. So hard-link publication is the ordinary path — same inode, nothing to
+# lose — and the copy path re-verifies the source before removing anything.
+
+
+def test_a_regular_file_is_published_by_hard_link_with_no_copy(tmp_path: Path) -> None:
+    """Same inode means there is no second copy to go stale, and no window."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("content\n")
+    inode_before = source.stat().st_ino
+
+    published = archive_module.publish_into_archive(source, archive_dir)
+
+    assert published.stat().st_ino == inode_before, "published a copy, not the inode"
+    assert published.read_text() == "content\n"
+    assert not source.exists()
+
+
+def test_a_same_length_edit_during_the_fallback_copy_keeps_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex's same-length probe: the edit a size check cannot see.
+
+    On the copy path the source is re-read and re-hashed before anything is
+    removed. A same-length edit is exactly the case that a size comparison would
+    wave through, which is why the check is a digest.
+    """
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    source = tmp_path / "topic.md"
+    source.write_text("AAAAAAAA\n")
+
+    def no_hard_links(src, dst, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError(errno.EOPNOTSUPP, "no hard links here")
+
+    real_copyfileobj = archive_module.shutil.copyfileobj
+
+    def copy_then_edit_source(src, dst, length=0):  # noqa: ANN001, ARG001
+        real_copyfileobj(src, dst)
+        # A concurrent writer lands an edit of IDENTICAL length.
+        source.write_text("BBBBBBBB\n")
+
+    monkeypatch.setattr(archive_module.os, "link", no_hard_links)
+    monkeypatch.setattr(archive_module.shutil, "copyfileobj", copy_then_edit_source)
+
+    with pytest.raises(archive_module.ArchivePublishError) as caught:
+        archive_module.publish_into_archive(source, archive_dir)
+
+    # The new bytes survive, and nothing was published.
+    assert source.read_text() == "BBBBBBBB\n"
+    assert "KEPT" in str(caught.value)
+    assert list(archive_dir.iterdir()) == []
+
+
+def test_archive_copy_looks_complete_rejects_a_truncated_file(tmp_path: Path) -> None:
+    """An interrupted fallback write can sit under a real name; it is not a copy."""
+    archive_dir = tmp_path / ARCHIVE_DIR_NAME
+    archive_dir.mkdir()
+    partial = archive_dir / "topic.md"
+    partial.write_text("half")
+
+    assert archive_module.archive_copy_looks_complete(partial, source_size=4) is True
+    assert archive_module.archive_copy_looks_complete(partial, source_size=40) is False
+    assert archive_module.archive_copy_looks_complete(archive_dir / "absent.md", 1) is False
+
+
+# --------------------------------------------------------------------------
+# Dangling and looping MEMORY.md, through the ENTRYPOINT (product: test there)
+# --------------------------------------------------------------------------
+
+
+def test_a_dangling_memory_md_does_not_retire_the_directory(tmp_path: Path) -> None:
+    """It was retired with no errors, so the link's content was abandoned."""
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    (source_dir / "MEMORY.md").symlink_to(source_dir / "gone.md")
+
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=_memory_home(tmp_path),
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.errors, "a dangling MEMORY.md must be reported"
+    assert not (source_dir / MIGRATION_MARKER_NAME).exists(), "retired despite the failure"
+    assert (source_dir / "MEMORY.md").is_symlink(), "the link itself was removed"
+
+
+def test_a_self_looping_memory_md_is_reported_not_an_uncaught_eloop(tmp_path: Path) -> None:
+    """A self-loop raised ELOOP out of the migrator; it is a plain error now."""
+    source_dir = _source_dir(tmp_path, with_memory_md=False, with_topic=True)
+    loop = source_dir / "MEMORY.md"
+    loop.symlink_to(loop)
+
+    report = migrate_dir(
+        source_dir=source_dir,
+        memory_home=_memory_home(tmp_path),
+        dry_run=False,
+        allow_llm=False,
+    )
+
+    assert report.errors, "a looping MEMORY.md must be reported"
+    assert any("symlink" in err for err in report.errors), report.errors
+    assert not (source_dir / MIGRATION_MARKER_NAME).exists()
+    assert loop.is_symlink()

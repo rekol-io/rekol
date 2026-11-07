@@ -49,6 +49,13 @@ def is_retirement_pointer(memory_md: Path) -> bool:
         head = memory_md.read_text(encoding="utf-8", errors="replace").lstrip()
     except FileNotFoundError:
         return False
+    except OSError:
+        # A looping or otherwise unreadable MEMORY.md raised ELOOP straight out
+        # of the migrator before anything could report it (Codex, 2026-11-06).
+        # It is certainly not a retirement pointer, and the real diagnosis
+        # belongs to the archiving step, which names the file and refuses to
+        # retire the directory. Returning False routes it there.
+        return False
     return LEGACY_RETIREMENT_MARKER in head.splitlines()[0] if head else False
 
 

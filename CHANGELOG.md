@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The no-clobber archiving fix introduced a data-loss window, and this closes it.** Copying the
+  file and then unconditionally unlinking the source loses an edit made in between: the source is
+  gone and the archive holds the old bytes. The `rename` it replaced had no such window, so this
+  was a regression on ordinary filesystems.
+  Publication is now by **hard link** wherever hard links work, which is the ordinary case:
+  `os.link` is atomic, fails on an occupied name, and publishes *the same inode*, so removing the
+  source name afterwards cannot lose bytes — there are no second bytes to go stale. Copying is no
+  longer the ordinary path.
+  Where a real copy is unavoidable — a symlink source, or a filesystem without hard links — the
+  source is re-read and re-hashed after the copy and **before anything is removed**. On any
+  mismatch the source is kept, the failure is reported, and the directory is not retired. A digest
+  rather than a size, because a same-length edit is exactly what a size check waves through.
+  The concurrent-writer contract, stated rather than implied: on the copy path a write landing
+  after the re-verification and before the unlink is still lost; on the hard-link path no such
+  window exists.
+- **A dangling or looping `MEMORY.md` was mishandled at the migration entrypoint.** `exists()`
+  follows the link, so a dangling one looked absent and the directory was retired with no errors at
+  all — the link's content silently abandoned. A self-loop raised an uncaught `ELOOP` out of
+  `is_retirement_pointer`, before anything could report it. Symlink entries are now inspected
+  without being followed, an unreadable target is reported by name, and the directory is not
+  retired when preservation failed. Tested through `migrate_dir`, not only the publication helper.
+- `archive_copy_looks_complete()` exists so a later run does not assume a present archive name is a
+  good copy: the fallback path can be interrupted mid-write under a real name. Nothing describes
+  that case as complete.
+
+### Fixed
 - **Archiving could overwrite the only byte-complete copy of a file.** `_free_archive_name` tested
   `exists()` and then called `shutil.move`, which replaces its destination — so a file created at
   that name in between was destroyed. Codex reproduced the loss of an earlier archived original
