@@ -71,6 +71,19 @@ follow [Semantic Versioning](https://semver.org/).
   space, say — got that ✓. It now reads "every rekol hook **this check recognises** tries the
   install's recorded binary before PATH — a PATH-first command whose path is not one rekol writes is
   left alone and not inspected".
+  A four-reviewer panel, standing in for Codex while its budget is exhausted, then found that the
+  OK line was a **wrong green** on two real hooks: a PATH-first `review --nudge` (the SessionEnd
+  handler) and a PATH-first `session-index --incremental` (the detached indexer) both reported OK,
+  because the handler was matched as `_hook <name>` and neither is spelled that way. A green tick
+  over a hook that prefers an orphaned `rekol` is the exact defect this check exists to report, so
+  the owned **tail** is matched now rather than the sentence reworded. Kept local to this check:
+  `unrunnable_hooks` shares the old regex and carries #241's own false positive.
+  The same panel found the source guard could pass on a file it could not read (`grep … || true`
+  swallows exit 2 as readily as exit 1) and had no control proving the scan reached the five writer
+  sites. The second is now pinned and fails when a site disappears; on the first, honestly, this
+  suite's `setup_file` already runs `install.sh`, so an absent or unreadable file fails before the
+  guard runs — I tried both as controls and got `setup_file failed` rather than my own message, so
+  those two lines are defence in depth and are labelled as such rather than as a fix.
   Two further ownership errors are filed rather than fixed (#254): `rekol search '_hook
   session-tasks'` is reported as a stale hook, because the handler is matched as a substring
   independently of the invocation; and an unquoted `${HOME}/bin/rekol` is accepted as ours when by

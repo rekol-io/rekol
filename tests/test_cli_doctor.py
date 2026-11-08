@@ -1495,6 +1495,37 @@ def test_path_first_hooks_names_every_form_the_upgrade_may_miss() -> None:
     assert "with an absolute fallback" in forms["update-check"], forms
 
 
+_PATH_FIRST_REVIEW_NUDGE = "\"$(command -v rekol || echo '/opt/generic/bin/rekol')\" review --nudge"
+_PATH_FIRST_SESSION_INDEX = (
+    "nohup \"$(command -v rekol || echo '/opt/generic/bin/rekol')\" "
+    "session-index --incremental >/dev/null 2>&1 &"
+)
+
+
+def test_the_two_non_hook_handlers_are_reported_too() -> None:
+    """A review found both of these reported OK, which was a wrong green.
+
+    `review --nudge` is the SessionEnd handler and `session-index --incremental`
+    is the detached indexer. Both are rekol's own hooks, and both were invisible
+    here because the handler was matched with `_hook <name>` — so a PATH-first
+    version of either got a clean tick from the very check that exists to report
+    it. The tail is matched now instead of the report being reworded.
+    """
+    from rekol.update import path_first_hooks
+
+    for command in (_PATH_FIRST_REVIEW_NUDGE, _PATH_FIRST_SESSION_INDEX):
+        stale = path_first_hooks(_settings_with(command))
+        assert stale, f"reported OK for a PATH-first rekol hook:\n  {command}"
+
+    # And the CURRENT rendering of the same handler is still not reported, so
+    # this did not become a check that fires on everything.
+    current = (
+        "\"$(if [ -x '/o/rekol' ]; then printf %s '/o/rekol'; "
+        "else command -v rekol || printf %s '/o/rekol'; fi)\" review --nudge"
+    )
+    assert path_first_hooks(_settings_with(current)) == []
+
+
 def test_a_users_command_mentioning_a_handler_is_not_reported_as_ours() -> None:
     """The negative control, and it caught a real defect in my first attempt.
 

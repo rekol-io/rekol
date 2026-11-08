@@ -67,6 +67,33 @@ OPT_IN_HANDLERS = frozenset({"context-watch", "stop-failure-record"})
 
 _HANDLER_RE = re.compile(r"_hook ([a-z][a-z-]*)")
 
+# THE OWNED TAILS, including the two that are NOT `_hook` handlers. A review
+# (2026-11-08) showed `path_first_hooks` reported OK for a PATH-first
+# `review --nudge` and a PATH-first `session-index --incremental` — both real
+# rekol hooks, the SessionEnd and the detached indexer — because `_HANDLER_RE`
+# only matches `_hook <name>`. A green tick over a hook that prefers an orphaned
+# `rekol` is the failure this check exists to prevent, so the tail is matched
+# rather than the report reworded.
+#
+# Deliberately local to `path_first_hooks`: `unrunnable_hooks` shares
+# `_HANDLER_RE` and carries its own false positive (#241), which product ruled
+# out of scope. Widening the shared regex would change both.
+_OWNED_TAIL_RE = re.compile(
+    r"(?:^|\s)(?:"
+    r"_hook (?P<handler>[a-z][a-z-]*)"
+    r"|(?P<plain>review --nudge|session-index --incremental)"
+    r")(?:\s|$)"
+)
+
+
+def _owned_handler_name(command: str) -> str | None:
+    """The rekol handler this command runs, or None if it runs none of ours."""
+    match = _OWNED_TAIL_RE.search(command)
+    if match is None:
+        return None
+    return match.group("handler") or match.group("plain")
+
+
 # The absolute fallback inside `$(command -v <name> || echo <path>)`. Anchored to
 # that substitution so a multi-statement hook command's own `echo` statements
 # cannot be mistaken for it.
@@ -325,23 +352,22 @@ def path_first_hooks(settings: dict) -> list[tuple[str, str]]:
     list of old ones. That is the one direction that stays correct when a form
     nobody anticipated turns up — which is exactly what happened here.
 
-    TWO HOOKS THIS CANNOT SEE, stated rather than left to be discovered.
-    ``_HANDLER_RE`` matches ``_hook <name>``, so the two owned hooks that are
-    not ``_hook`` handlers — ``session-index --incremental`` and
-    ``review --nudge`` — are never reported here even in a PATH-first form.
-    Widening that regex would change ``unrunnable_hooks`` too, which product
-    ruled out of scope for this change (it carries #241's own false positive).
-    So the gap is deliberate and narrow: both are still UPGRADED by the
-    installer, which keys on the owned-handler allowlist and not on this regex.
-    What is missed is only doctor's report about them.
+    THE TWO NON-``_hook`` HANDLERS ARE COVERED, and were not at first. A review
+    (2026-11-08) found a PATH-first ``review --nudge`` and a PATH-first
+    ``session-index --incremental`` both reported OK, because ``_HANDLER_RE``
+    only matches ``_hook <name>``. Those are real rekol hooks — the SessionEnd
+    nudge and the detached indexer — so that was a green tick over exactly the
+    defect this check exists to report. ``_OWNED_TAIL_RE`` matches the tail
+    instead, and it is local to this function because ``unrunnable_hooks``
+    shares ``_HANDLER_RE`` and carries #241's own false positive.
     """
     stale: list[tuple[str, str]] = []
     for blocks in (settings.get("hooks") or {}).values():
         for block in blocks or []:
             for hook in block.get("hooks") or []:
                 command = str(hook.get("command", ""))
-                handlers = _HANDLER_RE.findall(command)
-                if not handlers:
+                handler = _owned_handler_name(command)
+                if handler is None:
                     continue
                 if _RECORDED_BINARY_RE.search(command):
                     continue  # current rendering: recorded path first
@@ -364,7 +390,7 @@ def path_first_hooks(settings: dict) -> list[tuple[str, str]]:
                     # substitution, or a bare `rekol` in command position.
                     # Anything else is someone else's, whatever it mentions.
                     continue
-                stale.append((handlers[0], form))
+                stale.append((handler, form))
     return stale
 
 

@@ -2330,7 +2330,44 @@ JSON
   # `^[^#]*` keeps this file's own comments, which quote the broken shape as
   # documentation, from matching.
   pattern='^[^#]*run "jq .*--arg cmd '"'"'[^'"'"']*\$\{'
-  bad="$(grep -nE "$pattern" "$COMPONENT_DIR/install.sh" || true)"
+
+  # grep's EXIT 2 MUST NOT PASS AS CLEAN. `|| true` swallows "cannot read" and
+  # "no such file" (exit 2) exactly as it swallows "no match" (exit 1), so the
+  # guard went silently green on a file it could not read (review, 2026-11-08).
+  # That is `verify-gates-visibly` from my own notes, in a gate I wrote the same
+  # day. Measured: on a chmod-000 file, `grep ... || true` captures empty and
+  # reads as clean while grep really exits 2.
+  #
+  # HONEST SCOPE, because I claimed more than I could show and then disproved it
+  # myself. In THIS suite the vacuity is already unreachable: `setup_file` runs
+  # install.sh, so an absent OR unreadable file fails the whole file before this
+  # test runs — I tried both as controls and got `setup_file failed` each time,
+  # never my own message. So the two checks below are defence in depth for a
+  # future where this test moves to a suite without that setup, and I could not
+  # construct a control that makes either of them fire.
+  # The control that DOES earn its place is the positive one further down: it
+  # fails when a writer site disappears, which is the "prove a check can still
+  # see" case and the one that would really regress.
+  [ -f "$COMPONENT_DIR/install.sh" ] || {
+    echo "FAIL: $COMPONENT_DIR/install.sh does not exist, so this guard checked nothing"
+    false; }
+
+  # A POSITIVE CONTROL ON THE REAL FILE: the scan must have reached the five
+  # writer sites. Zero hits because the pattern is right and zero hits because
+  # the scan found nothing to look at print the same line — the #233 shape.
+  sites="$(grep -cE 'run "jq --arg cmd \\"\\\$REKOL_JQ_CMD' "$COMPONENT_DIR/install.sh" || true)"
+  [ "$sites" -eq 5 ] || {
+    echo "FAIL: expected 5 by-variable writer sites in install.sh, found $sites."
+    echo "Either a site was removed, or this guard is scanning the wrong file."
+    grep -nE 'run "jq --arg cmd' "$COMPONENT_DIR/install.sh" || true
+    false; }
+
+  set +e
+  bad="$(grep -nE "$pattern" "$COMPONENT_DIR/install.sh")"
+  rc=$?
+  set -e
+  [ "$rc" -le 1 ] || {
+    echo "FAIL: grep could not scan install.sh (exit $rc)"; false; }
   [ -z "$bad" ] || {
     echo "FAIL: a hook command is interpolated into a run() string, so eval re-parses it:"
     echo "$bad"
