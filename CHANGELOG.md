@@ -19,6 +19,16 @@ follow [Semantic Versioning](https://semver.org/).
   fourteenth free to do it again: **isolation must not be revertible by the code it isolates.**
   `conftest` now holds its patches in a private `pytest.MonkeyPatch` undone at teardown, and a
   `pytest_runtest_call` wrapper **fails** any test left pointing a steering var outside tmp.
+  **The guard resolves each value the way the code does** before testing it, which is the second
+  thing it got wrong: `REKOL_INDEX_DIR='~'` was skipped twice over — the literal `~` neither
+  resolves under tmp nor exists — while `config.py` expands it with `os.path.expanduser` and writes
+  to the real home (Codex). A guard that checks a different string from the one the code uses is
+  checking nothing. Its report now names the expansion too, so it says which directory was at risk
+  rather than the string that looked harmless.
+  **And it claims only what it does:** a post-test check of configured destinations, not a write
+  barrier. It reports where a test was POINTED, so a test that writes outside tmp and then restores
+  the variable is invisible to it — notably one using `pytest.MonkeyPatch.context()`. Checking at
+  resolution time is filed as a follow-up.
   The guard is a hook wrapper, not a fixture, and that mattered: as a fixture it caught the
   undone-isolation case but **not** a test that set a real path deliberately, because the test's own
   `monkeypatch` is torn down first and the env was already restored before it looked. It also keys

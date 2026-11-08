@@ -112,10 +112,25 @@ _HOME_STEERING_VARS = (
 )
 
 
+def _as_the_code_resolves_it(value: str) -> Path:
+    """Expand ``value`` the way rekol does before it uses it as a destination.
+
+    ``os.path.expanduser`` is what `config.py` applies to every one of these —
+    `REKOL_HOME`, `MEMORY_HOME`, the `REKOL_INDEX_DIR` override,
+    `XDG_CACHE_HOME`, the archive dir. Checking the RAW string instead let
+    `REKOL_INDEX_DIR='~'` through: the literal `~` neither resolves under tmp
+    nor exists, so it was skipped twice over, while the code expanded it to the
+    real home and wrote there (Codex, 2026-11-07). A guard has to resolve a
+    value the same way the code it guards does, or it is checking a different
+    string from the one that gets used.
+    """
+    return Path(os.path.expanduser(value))
+
+
 def _is_under_a_temp_root(value: str) -> bool:
     """Is ``value`` inside a directory pytest or the OS hands out for scratch?"""
     try:
-        resolved = Path(value).resolve()
+        resolved = _as_the_code_resolves_it(value).resolve()
     except (OSError, ValueError):
         return False
     roots = [Path(os.environ.get("TMPDIR", "/tmp")), Path("/tmp"), Path("/private/tmp")]
@@ -149,11 +164,15 @@ def _real_data_offenders() -> list[str]:
         if not value or _is_under_a_temp_root(value):
             continue
         try:
-            if not Path(value).exists():
+            if not _as_the_code_resolves_it(value).exists():
                 continue
         except OSError:
             continue
-        offenders.append(f"{var}={value}")
+        shown = f"{var}={value}"
+        expanded = _as_the_code_resolves_it(value)
+        if str(expanded) != value:
+            shown += f" (resolves to {expanded})"
+        offenders.append(shown)
     return offenders
 
 
@@ -181,6 +200,17 @@ def pytest_runtest_call(item):  # noqa: ANN001, ANN201
     `REKOL_ARCHIVE_DIR=~/.local/share/rekol/archive` — the real memory home and
     the real transcript archive. That is what Codex's sandbox stopped, and a
     local run has no sandbox.
+
+    WHAT THIS IS NOT, stated because the first version of this docstring implied
+    more (product, 2026-11-07). It is a **post-test check of configured
+    destinations**, not a write barrier: it runs after the test body and reports
+    where the test was POINTED, so a test that writes outside tmp and then puts
+    the variable back is not caught. In particular a value set and restored
+    inside a `pytest.MonkeyPatch.context()` is invisible to it, because the
+    context exits before this looks.
+    Checking at resolution time instead — refusing inside `load_config()` when
+    the destination is outside tmp under pytest — is the version that would
+    catch those, and it is filed as a follow-up rather than built here.
     """
     outcome = yield
     offenders = _real_data_offenders()
