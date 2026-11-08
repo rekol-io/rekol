@@ -1961,3 +1961,62 @@ def test_a_dangling_sessions_db_link_is_unknown_not_unbuilt(tmp_path: Path, monk
 
     cfg.sessions_db_path.symlink_to(tmp_path / "nowhere-at-all.db")
     assert _prior_index_state(cfg, embedder)[0] is _PriorIndex.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("shape", "target"),
+    [
+        # SQLite can create the file through the link, so nothing crashes — but
+        # "not built yet" is still false, and the DB would land outside the
+        # index dir.
+        ("the link target's parent exists", "nowhere.db"),
+        # SQLite cannot create it, so the remedy doctor used to offer exits 1
+        # with sqlite3.OperationalError and a traceback.
+        ("the link target's parent is missing", "gone-dir/sessions.db"),
+    ],
+)
+def test_a_dangling_sessions_db_is_a_problem_in_doctors_output(
+    tmp_path: Path, monkeypatch, shape: str, target: str
+) -> None:
+    """ASSERTED ON WHAT DOCTOR PRINTS, not on a helper (QA, 2026-11-08).
+
+    My first fix for this changed `_prior_index_state` and my test asserted on
+    `_prior_index_state`. The **visible** `session index` check reads the DB
+    separately, so it still printed `not built yet` with the remedy
+    `rekol session-index --full` — and QA measured that remedy crashing:
+    `sqlite3.OperationalError: unable to open database file`, exit 1, traceback.
+    Offering a remedy that crashes is the worst version of the thing this PR
+    exists to prevent.
+
+    It is also the same mistake a review caught in #224 earlier the same day:
+    a helper returning the right answer is not the claim that the user sees the
+    right thing. So this goes through `run_doctor` and reads the finding.
+    """
+    from rekol.cli_doctor import run_doctor
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (tmp_path / "claude" / "projects").mkdir(parents=True)
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(cache))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+
+    cfg = load_config()
+    cfg.sessions_db_path.symlink_to(tmp_path / target)
+
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    session = [f for f in report.findings if f.label == "session index"]
+    assert session, f"{shape}: no session index finding at all"
+    finding = session[0]
+
+    assert finding.status is Status.PROBLEM, f"{shape}: {finding.status} — {finding.detail}"
+    assert "not built yet" not in finding.detail, (
+        f"{shape}: still claims the index was never built:\n  {finding.detail}"
+    )
+    assert "broken symlink" in finding.detail, finding.detail
+    # The remedy must not be the one that crashes, and must name the link.
+    assert finding.remedy and finding.remedy != "rekol session-index --full", finding.remedy
+    assert str(cfg.sessions_db_path) in finding.remedy, finding.remedy
+    assert "remove or repoint" in finding.remedy, finding.remedy

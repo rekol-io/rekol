@@ -833,6 +833,39 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
             return findings
         db_absent = True
 
+    # THE SAME lstat SPLIT AS THE SOURCE CHECK, applied to the check a user
+    # actually reads (QA, 2026-11-08). Fixing `_prior_index_state` was not
+    # enough: this is the visible `session index` finding, and for
+    # `sessions.db -> somewhere/gone` it printed "not built yet" with the remedy
+    # `rekol session-index --full` — a remedy that **crashes**. Measured: with
+    # the link target's parent missing, that command exits 1 with
+    # `sqlite3.OperationalError: unable to open database file` and a traceback.
+    # (With the parent present SQLite creates the file through the link instead,
+    # so the crash depends on the shape; both are reported the same way now,
+    # because in neither case is "not built yet" true.)
+    #
+    # My test for the earlier half asserted on `_prior_index_state()`, a helper,
+    # rather than on what doctor prints — the same mistake a review caught in
+    # #224 hours earlier: the helper returning the right answer is not the claim
+    # that the user sees the right thing.
+    if db_absent and _path_exists_but_cannot_be_a_directory(db_path):
+        findings.append(
+            Finding(
+                label="session index",
+                status=Status.PROBLEM,
+                detail=(
+                    f"{db_path} exists but does not resolve — it is a broken "
+                    f"symlink, so the session index cannot be read or rebuilt "
+                    f"through it, and session search returns nothing"
+                ),
+                remedy=(
+                    f"remove or repoint {db_path} (it points at a path that is "
+                    f"not there), then run rekol session-index --full"
+                ),
+            )
+        )
+        return findings
+
     if db_absent:
         # Only INFO when there is genuinely nothing to index. If transcripts are
         # sitting there unindexed, the feature is silently not working and saying

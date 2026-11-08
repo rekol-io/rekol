@@ -27,6 +27,15 @@ follow [Semantic Versioning](https://semver.org/).
   each slug can be read and traversed — 44 ms at 2400 slugs, measured.
   This is the sibling of the single-sample fault fixed on the curated side the same day; fixing one
   and not the other is how it survived.
+  **And the visible check needed the same fix, not just the helper (QA).** For
+  `sessions.db -> somewhere/gone` the `session index` finding a user reads still said "not built
+  yet" and offered `rekol session-index --full` — a remedy QA measured **crashing**: exit 1 with
+  `sqlite3.OperationalError: unable to open database file`. (With the link target's parent present
+  SQLite creates the file through the link instead, so whether it crashes depends on the shape;
+  neither case makes "not built yet" true.) It reports ✗ now, names the broken link, and the remedy
+  is to remove or repoint it. My test for the first half asserted on `_prior_index_state()`, a
+  helper, rather than on what `doctor` prints — the same mistake a review caught in #224 hours
+  earlier, so this one goes through `run_doctor` and reads the finding.
 - **An unreadable sessions DB read as a fresh machine.** The prior-index check returned 0 for a
   corrupt or unreadable DB, which is indistinguishable from "nothing was ever indexed" — so the one
   case where `doctor` genuinely cannot tell was reported as the reassuring one. Absent, empty,
