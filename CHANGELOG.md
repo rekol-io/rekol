@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Four ways a BROKEN install reported "first use" (#165/#231, review).** This PR exists to stop
+  `doctor` reporting a fresh install as DEGRADED, and a reviewer sent to look for the opposite error
+  found it four times — neutral on an install that can never index anything, which is the worse
+  direction.
+  **"Absent" turned out to be three different things**, because `os.stat` follows links and collapses
+  them into one ENOENT/ENOTDIR: the name genuinely missing (a real first run), the name existing as a
+  **dangling symlink** (the shape a relocated `~/.claude` leaves when its target moves), and a path
+  **component being a regular file** (nothing can `mkdir` under a file). The last two were reported
+  as "Claude Code creates it on first use" with no remedy. `os.lstat` separates them, and the same
+  split fixes a dangling `sessions.db` link, which read as "not built yet" and offered
+  `rekol session-index --full` — a remedy that writes through the same broken link.
+  **A partial lockout of the transcript tree was silent.** The traversal probe stat'd
+  `next(iterdir(), None)` — a single sample — so an unreadable slug went unreported whenever it was
+  not the entry the filesystem happened to return first. Measured: four slugs with one at mode 000
+  produced **no finding**, while `Path.glob("**/*.jsonl")` — what `sessions/ingest.py` walks —
+  returned 3 of 4 transcripts. A whole project's history missing from the index with nothing said.
+  Every entry is probed now, and `stat` alone was not enough either: stat'ing a mode-000 *directory*
+  succeeds, since the search bit that governs it belongs to the parent. It asks `os.access` whether
+  each slug can be read and traversed — 44 ms at 2400 slugs, measured.
+  This is the sibling of the single-sample fault fixed on the curated side the same day; fixing one
+  and not the other is how it survived.
 - **An unreadable sessions DB read as a fresh machine.** The prior-index check returned 0 for a
   corrupt or unreadable DB, which is indistinguishable from "nothing was ever indexed" — so the one
   case where `doctor` genuinely cannot tell was reported as the reassuring one. Absent, empty,

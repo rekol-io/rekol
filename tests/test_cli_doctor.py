@@ -1836,3 +1836,128 @@ def test_the_unknown_remedy_names_the_db_and_an_action(tmp_path: Path, monkeypat
     assert "reports it below" not in remedy, remedy
     assert str(cfg.sessions_db_path) in remedy, remedy
     assert "session-index --full" in remedy, remedy
+
+
+# ---------------------------------------------------------------------------
+# #165/#231: "absent" is three things, and only one of them is a first run
+# ---------------------------------------------------------------------------
+
+
+def _memory_home_for_doctor(tmp_path: Path) -> Path:
+    """A minimal memory home that `load_config()` accepts."""
+    home = tmp_path / "mem"
+    (home / "topics").mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        "embedding_model: test-hashing\nupdate_check: false\narchive_enabled: false\n"
+    )
+    (home / "REKOL.md").write_text("# Memory Index\n\n- a pointer\n")
+    return home
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these rely on")
+@pytest.mark.parametrize(
+    ("shape", "build"),
+    [
+        # A path COMPONENT is a regular file: nothing can mkdir under it, so
+        # "Claude Code creates it on first use" is false.
+        ("a component is a regular file", lambda cfg: cfg.write_text("i am a file")),
+        # The name EXISTS as a dangling symlink. `os.stat` follows it and
+        # reports ENOENT, which read as a fresh install — and this is the shape
+        # a relocated `~/.claude` leaves behind when its target moves.
+        (
+            "projects is a dangling symlink",
+            lambda cfg: (cfg.mkdir(), (cfg / "projects").symlink_to(cfg / "gone-away")),
+        ),
+    ],
+)
+def test_a_broken_projects_path_is_not_reported_as_first_use(
+    tmp_path: Path, monkeypatch, shape: str, build
+) -> None:
+    """Reporting a broken path as "first use" is neutral on a broken install.
+
+    Found by review (2026-11-08). Both of these resolve to ENOENT/ENOTDIR from
+    `os.stat`, which the first-run branch treated as "not created yet" — giving
+    an INFO with no remedy for an install whose transcripts can never be read.
+    `os.lstat` separates "the name is not there" from "the name is there and
+    cannot work".
+    """
+    from rekol.cli_doctor import _transcript_source_finding
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    claude = tmp_path / "claude"
+    build(claude)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    monkeypatch.setenv("REKOL_HOME", str(home))
+
+    cfg = load_config()
+    finding = _transcript_source_finding(claude / "projects", cfg, HashingEmbedder(dim=384))
+    assert finding is not None, f"{shape}: no finding at all"
+    assert finding.status is Status.PROBLEM, f"{shape}: {finding.status} — {finding.detail}"
+    assert "cannot be used" in finding.detail, finding.detail
+    assert finding.remedy, f"{shape}: a problem with no remedy"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this relies on")
+def test_one_locked_out_slug_among_several_is_reported(tmp_path: Path, monkeypatch) -> None:
+    """A PARTIAL lockout was silent whenever the bad slug was not listed first.
+
+    The probe stat'd `next(iterdir(), None)` — one sample. Measured by review
+    (2026-11-08): four slugs with `charlie` at mode 000 produced no finding,
+    while `Path.glob("**/*.jsonl")` — what `sessions/ingest.py` walks — returned
+    3 of 4 transcripts. A whole project's history missing and doctor silent.
+
+    Also: stat'ing the child is not enough. Stat on a mode-000 DIRECTORY
+    succeeds, because the search bit that governs it is the parent's. The probe
+    has to ask whether the slug can be read AND traversed.
+    """
+    from rekol.cli_doctor import _transcript_source_finding
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    projects = tmp_path / "claude" / "projects"
+    projects.mkdir(parents=True)
+    for slug in ("alpha", "bravo", "charlie", "delta"):
+        (projects / slug).mkdir()
+        (projects / slug / "s.jsonl").write_text('{"type":"user"}\n')
+    (projects / "charlie").chmod(0o000)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("REKOL_HOME", str(home))
+
+    try:
+        # The indexer's own walk silently loses it, which is why this matters.
+        assert len(list(projects.glob("**/*.jsonl"))) == 3
+        finding = _transcript_source_finding(projects, load_config(), HashingEmbedder(dim=384))
+        assert finding is not None, "a locked-out slug produced no finding"
+        assert finding.status is Status.PROBLEM, finding.detail
+    finally:
+        (projects / "charlie").chmod(0o755)
+
+    # And it goes quiet once the permission is fixed, so it is not a check that
+    # simply always fires.
+    assert _transcript_source_finding(projects, load_config(), HashingEmbedder(dim=384)) is None
+
+
+def test_a_dangling_sessions_db_link_is_unknown_not_unbuilt(tmp_path: Path, monkeypatch) -> None:
+    """`sessions.db -> gone` read as "not built yet", with a remedy that fails.
+
+    The remedy offered was `rekol session-index --full`, which writes through
+    the same broken link. UNKNOWN is the honest answer: the name is there and
+    only its target is missing (review, 2026-11-08).
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(cache))
+    embedder = HashingEmbedder(dim=384)
+
+    cfg = load_config()
+    # Control FIRST, so the absent case is known to differ from the broken one.
+    assert _prior_index_state(cfg, embedder)[0] is _PriorIndex.ABSENT
+
+    cfg.sessions_db_path.symlink_to(tmp_path / "nowhere-at-all.db")
+    assert _prior_index_state(cfg, embedder)[0] is _PriorIndex.UNKNOWN

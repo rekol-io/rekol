@@ -515,6 +515,13 @@ def _prior_index_state(cfg: Config, embedder: BaseEmbedder) -> tuple[_PriorIndex
     try:
         os.stat(db_path)
     except OSError as exc:
+        # A DANGLING LINK AT THE DB IS NOT "NOT BUILT YET" (review, 2026-11-08).
+        # `os.stat` follows the link, so `sessions.db -> somewhere/gone` gives
+        # ENOENT and read as a fresh install — with a remedy, `session-index
+        # --full`, that would then fail on the same broken link. The name is
+        # there; only the target is missing.
+        if _path_exists_but_cannot_be_a_directory(db_path):
+            return _PriorIndex.UNKNOWN, 0
         if exc.errno in (errno.ENOENT, errno.ENOTDIR):
             return _PriorIndex.ABSENT, 0
         return _PriorIndex.UNKNOWN, 0
@@ -532,6 +539,28 @@ def _prior_index_state(cfg: Config, embedder: BaseEmbedder) -> tuple[_PriorIndex
             with contextlib.suppress(Exception):
                 store.close()
     return (_PriorIndex.POPULATED if count > 0 else _PriorIndex.EMPTY), count
+
+
+def _path_exists_but_cannot_be_a_directory(path: Path) -> bool:
+    """True when the NAME is there but can never resolve to a usable directory.
+
+    `os.stat` follows links, so it collapses three different situations into one
+    ENOENT/ENOTDIR, and reporting all three as "first use" was neutral on a
+    broken install (review, 2026-11-08):
+
+    * the name does not exist at all — genuinely first use, False here;
+    * the name EXISTS as a dangling symlink — ENOENT from `stat`, but it is not
+      absent, and a relocated `~/.claude` whose target moved is exactly this;
+    * a path COMPONENT is a regular file — ENOTDIR, and nothing can `mkdir`
+      under a file, so "Claude Code creates it on first use" is false.
+
+    `os.lstat` separates them because it does not follow the final link.
+    """
+    try:
+        os.lstat(path)
+    except OSError as exc:
+        return exc.errno == errno.ENOTDIR
+    return True
 
 
 def _transcript_source_finding(
@@ -592,6 +621,33 @@ def _transcript_source_finding(
         )
 
     if source_mode is None:
+        # "ABSENT" IS THREE DIFFERENT THINGS, and reporting all three as first
+        # use was neutral on a broken install (review, 2026-11-08). `os.stat`
+        # follows links and collapses them:
+        #   * the name does not exist at all          -> genuinely first use
+        #   * the name EXISTS as a dangling symlink   -> ENOENT, but not absent;
+        #     a relocated `~/.claude` whose target moved is exactly this shape
+        #   * a path COMPONENT is a regular file      -> ENOTDIR, and Claude Code
+        #     cannot create the directory, so "creates it on first use" is false
+        # `os.lstat` separates them, because it does not follow the final link.
+        if _path_exists_but_cannot_be_a_directory(projects_root):
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir cannot be used: {projects_root} — the "
+                    f"path exists but does not resolve to a directory (a broken "
+                    f"symlink, or a file where a directory must be), so Claude "
+                    f"Code cannot create it and session-index fails on every "
+                    f"session end"
+                ),
+                remedy=(
+                    f"inspect {projects_root} — remove or repoint it if it is a "
+                    f"broken link, or move the file that is in the way; then run "
+                    f"rekol session-index --full"
+                ),
+            )
+
         # AT THE DEFAULT LOCATION, absent usually means Claude Code has not
         # created it yet: it does so on first use, and rekol can be installed
         # before that happens. (Measured on a live machine: the directory
@@ -684,11 +740,28 @@ def _transcript_source_finding(
     # enumerate names while every child is unopenable, so enumeration alone
     # still reported a locked-out source as healthy. `session-index` has to
     # traverse INTO the slug dirs to read transcripts, so that is what gets
-    # tested: stat the first entry, which needs the execute/search bit.
+    # tested.
+    #
+    # EVERY ENTRY, NOT THE FIRST ONE. This stat'd `next(iterdir(), None)` — a
+    # single sample — so a PARTIAL lockout read as healthy whenever the
+    # unreadable slug was not the one the filesystem happened to return first
+    # (review, 2026-11-08). Measured: four slugs with `charlie` at mode 000
+    # produced no finding at all, while `Path.glob("**/*.jsonl")` — which is
+    # what `sessions/ingest.py` walks — silently returned 3 of 4 transcripts.
+    # A whole project's history missing from the index, and doctor said nothing.
+    #
+    # The same single-sample fault was fixed on the curated side earlier today;
+    # this is its sibling, and fixing one and not the other is how it survived.
+    # `stat` ON THE CHILD IS NOT ENOUGH EITHER: stat'ing a mode-000 directory
+    # SUCCEEDS, because what governs it is the search bit on the PARENT. So a
+    # slug the indexer cannot read still looked fine. What `session-index` needs
+    # is read+search on each slug, which `os.access` answers in one syscall per
+    # entry — cheap enough to do for every slug rather than sampling one.
     try:
-        first_entry = next(projects_root.iterdir(), None)
-        if first_entry is not None:
-            first_entry.stat()
+        for entry in projects_root.iterdir():
+            entry.stat()
+            if entry.is_dir() and not os.access(entry, os.R_OK | os.X_OK):
+                raise PermissionError(errno.EACCES, f"cannot read or traverse {entry}", str(entry))
     except OSError as exc:
         return Finding(
             label="transcript source",
