@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from cache_helpers import cache_dir_for
@@ -26,6 +28,25 @@ from rekol.embeddings import HashingEmbedder
 from rekol.indexer import Indexer
 from rekol.sessions.store import SessionStore
 from rekol.store import IndexStore
+
+
+@pytest.fixture(autouse=True)
+def _pin_path_for_doctor(tmp_path_factory, monkeypatch):
+    """Pin PATH so `doctor`'s console-script check cannot read the host's.
+
+    `run_doctor` walks PATH looking for every `rekol` (#203), so any stray one on
+    the developer's PATH becomes a PROBLEM finding and fails the healthy-path
+    assertions here. Codex hit exactly that: a temporary build shim left on PATH
+    by `uv run` made this module fail, and the suite only passed under a
+    restricted PATH. Reproduced before fixing — a broken `rekol` early on PATH
+    fails five tests in this file.
+
+    So the ambient PATH is replaced with an empty directory. Tests that care about
+    PATH set their own with `monkeypatch.setenv`, which runs after this fixture
+    and therefore wins.
+    """
+    empty = tmp_path_factory.mktemp("no-rekol-on-path")
+    monkeypatch.setenv("PATH", str(empty))
 
 
 def _write_memory_home(tmp_path: Path, monkeypatch, *, with_transcripts: bool = True) -> Path:
@@ -1440,3 +1461,1067 @@ def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
     assert finding.status is Status.INFO, finding.detail
     assert finding.remedy is None
     assert "import hook" in finding.detail
+
+
+# ---------------------------------------------------------------------------
+# "curated index: not built yet" has three meanings (#232)
+# ---------------------------------------------------------------------------
+# Reporting all of them as a PROBLEM made `doctor` red out of the box on a
+# machine where nothing was wrong — the third time this project has shipped
+# that, after #165 and #231. The checks either side already model it: the
+# archive check prints a neutral line for the same condition, and the session
+# index only fires when transcripts actually exist.
+
+
+def _unindexed_home(tmp_path: Path, monkeypatch, *, with_curated: bool) -> Path:
+    """A home with NO curated index built, optionally holding curated files."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {tmp_path / 'projects'}\n"
+    )
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    if with_curated:
+        (home / "topics").mkdir()
+        (home / "topics" / "sailing.md").write_text(
+            "---\nname: Sailing\ndescription: boats\ntype: topic\n"
+            "tags: ['sailing']\naliases: ['boats']\n---\n\n# Sailing\n\nBoats.\n"
+        )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    return home
+
+
+def _curated_finding(findings: list) -> object:
+    matches = [f for f in findings if f.label == "curated index"]
+    assert matches, [f.label for f in findings]
+    return matches[0]
+
+
+def test_no_curated_memory_and_no_index_is_neutral(tmp_path: Path, monkeypatch) -> None:
+    """Nothing to index is not a fault, and `index rebuild` would build nothing.
+
+    Running the old remedy did not make the statement true; it only silenced the
+    line. That is the tell that the severity was wrong.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert finding.remedy is None
+    assert "no curated memory to index" in finding.detail
+
+
+def test_curated_memory_without_an_index_is_still_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """The #165 bar, and the negative control for the neutrality above.
+
+    Without this, making every "not built yet" neutral would pass the test above
+    while hiding the case that actually breaks search.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert finding.remedy == "rekol index rebuild"
+    # The count is what makes it checkable rather than a guess.
+    assert "1 curated memory file(s) exist" in finding.detail
+    assert "returns nothing" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_is_unknown_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`Path.glob` swallows a PermissionError on a subdirectory and yields nothing.
+
+    So a readable memory home with one unreadable layer dir counted zero files
+    and reported "there is no curated memory to index" — the answer identical to
+    genuinely having none, with a real file sitting right there. That is the #158
+    shape, and it is why the walk now uses `os.walk(onerror=…)`.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "topics").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "topics").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail
+    assert "no curated memory to index" not in finding.detail
+
+
+def test_an_absent_memory_home_is_unknown_not_nothing_to_index(tmp_path: Path, monkeypatch) -> None:
+    """A REKOL_HOME that does not exist is not evidence that nothing was curated."""
+    missing = tmp_path / "gone"
+    monkeypatch.setenv("REKOL_HOME", str(missing))
+    (tmp_path / "cfg").mkdir()
+    from rekol.cli_doctor import _curated_memory_file_state, _CuratedFiles
+
+    state, count = _curated_memory_file_state(missing)
+    assert state is _CuratedFiles.UNKNOWN
+    assert count == 0
+
+
+def test_the_scope_predicate_agrees_with_the_indexer_walk(tmp_path: Path) -> None:
+    """THE ANTI-DRIFT PIN, and the reason a predicate is allowed at all.
+
+    `doctor` answers "would a rebuild index anything?" with a predicate rather
+    than the indexer's walk, because it needs `os.walk`'s `onerror` to see an
+    unreadable directory and `glob` swallows that (#232). A predicate that
+    merely looks right is how #157/#158 happened, so it is compared against the
+    real walk over a tree holding every shape the walk distinguishes — layer
+    dirs, nesting, hidden names, flat and nested `projects/`, `tasks/`, strays
+    at the root, and the shipped pointer files.
+
+    Hidden names are included on purpose: the indexer's globs match them, so
+    `always/.draft.md` really is indexed. If that policy ever changes, the walk
+    and this predicate change together or this test fails.
+    """
+    from rekol.indexer import _iter_memory_files, is_in_indexed_layer
+
+    root = tmp_path / "home"
+    shapes = [
+        "always/a.md",
+        "always/.draft.md",
+        "always/deep/b.md",
+        "always/.hidden/c.md",
+        "when/w.md",
+        "topics/t.md",
+        "knowledge/k.md",
+        "feedback/f.md",
+        "projects/flat.md",
+        "projects/.flathidden.md",
+        "projects/slug/always/p.md",
+        "projects/slug/always/deep/q.md",
+        "projects/slug/stray.md",
+        "projects/slug/notalayer/r.md",
+        "stray.md",
+        "MEMORY.md",
+        "REKOL.md",
+        "tasks/t1.md",
+        "tasks/deep/t2.md",
+        ".hidden/h.md",
+        "random/r.md",
+    ]
+    for shape in shapes:
+        target = root / shape
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+
+    walked = {str(p.relative_to(root)) for p in _iter_memory_files(root)}
+    predicted = {s for s in shapes if is_in_indexed_layer(root / s, root)}
+    assert walked == predicted, {
+        "walk only": sorted(walked - predicted),
+        "predicate only": sorted(predicted - walked),
+    }
+    # And it is not vacuously equal: the fixture must contain both answers.
+    assert walked, "the fixture reached nothing — the comparison proves nothing"
+    assert set(shapes) - walked, "the fixture has no excluded shapes"
+
+
+def test_markdown_only_outside_the_indexed_layers_is_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The count used a filesystem-wide walk; the indexer walks the layer dirs.
+
+    So a home holding only a stray `note.md` at its root read as "1 curated
+    memory file(s) exist, so searching curated memory returns nothing", with
+    `rekol index rebuild` as the remedy — which would have built an EMPTY index
+    and changed nothing. Both halves were wrong (Codex, 2026-11-06).
+
+    The right answer is neither of the old two: the file is real, and no rebuild
+    will ever reach it.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "note.md").write_text(
+        "---\nname: Note\ndescription: d\ntype: topic\n---\n\nreal content\n"
+    )
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "OUTSIDE the directories rekol indexes" in finding.detail, finding.detail
+    assert "no curated memory to index" not in finding.detail
+    assert finding.remedy and "move them into" in finding.remedy
+    # The remedy must not be the one that builds an empty index.
+    assert finding.remedy != "rekol index rebuild"
+
+
+def test_a_tasks_only_home_is_neutral_not_a_rebuild_prompt(tmp_path: Path, monkeypatch) -> None:
+    """`tasks/` is machine-managed and excluded by design, so it is not memory.
+
+    It was counted by neither state correctly: excluded from the count by
+    `is_non_memory`, yet still walked — which the test below is about.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert "no curated memory to index" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_tasks_dir_does_not_make_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The answer must not depend on a directory the answer does not depend on.
+
+    `tasks/` is excluded by design, so whether it is readable is irrelevant to
+    "is there curated memory to index". But it was still traversed, so an
+    unreadable one tripped `onerror` and the whole check returned UNKNOWN —
+    turning a perfectly healthy home into "a missing answer" (Codex,
+    2026-11-06). It is pruned before descending now.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    (home / "tasks").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "tasks").chmod(0o755)
+
+    assert "UNKNOWN" not in finding.detail, finding.detail
+    # The real curated file is still reported, so pruning did not blind it.
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "1 curated memory file(s) exist" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_still_makes_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The counterpart to the pruning above: prune only what is excluded.
+
+    Without this, pruning everything would silence #232's finding as well — the
+    unreadable directory that DOES decide the answer.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "knowledge").mkdir()
+    (home / "knowledge" / "k.md").write_text("---\nname: K\n---\n\nk\n")
+    (home / "knowledge").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "knowledge").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail, finding.detail
+
+
+# ---------------------------------------------------------------------------
+# THE AGREEMENT TABLE (#232, product's ruling 2026-11-07)
+# ---------------------------------------------------------------------------
+# Every defect found in this check has been the same fault wearing a different
+# hat: doctor's idea of what is indexed differing from the indexer's. A
+# symlinked layer, a hidden file, a dangling pointer — three findings, one
+# cause. So the two are checked TOGETHER from now on, as a table of shapes run
+# through both, rather than as one test per hat.
+
+
+def _doctor_state(home: Path):
+    from rekol.cli_doctor import _curated_memory_file_state
+
+    return _curated_memory_file_state(home)
+
+
+def _indexer_reaches(home: Path) -> int:
+    from rekol.indexer import _iter_memory_files
+
+    return len(list(_iter_memory_files(home)))
+
+
+def _disagreements(name: str, state, count: int, reached: int, expected) -> list[str]:
+    """Why ``name`` fails, if it does. Split out only to clear the complexity limit."""
+    from rekol.cli_doctor import _CuratedFiles
+
+    if state is not expected:
+        return [f"{name}: doctor said {state.value}, expected {expected.value}"]
+    # THE EQUIVALENCE. UNKNOWN is exempt by definition: it is the answer for
+    # "cannot tell", so it carries no claim about what the indexer reaches.
+    if state is _CuratedFiles.UNKNOWN:
+        return []
+    doctor_says_something = state is _CuratedFiles.SOME
+    if doctor_says_something == (reached > 0):
+        return []
+    return [
+        f"{name}: doctor says {'something' if doctor_says_something else 'nothing'} to index "
+        f"({state.value}, count={count}) but the indexer reaches {reached} file(s)"
+    ]
+
+
+# The shapes for the agreement table below. Module-level rather than nested so
+# the test itself stays under the complexity limit as shapes are added — the
+# table grows every time doctor and the indexer are found to disagree.
+def build_linked_layer(home: Path) -> None:
+    """A top-level layer that is a symlink to a readable directory."""
+    external = home.parent / "external-topics"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics").symlink_to(external)
+
+
+def build_root_hidden_file(home: Path) -> None:
+    """A hidden file at the ROOT: outside every layer, and not user-visible."""
+    (home / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_hidden_in_layer(home: Path) -> None:
+    """A hidden file INSIDE a layer: the indexer's globs do match this."""
+    (home / "always").mkdir()
+    (home / "always" / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_dangling_pointer(home: Path) -> None:
+    """A retirement pointer whose target is gone."""
+    (home / "MEMORY.md").symlink_to(home / "nowhere-at-all.md")
+
+
+def build_root_stray(home: Path) -> None:
+    """A visible file at the root: real memory the indexer will never reach."""
+    (home / "note.md").write_text("---\nname: N\n---\n\nreal\n")
+
+
+def build_unreadable_tasks(home: Path) -> None:
+    """`tasks/` is excluded by design, so its readability is irrelevant."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T1\n---\n\nt\n")
+    (home / "tasks").chmod(0o000)
+
+
+def build_unreadable_topics(home: Path) -> None:
+    """A layer dir that cannot be read: the answer DOES depend on it."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics").chmod(0o000)
+
+
+def build_layer_cycle(home: Path) -> None:
+    """A symlink loop inside a layer. Following links must not hang."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics" / "loop").symlink_to(home / "topics")
+
+
+def build_nested_link_in_layer(home: Path) -> None:
+    """A link NESTED INSIDE a layer, which the indexer does not follow.
+
+    `Path.glob("**/*.md")` never descends into a symlinked directory, so
+    this file is unreachable. Doctor used to follow it (`followlinks=True`)
+    and answer SOME, which made its own remedy impossible: the user was told
+    the memory is there and `rekol index rebuild` kept producing an empty
+    index (Codex + product, 2026-11-07). NONE is the agreeing answer; the
+    separate question of whether this file SHOULD be indexed is #247.
+    """
+    (home / "topics").mkdir()
+    external = home.parent / f"{home.name}-nested"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics" / "linked-subdirectory").symlink_to(external)
+
+
+def build_linked_project_slug(home: Path) -> None:
+    """`projects/<slug>` as a link: an entry point, so it IS followed.
+
+    The indexer reaches this one through `iterdir()` + `is_dir()`, both of
+    which resolve a link. The three project-level shapes are here because
+    the fix turns on exactly which names are entry points, and a list of
+    entry points that is wrong in the other direction fails nothing without
+    them.
+    """
+    (home / "projects").mkdir()
+    external = home.parent / f"{home.name}-slug"
+    (external / "always").mkdir(parents=True)
+    (external / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects" / "slug").symlink_to(external)
+
+
+def build_linked_layer_in_slug(home: Path) -> None:
+    """`projects/<slug>/<layer>` as a link: also an entry point."""
+    (home / "projects" / "slug").mkdir(parents=True)
+    external = home.parent / f"{home.name}-slug-layer"
+    external.mkdir()
+    (external / "q.md").write_text("---\nname: Q\n---\n\nq\n")
+    (home / "projects" / "slug" / "always").symlink_to(external)
+
+
+def build_alias_inside_the_home(home: Path) -> None:
+    """A layer that is an ALIAS for another path INSIDE the home (QA, 2026-11-07).
+
+    `home/topics -> home/projects/shared`. One inode, two names: `topics/s.md`,
+    which the indexer reaches, and `projects/shared/s.md`, which it does not.
+
+    Doctor said OUTSIDE_THE_LAYERS/1 — it met the file by its `projects/` name
+    first, classified it correctly as outside the layers under THAT name, and
+    marked the inode visited, so the `topics` entry-point walk was pruned. The
+    advice it then gave was to move files that were already indexed.
+
+    The fix is an ordering one: walk the entry points before the root, so the
+    name the indexer resolves claims the inode first.
+    """
+    (home / "projects" / "shared").mkdir(parents=True)
+    (home / "projects" / "shared" / "s.md").write_text("---\nname: S\n---\n\nshared\n")
+    (home / "topics").symlink_to(home / "projects" / "shared")
+
+
+def build_slug_layer_alias(home: Path) -> None:
+    """A layer alias one level DOWN: `projects/a/topics -> projects/a/notes`.
+
+    #253, and the case that showed the first ordering fix had moved the bug
+    rather than fixed it (review, 2026-11-08). `projects/` was listed as an
+    entry point before the per-slug layers, so its walk met the file as
+    `projects/a/notes/s.md` — correctly outside the layers under that name —
+    and claimed the inode, pruning the `projects/a/topics` walk. Doctor said
+    OUTSIDE_THE_LAYERS while the indexer read it through `topics`, and advised
+    moving files that were already indexed.
+    """
+    (home / "projects" / "a" / "notes").mkdir(parents=True)
+    (home / "projects" / "a" / "notes" / "s.md").write_text("---\nname: S\n---\n\nn\n")
+    (home / "projects" / "a" / "topics").symlink_to(home / "projects" / "a" / "notes")
+
+
+def build_dangling_layer_beside_real_memory(home: Path) -> None:
+    """A broken `topics` link next to a real `always/` file.
+
+    `stat` raises ENOENT on a link to nothing, which used to make the whole
+    check answer UNKNOWN — "cannot be inspected" about a home whose memory the
+    indexer reads perfectly well. `Path.is_dir()` returns False for it silently,
+    so absent is the answer that AGREES with the indexer.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "nowhere-at-all")
+
+
+def build_self_looping_layer_beside_real_memory(home: Path) -> None:
+    """`topics -> topics`, next to a real `always/` file.
+
+    Same shape as the dangling link but ELOOP rather than ENOENT, and it took a
+    second fix: the pre-check stopped forcing UNKNOWN, and then the WALK still
+    did, because `os.walk` on a self-looping entry point raises ELOOP into
+    `onerror`. Both had to treat it as absent to match `is_dir()`.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "topics")
+
+
+def build_linked_projects_root(home: Path) -> None:
+    """`projects/` itself as a link: the indexer names it, so it follows it."""
+    external = home.parent / f"{home.name}-projects"
+    (external / "slug" / "always").mkdir(parents=True)
+    (external / "slug" / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects").symlink_to(external)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these shapes rely on")
+def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
+    """One table. `doctor` says "there is something to index" exactly when there is.
+
+    The claim being pinned is an equivalence, not a count: for every shape, the
+    indexer reaching at least one file must coincide with `doctor` answering
+    SOME — and where `doctor` cannot tell, it must say UNKNOWN rather than
+    guessing either way.
+    """
+    from rekol.cli_doctor import _CuratedFiles
+
+    # shape -> (builder, expected doctor state)
+    shapes = {
+        "linked layer": (build_linked_layer, _CuratedFiles.SOME),
+        "nested link in a layer": (build_nested_link_in_layer, _CuratedFiles.NONE),
+        "linked project slug": (build_linked_project_slug, _CuratedFiles.SOME),
+        "linked layer in a slug": (build_linked_layer_in_slug, _CuratedFiles.SOME),
+        "linked projects root": (build_linked_projects_root, _CuratedFiles.SOME),
+        "alias inside the home": (build_alias_inside_the_home, _CuratedFiles.SOME),
+        "slug-layer alias": (build_slug_layer_alias, _CuratedFiles.SOME),
+        "dangling layer beside real memory": (
+            build_dangling_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
+        "self-looping layer beside real memory": (
+            build_self_looping_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
+        "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
+        "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
+        "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),
+        "dangling MEMORY.md only": (build_dangling_pointer, _CuratedFiles.NONE),
+        "root stray only": (build_root_stray, _CuratedFiles.OUTSIDE_THE_LAYERS),
+        "unreadable tasks/": (build_unreadable_tasks, _CuratedFiles.SOME),
+        "unreadable topics/": (build_unreadable_topics, _CuratedFiles.UNKNOWN),
+    }
+
+    failures: list[str] = []
+    for name, (build, expected) in shapes.items():
+        home = tmp_path / name.replace("/", "-").replace(" ", "-")
+        home.mkdir()
+        build(home)
+        try:
+            state, count = _doctor_state(home)
+            reached = _indexer_reaches(home)
+        finally:
+            for path in (home / "tasks", home / "topics"):
+                if path.is_dir():
+                    path.chmod(0o755)
+
+        failures.extend(_disagreements(name, state, count, reached, expected))
+
+    assert not failures, "doctor and the indexer disagree:\n  " + "\n  ".join(failures)
+
+
+# ---- first run: an absent projects dir is not a fault (#165 kept for the real one) ----
+
+
+def test_absent_projects_dir_at_the_default_location_is_neutral(tmp_path, monkeypatch) -> None:
+    """A brand-new machine has no `~/.claude/projects` yet, and that is not a fault.
+
+    Claude Code creates it on first use, and rekol can be installed before that.
+    Reporting it as DEGRADED made `doctor` red out of the box — which this project
+    has shipped twice, and which is how a report stops being read.
+
+    Measured on a live machine while writing this: the directory predated the
+    rekol install by nearly three months, so the ordinary case is that it already
+    exists. The gap is narrow but real, and a first impression is a bad place to
+    be wrong.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    # Point Claude Code's whole tree at somewhere that does not exist, so the
+    # DEFAULT projects dir resolves under it and is absent.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude-yet"))
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    _build_curated_index(home)
+
+    cfg = load_config()
+    findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert source[0].remedy is None
+    assert "does not exist yet" in source[0].detail
+    # QA asserts on this wording: a neutral line naming the setting, no ✗ line.
+    assert "claude_projects_dir" in source[0].detail
+
+
+def test_an_explicitly_configured_missing_projects_dir_is_still_a_problem(
+    tmp_path, monkeypatch
+) -> None:
+    """#165 must survive: if the user SAID where it is and it is not there, that is broken.
+
+    `session-index` then exits 2 on every SessionEnd — into `>/dev/null 2>&1`, so
+    nobody ever sees it — and the index can never build. Making the first-run case
+    neutral must not soften this one.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    missing = tmp_path / "typo-in-my-config"
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {missing}\n"
+    )
+    _build_curated_index(home)
+
+    cfg = load_config()
+    findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert source[0].remedy is not None
+    assert str(missing) in source[0].detail
+
+
+# ---------------------------------------------------------------------------
+# The source itself: absent, gone, wrong type, unreadable (Codex, 2026-11-06)
+# ---------------------------------------------------------------------------
+# `is_dir()` returning False conflates three different states, and the first-run
+# neutrality above turned the dangerous one into a reassuring line. Keep the
+# neutrality for a genuinely unused machine; never let it cover a real failure.
+
+
+def _default_location_home(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A sandboxed home whose projects dir is the RESOLVED DEFAULT, and exists.
+
+    Returns ``(home, projects_root)``. The shared fixture sets
+    ``claude_projects_dir`` explicitly, which is the *configured* case — the
+    opposite of what these tests need.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    claude_dir = tmp_path / "claude"
+    projects_root = claude_dir / "projects"
+    (projects_root / "proj").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    (home / "rekol.config.yaml").write_text("embedding_model: test-hashing\n")
+    return home, projects_root
+
+
+def test_a_default_projects_dir_that_vanished_after_indexing_is_a_problem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Indexed, then the directory went away. That is lost storage, not first use.
+
+    Codex indexed a real transcript, confirmed healthy embeddings and FTS, then
+    moved the default projects directory aside — and `doctor` said "does not
+    exist yet … nothing to index until a session has ended" over a populated
+    database. The populated index is the evidence that distinguishes the two:
+    transcripts were being read from there, so the directory did not fail to
+    appear, it disappeared.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    (projects_root / "proj" / "session.jsonl").write_text(
+        '{"parentUuid":null,"type":"user","message":{"role":"user",'
+        '"content":"how do I uninstall the rekol thing"},'
+        '"uuid":"u-1","timestamp":"2026-04-24T01:29:01.303Z",'
+        '"sessionId":"s-1","cwd":"/tmp/repoA"}\n'
+    )
+    _build_curated_index(home)
+    assert CliRunner().invoke(session_index_main, ["--full"]).exit_code == 0
+
+    cfg = load_config()
+    indexed = SessionStore(db_path=cfg.sessions_db_path, dim=384)
+    indexed.init_schema()
+    assert indexed.count_messages() > 0, "precondition: nothing was indexed"
+    indexed.close()
+
+    # The storage goes away, exactly as Codex's probe did it.
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "GONE" in source[0].detail
+    assert source[0].remedy is not None
+    # The count is what makes the claim checkable rather than a guess. The
+    # wording deliberately says the INDEX holds them rather than that they were
+    # "indexed from it" — provenance per-message is not something this checks.
+    assert "the session index holds" in source[0].detail
+    assert "message(s)" in source[0].detail
+
+
+def test_an_unused_default_projects_dir_is_still_neutral_with_an_empty_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The negative control: without it, reporting every absence would pass above.
+
+    A machine that has never indexed anything must keep the neutral line, which
+    is the whole point of #231.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.rename(tmp_path / "never-used")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert "does not exist yet" in source[0].detail
+    assert source[0].remedy is None
+
+
+def test_a_regular_file_at_the_projects_dir_path_is_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """It entered the "does not exist yet" branch, because `is_dir()` is False."""
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    shutil.rmtree(projects_root)
+    projects_root.write_text("not a directory\n")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "not a directory" in source[0].detail
+    assert source[0].remedy is not None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_projects_dir_is_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """`is_dir()` proves type, not access.
+
+    Codex chmodded the directory to 000 after indexing and confirmed enumeration
+    raises PermissionError, while `doctor` still reported embeddings and FTS as
+    OK with no source warning at all. Enumeration is what `session-index`
+    actually does, so that is what gets tested.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.chmod(0o000)
+    try:
+        findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    finally:
+        projects_root.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be read" in source[0].detail
+    assert source[0].remedy is not None
+
+
+def test_an_initialised_but_empty_sessions_db_is_still_first_use(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The control product asked for explicitly.
+
+    The neutral-line test above has NO sessions DB at all, so it exercises
+    ABSENT and never EMPTY. An initialised schema holding zero messages is a
+    different state and must also read as first use — otherwise anyone who has
+    run `session-index` once on an empty machine gets a spurious problem.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    store = SessionStore(db_path=cfg.sessions_db_path, dim=384)
+    store.init_schema()
+    assert store.count_messages() == 0
+    store.close()
+    projects_root.rename(tmp_path / "never-used")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.INFO, source[0].detail
+    assert "does not exist yet" in source[0].detail
+
+
+def test_an_unreadable_sessions_db_is_reported_as_unknown_not_first_use(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unknown is not evidence of absence.
+
+    A corrupt DB turned into a count of 0, which read as a fresh machine — so
+    the one case where doctor genuinely cannot tell was reported as the
+    reassuring one (Codex, 2026-11-06).
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    cfg.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.sessions_db_path.write_bytes(b"this is not an sqlite database at all")
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "UNKNOWN" in source[0].detail
+    assert "does not exist yet" not in source[0].detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_a_listable_but_untraversable_projects_dir_is_a_problem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Listing is not traversal.
+
+    Mode 0400 lets `iterdir` enumerate names while every child is unopenable, so
+    enumeration alone still reported a locked-out source as healthy.
+    `session-index` has to traverse INTO the slug dirs, so that is what is
+    tested.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    projects_root.chmod(0o400)
+    try:
+        findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    finally:
+        projects_root.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be read" in source[0].detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unstattable_sessions_db_is_unknown_not_absent(tmp_path: Path, monkeypatch) -> None:
+    """``exists()`` cannot tell "no such file" from "cannot look".
+
+    The DB is intact here; only the directory holding it has no search bit, and
+    the old probe was ``Path.exists()``. What that does with an access failure
+    depends on the interpreter, which is why this is worse than either outcome:
+
+      * 3.11.15 — raises ``PermissionError``, so ``doctor`` dies with a traceback
+      * 3.15.0  — answers False, so this reads as ABSENT and the caller reports
+                  a fresh machine with nothing indexed yet
+
+    Both measured on this fixture. A self-looping symlink at the DB path answers
+    False on both versions, so that case is silently wrong everywhere.
+
+    Tested on the function rather than through the whole report because the
+    sessions DB shares its directory with the curated index: sealing that
+    directory in a full `doctor` run breaks the earlier checks too, and the
+    failure would no longer be about this probe.
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+
+    _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    sealed_index = tmp_path / "sealed-index"
+    sealed_index.mkdir()
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(sealed_index))
+    cfg = load_config()
+    cfg.sessions_db_path.write_bytes(b"a real DB would be here")
+
+    sealed_index.chmod(0o000)
+    try:
+        state, count = _prior_index_state(cfg, HashingEmbedder(dim=384))
+    finally:
+        sealed_index.chmod(0o755)
+
+    assert state is _PriorIndex.UNKNOWN, state
+    assert count == 0
+
+
+def test_a_genuinely_missing_sessions_db_is_still_absent(tmp_path: Path, monkeypatch) -> None:
+    """The counterpart: the fix must not turn every answer into UNKNOWN.
+
+    Without this, returning UNKNOWN unconditionally would pass the test above
+    while destroying first-run neutrality — the thing this PR exists to protect.
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+
+    _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(tmp_path / "never-created"))
+    cfg = load_config()
+    assert not cfg.sessions_db_path.exists()
+
+    state, count = _prior_index_state(cfg, HashingEmbedder(dim=384))
+    assert state is _PriorIndex.ABSENT, state
+    assert count == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_a_projects_dir_under_a_sealed_parent_is_not_reported_as_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The source probe had the same hole as the DB probe, one level up.
+
+    With the PARENT sealed, ``is_dir()`` either raises (3.11) or answers False
+    (3.15) — so a locked-out source was either a traceback or a report that the
+    path does not exist, sending the user to correct a config value that is in
+    fact correct. The answer now says it could not find out.
+    """
+    home = _write_memory_home(tmp_path, monkeypatch, with_transcripts=False)
+    sealed = tmp_path / "sealed"
+    (sealed / "projects").mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {sealed / 'projects'}\n"
+    )
+    _build_curated_index(home)
+    cfg = load_config()
+
+    sealed.chmod(0o000)
+    try:
+        findings = run_doctor(cfg, HashingEmbedder(dim=384)).findings
+    finally:
+        sealed.chmod(0o755)
+
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source, [f.label for f in findings]
+    assert source[0].status is Status.PROBLEM, source[0].detail
+    assert "cannot be inspected" in source[0].detail, source[0].detail
+    assert "does not exist" not in source[0].detail, source[0].detail
+    assert source[0].remedy and "traversable" in source[0].remedy
+
+
+def test_the_unknown_remedy_names_the_db_and_an_action(tmp_path: Path, monkeypatch) -> None:
+    """A remedy pointing at a report that is never printed is worse than none.
+
+    The UNKNOWN branch used to say "check the sessions DB (rekol doctor reports
+    it below)". It does not: this finding RETURNS, so the session-index checks
+    that would have reported the DB never run. It read as if the answer were
+    already on screen.
+    """
+    home, projects_root = _default_location_home(tmp_path, monkeypatch)
+    _build_curated_index(home)
+    cfg = load_config()
+    cfg.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.sessions_db_path.write_bytes(b"this is not an sqlite database at all")
+    projects_root.rename(tmp_path / "moved-aside")
+
+    findings = run_doctor(load_config(), HashingEmbedder(dim=384)).findings
+    source = [f for f in findings if f.label == "transcript source"]
+    assert source and source[0].remedy, source
+    remedy = source[0].remedy
+    assert "reports it below" not in remedy, remedy
+    assert str(cfg.sessions_db_path) in remedy, remedy
+    assert "session-index --full" in remedy, remedy
+
+
+# ---------------------------------------------------------------------------
+# #165/#231: "absent" is three things, and only one of them is a first run
+# ---------------------------------------------------------------------------
+
+
+def _memory_home_for_doctor(tmp_path: Path) -> Path:
+    """A minimal memory home that `load_config()` accepts."""
+    home = tmp_path / "mem"
+    (home / "topics").mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        "embedding_model: test-hashing\nupdate_check: false\narchive_enabled: false\n"
+    )
+    (home / "REKOL.md").write_text("# Memory Index\n\n- a pointer\n")
+    return home
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these rely on")
+@pytest.mark.parametrize(
+    ("shape", "build"),
+    [
+        # A path COMPONENT is a regular file: nothing can mkdir under it, so
+        # "Claude Code creates it on first use" is false.
+        ("a component is a regular file", lambda cfg: cfg.write_text("i am a file")),
+        # The name EXISTS as a dangling symlink. `os.stat` follows it and
+        # reports ENOENT, which read as a fresh install — and this is the shape
+        # a relocated `~/.claude` leaves behind when its target moves.
+        (
+            "projects is a dangling symlink",
+            lambda cfg: (cfg.mkdir(), (cfg / "projects").symlink_to(cfg / "gone-away")),
+        ),
+    ],
+)
+def test_a_broken_projects_path_is_not_reported_as_first_use(
+    tmp_path: Path, monkeypatch, shape: str, build
+) -> None:
+    """Reporting a broken path as "first use" is neutral on a broken install.
+
+    Found by review (2026-11-08). Both of these resolve to ENOENT/ENOTDIR from
+    `os.stat`, which the first-run branch treated as "not created yet" — giving
+    an INFO with no remedy for an install whose transcripts can never be read.
+    `os.lstat` separates "the name is not there" from "the name is there and
+    cannot work".
+    """
+    from rekol.cli_doctor import _transcript_source_finding
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    claude = tmp_path / "claude"
+    build(claude)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    monkeypatch.setenv("REKOL_HOME", str(home))
+
+    cfg = load_config()
+    finding = _transcript_source_finding(claude / "projects", cfg, HashingEmbedder(dim=384))
+    assert finding is not None, f"{shape}: no finding at all"
+    assert finding.status is Status.PROBLEM, f"{shape}: {finding.status} — {finding.detail}"
+    assert "cannot be used" in finding.detail, finding.detail
+    assert finding.remedy, f"{shape}: a problem with no remedy"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this relies on")
+def test_one_locked_out_slug_among_several_is_reported(tmp_path: Path, monkeypatch) -> None:
+    """A PARTIAL lockout was silent whenever the bad slug was not listed first.
+
+    The probe stat'd `next(iterdir(), None)` — one sample. Measured by review
+    (2026-11-08): four slugs with `charlie` at mode 000 produced no finding,
+    while `Path.glob("**/*.jsonl")` — what `sessions/ingest.py` walks — returned
+    3 of 4 transcripts. A whole project's history missing and doctor silent.
+
+    Also: stat'ing the child is not enough. Stat on a mode-000 DIRECTORY
+    succeeds, because the search bit that governs it is the parent's. The probe
+    has to ask whether the slug can be read AND traversed.
+    """
+    from rekol.cli_doctor import _transcript_source_finding
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    projects = tmp_path / "claude" / "projects"
+    projects.mkdir(parents=True)
+    for slug in ("alpha", "bravo", "charlie", "delta"):
+        (projects / slug).mkdir()
+        (projects / slug / "s.jsonl").write_text('{"type":"user"}\n')
+    (projects / "charlie").chmod(0o000)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("REKOL_HOME", str(home))
+
+    try:
+        # The indexer's own walk silently loses it, which is why this matters.
+        assert len(list(projects.glob("**/*.jsonl"))) == 3
+        finding = _transcript_source_finding(projects, load_config(), HashingEmbedder(dim=384))
+        assert finding is not None, "a locked-out slug produced no finding"
+        assert finding.status is Status.PROBLEM, finding.detail
+    finally:
+        (projects / "charlie").chmod(0o755)
+
+    # And it goes quiet once the permission is fixed, so it is not a check that
+    # simply always fires.
+    assert _transcript_source_finding(projects, load_config(), HashingEmbedder(dim=384)) is None
+
+
+def test_a_dangling_sessions_db_link_is_unknown_not_unbuilt(tmp_path: Path, monkeypatch) -> None:
+    """`sessions.db -> gone` read as "not built yet", with a remedy that fails.
+
+    The remedy offered was `rekol session-index --full`, which writes through
+    the same broken link. UNKNOWN is the honest answer: the name is there and
+    only its target is missing (review, 2026-11-08).
+    """
+    from rekol.cli_doctor import _prior_index_state, _PriorIndex
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(cache))
+    embedder = HashingEmbedder(dim=384)
+
+    cfg = load_config()
+    # Control FIRST, so the absent case is known to differ from the broken one.
+    assert _prior_index_state(cfg, embedder)[0] is _PriorIndex.ABSENT
+
+    cfg.sessions_db_path.symlink_to(tmp_path / "nowhere-at-all.db")
+    assert _prior_index_state(cfg, embedder)[0] is _PriorIndex.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("shape", "target"),
+    [
+        # SQLite can create the file through the link, so nothing crashes — but
+        # "not built yet" is still false, and the DB would land outside the
+        # index dir.
+        ("the link target's parent exists", "nowhere.db"),
+        # SQLite cannot create it, so the remedy doctor used to offer exits 1
+        # with sqlite3.OperationalError and a traceback.
+        ("the link target's parent is missing", "gone-dir/sessions.db"),
+    ],
+)
+def test_a_dangling_sessions_db_is_a_problem_in_doctors_output(
+    tmp_path: Path, monkeypatch, shape: str, target: str
+) -> None:
+    """ASSERTED ON WHAT DOCTOR PRINTS, not on a helper (QA, 2026-11-08).
+
+    My first fix for this changed `_prior_index_state` and my test asserted on
+    `_prior_index_state`. The **visible** `session index` check reads the DB
+    separately, so it still printed `not built yet` with the remedy
+    `rekol session-index --full` — and QA measured that remedy crashing:
+    `sqlite3.OperationalError: unable to open database file`, exit 1, traceback.
+    Offering a remedy that crashes is the worst version of the thing this PR
+    exists to prevent.
+
+    It is also the same mistake a review caught in #224 earlier the same day:
+    a helper returning the right answer is not the claim that the user sees the
+    right thing. So this goes through `run_doctor` and reads the finding.
+    """
+    from rekol.cli_doctor import run_doctor
+    from rekol.embeddings import HashingEmbedder
+
+    home = _memory_home_for_doctor(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (tmp_path / "claude" / "projects").mkdir(parents=True)
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    monkeypatch.setenv("REKOL_INDEX_DIR", str(cache))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+
+    cfg = load_config()
+    cfg.sessions_db_path.symlink_to(tmp_path / target)
+
+    report = run_doctor(cfg, HashingEmbedder(dim=384))
+    session = [f for f in report.findings if f.label == "session index"]
+    assert session, f"{shape}: no session index finding at all"
+    finding = session[0]
+
+    assert finding.status is Status.PROBLEM, f"{shape}: {finding.status} — {finding.detail}"
+    assert "not built yet" not in finding.detail, (
+        f"{shape}: still claims the index was never built:\n  {finding.detail}"
+    )
+    assert "broken symlink" in finding.detail, finding.detail
+    # The remedy must not be the one that crashes, and must name the link.
+    assert finding.remedy and finding.remedy != "rekol session-index --full", finding.remedy
+    assert str(cfg.sessions_db_path) in finding.remedy, finding.remedy
+    assert "remove or repoint" in finding.remedy, finding.remedy

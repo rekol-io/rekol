@@ -90,6 +90,43 @@ def _in_hidden_dir(path: Path, root: Path) -> bool:
     return any(part.startswith(".") for part in rel.parts)
 
 
+def is_in_indexed_layer(path: Path, root: Path) -> bool:
+    """True when :func:`_iter_memory_files` would reach ``path``.
+
+    The indexer does not walk the whole memory home — it walks the layer dirs
+    and ``projects/``. Anything else is simply never indexed, and a check that
+    asks "is there anything to index here?" with a filesystem-wide walk gets a
+    different answer: a home holding only a stray ``note.md`` at its root, or
+    only ``tasks/t.md``, reads as having work to do when the indexer would index
+    nothing (Codex, 2026-11-06).
+
+    Deliberately a predicate rather than a second walk, because ``doctor`` needs
+    ``os.walk``'s ``onerror`` to see a directory it cannot read — ``glob``
+    swallows that (#232). The two are pinned together by a property test that
+    compares this against the real walk over a fixture tree, so they cannot
+    drift apart in silence.
+
+    Hidden names are NOT excluded here: the indexer's globs match them, so
+    ``always/.draft.md`` really is indexed and really is something to rebuild
+    for. That is what the walk does, and this follows the walk rather than what
+    the exclusion list looks like it should say.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    parts = rel.parts
+    if len(parts) < 2:
+        return False  # a stray file directly in the memory home
+    if parts[0] in INDEXED_DIRS:
+        return True
+    if parts[0] != PROJECTS_DIR:
+        return False
+    if len(parts) == 2:
+        return True  # flat projects/<name>.md
+    return len(parts) >= 4 and parts[2] in INDEXED_DIRS
+
+
 def is_non_memory(path: Path, root: Path) -> bool:
     """True for paths excluded from memory ON PURPOSE (see NON_MEMORY_*)."""
     try:

@@ -61,11 +61,11 @@ from rekol.bootstrap_state import (
     save_state,
     state_path_for,
 )
-from rekol.cli_common import guard_curated_schema
+from rekol.cli_common import guard_curated_schema, guard_session_store_identity
 from rekol.config import Config, load_config, load_rekolignore_patterns
 from rekol.corpus_propose import dedupe_against_memory, recall_corpus_candidates
 from rekol.embeddings import get_embedder
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
+from rekol.sessions.store import SessionStore
 from rekol.store import IndexStore
 
 # How many candidates to recall before scoping. Generous relative to T2's
@@ -129,11 +129,8 @@ def _recall_and_dedupe(cfg: Config):
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
 
-        try:
-            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
-        except SessionStoreDimMismatchError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(2) from exc
+        # Width AND identity, through the one helper (#229).
+        guard_session_store_identity(session_store, cfg, embedder)
         candidates = recall_corpus_candidates(
             session_store,
             embedder,

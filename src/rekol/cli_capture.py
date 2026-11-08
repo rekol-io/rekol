@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 import yaml
 
+from rekol.atomic_write import AtomicWriteError, write_text_atomically
 from rekol.chunker import chunk_body
 from rekol.cli_common import guard_curated_schema, warn_skipped_files
 from rekol.config import load_config
@@ -206,7 +207,10 @@ def main(
                     f"a parallel memory.  Pass --force to write anyway."
                 )
 
-    dest.write_text(frontmatter + body_text)
+    try:
+        write_text_atomically(dest, frontmatter + body_text)
+    except AtomicWriteError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"wrote {dest}")
 
     idx = Indexer(
