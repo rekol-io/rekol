@@ -68,6 +68,25 @@ INVOCATION_SCRIPTS = ("uninstall.sh", "install.sh")
 # failed the moment the wrapper stopped naming its script.
 INDIRECT_INVOCATION = re.compile(r"COMPONENT_DIR\}?/\$\{?[A-Za-z_]")
 
+# A line that EXECUTES one of the scripts through a path, however that path was
+# built. This is the rule the `COMPONENT_DIR` test below could not express.
+#
+# A review (2026-11-08) showed the gap with a MIXED file: a valid wrapper plus
+# one @test doing `d="$COMPONENT_DIR"; run "$d/uninstall.sh"`. The split
+# assignment means `COMPONENT_DIR` never appears on the `run` line, so the
+# "prose, not an invocation" skip dropped it and the file reported
+# `guard violations: 0`. The all-blind version of the same shape was caught, but
+# only by the anti-vacuity rule — so the fixture for it proved less than it
+# looked, and one real invocation hiding among guarded ones went unseen.
+#
+# Keyed on the RUNNER rather than on how the path was spelled, because spelling
+# is what the last three rounds of this check kept failing to enumerate.
+EXECUTED_SCRIPT = re.compile(
+    r"(?:^|[;&|]|\s)(?:run|bash|sh|exec|source|\.)\s+[^\s;&|]*/(?:"
+    + "|".join(script.replace(".", r"\.") for script in ("uninstall.sh", "install.sh"))
+    + r")\b"
+)
+
 FUNCTION_START = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{")
 TEST_START = re.compile(r"^@test\s")
 
@@ -140,11 +159,14 @@ def _scan(lines: list[str]) -> tuple[list[Violation], dict[str, _Wrapper]]:
 
         names_a_script = any(script in code for script in INVOCATION_SCRIPTS)
         runs_a_variable_path = bool(INDIRECT_INVOCATION.search(code))
-        if not (names_a_script or runs_a_variable_path):
+        executes_a_script = bool(EXECUTED_SCRIPT.search(code))
+        if not (names_a_script or runs_a_variable_path or executes_a_script):
             continue
-        # Prose and assertions that merely name the script are not invocations;
-        # reaching it goes through COMPONENT_DIR.
-        if "COMPONENT_DIR" not in code:
+        # Prose and assertions that merely NAME the script are not invocations,
+        # and reaching one of those goes through COMPONENT_DIR. But a line that
+        # EXECUTES the script is an invocation however its path was built — that
+        # is the mixed-file gap, so the runner check overrides this skip.
+        if "COMPONENT_DIR" not in code and not executes_a_script:
             continue
 
         if current_function is None:

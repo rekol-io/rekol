@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The guard checker missed a bypass hiding among guarded calls (#223, review).** A **mixed**
+  file — a valid `rekol_bats_run_destructive` wrapper plus one `@test` doing
+  `d="$COMPONENT_DIR"; run "$d/uninstall.sh"` — reported `guard violations: 0`. The checker required
+  `COMPONENT_DIR` on the same line as the script name, so the split assignment meant the `run` line
+  looked like prose that merely names the script, while the wrapper above satisfied every other
+  rule. The existing `reject-split-variable-invocation.bats` fixture has no guarded call at all, so
+  the anti-vacuity rule caught it — proving the checker notices an **empty** inventory, not that it
+  notices a bypass.
+  It keys on the **runner** now (`run`/`bash`/`sh`/`exec`/`source` of a path ending in one of the
+  scripts), however that path was spelled, because spelling is what three rounds of this check kept
+  failing to enumerate. All nine existing fixtures still classify correctly, the accept case
+  included, and `reject-split-variable-among-guarded.bats` covers the mixed shape — picked up
+  automatically by the loop that asserts every `reject-*` fixture fails.
+  Two residual gaps from the same review are filed as **#256**, with the measurement that matters:
+  `setup_file`'s real install already sandboxes `HOME` alongside `REKOL_HOME` and the `XDG_*` dirs,
+  so it is not the 2026-08-18 shape; and adding `HOME` to the guard's override list would make it
+  refuse on every run, because the guard looks before `HOME` is overridden per invocation.
 - **The sandbox guard never resolved the FINAL path component, and the checker could still be
   blinded (#223, Codex).**
   `cd -P` resolves every component of a *directory* path, so an escaping directory symlink was
