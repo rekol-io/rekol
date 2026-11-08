@@ -77,6 +77,34 @@ follow [Semantic Versioning](https://semver.org/).
   Also recognised as rekol's: `<tools-home>/hooks/auto-reindex.sh`, by the script name rather than
   the path, because that path has changed three times (`memory-tools` before the rebrand, then
   `$HOME/.local/share/rekol`, then `--tools-home`) and an older install's string is not this one's.
+- **A model change crashed `session-index` and `search`, and the message then said to `rm` your
+  transcript store (#229, #230).** Found independently by the 0.6.0 fan-out review and by QA.
+  `SessionStoreModelMismatchError` was caught at **none** of `reconcile_embedder`'s four call
+  sites. Three of them caught its *sibling* `SessionStoreDimMismatchError`, and an `except` written
+  for one does not catch the other — so a user who merely changed `embedding_model` in their config
+  got a full traceback and exit 1, with the useful message at the bottom. `session-index` is the
+  SessionEnd hook path, whose contract — stated in that very file — is "never a crash".
+  Four sites is **how** that was missed, so the fix is one site: `reconcile_embedder` is now called
+  only from `guard_session_store_identity`, which reports both sibling errors and exits 2, matching
+  what the curated path already did. A test walks the package's AST and fails if the call appears
+  anywhere else, so a fifth caller cannot reintroduce partial handling. The now-dead
+  `except SessionStoreDimMismatchError` in `cli_session_index` is **removed, not relocated** — the
+  error has exactly one raiser, reached only through the helper, and a dead `except` that reads as
+  a guard answers "is this handled?" with a yes nothing can reach.
+  **The message now says what to CHECK before what to DELETE.** It led with
+  `rm '<path>/sessions.db' && rekol session-index --full` — and this guard fires precisely when a
+  test-configured run has resolved someone's *real* store through an inherited `REKOL_INDEX_DIR`,
+  so that advice asked the operator to finish the destruction the guard had just prevented. It now
+  names `REKOL_INDEX_DIR`, says it is the highest-precedence setting and used verbatim, and offers
+  the destructive line only afterwards and only when the store's provenance is known. The width
+  message had the identical defect and got the identical fix; fixing one would have left the advice
+  pointed the wrong way on half the paths.
+  On an **unstamped** store there is now no destructive remedy at all. The provenance sentinel was
+  the literal string `"unknown (store predates identity stamping)"`, which rendered as *restore
+  'unknown (store predates identity stamping)' in your config* — advice that cannot be followed,
+  because it is not a model name. It is `None` now and the message branches on it. All four commands
+  are exercised end to end, asserting the exit code **and** the absence of a traceback, since exit 1
+  with the message under a stack trace would pass a "the message is present" check.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
