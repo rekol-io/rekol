@@ -45,6 +45,7 @@ from pathlib import Path
 import click
 import frontmatter
 
+from rekol.atomic_write import AtomicWriteError, write_text_atomically
 from rekol.cli_common import guard_curated_schema, warn_skipped_files
 from rekol.config import Config, load_config
 from rekol.embeddings import get_embedder
@@ -60,6 +61,19 @@ _FORGET_CAVEAT = (
     "live file is still present, a later session-index re-discovers it; exclude the "
     "project (exclude_paths / .rekolignore) to keep it out for good."
 )
+
+
+def _write_or_explain(path: Path, text: str) -> None:
+    """Write the memory atomically, or fail with one sentence the user can act on.
+
+    A raw traceback here is worse than unhelpful: the only thing the user wants
+    to know is whether their file survived, and a stack trace does not say.
+    `write_text_atomically` guarantees it did, so this just says so.
+    """
+    try:
+        write_text_atomically(path, text)
+    except AtomicWriteError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @click.command()
@@ -140,7 +154,7 @@ def _invalidate_memory_file(
     if reason:
         post.content = post.content.rstrip() + f"\n\n<!-- invalidated {today_date}: {reason} -->\n"
 
-    target.write_text(frontmatter.dumps(post) + "\n")
+    _write_or_explain(target, frontmatter.dumps(post) + "\n")
     click.echo(f"invalidated {target} (at={post.metadata['invalidated_at']})")
 
     # Reindex so the new frontmatter is picked up. The body changed if a reason

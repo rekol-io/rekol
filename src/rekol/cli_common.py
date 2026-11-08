@@ -9,6 +9,11 @@ from rekol.embeddings import BaseEmbedder
 from rekol.index_lock import IndexBusyError, index_lock_path, index_write_lock
 from rekol.indexer import Indexer, IndexStats
 from rekol.safety import RealIndexClobberError
+from rekol.sessions.store import (
+    SessionStore,
+    SessionStoreDimMismatchError,
+    SessionStoreModelMismatchError,
+)
 from rekol.store import IndexModelMismatchError, IndexStore
 
 # The actionable message every read/write path falls back to when it can't
@@ -38,6 +43,36 @@ def warn_skipped_files(stats: IndexStats) -> None:
     )
     for path, reason in stats.skipped_files:
         click.echo(f"    {path} — {reason}", err=True)
+
+
+def guard_session_store_identity(store: SessionStore, cfg: Config, embedder: BaseEmbedder) -> None:
+    """Reconcile the sessions store's embedder, or exit 2 with the message only.
+
+    THE ONLY PLACE ``reconcile_embedder`` IS CALLED FROM, and that is the fix
+    rather than a tidy-up (#229). It was called at four sites, three of which
+    caught ``SessionStoreDimMismatchError`` and none of which caught its sibling
+    ``SessionStoreModelMismatchError`` — an ``except`` written for one does not
+    catch the other. So a user who simply changed ``embedding_model`` in their
+    config got a full traceback and exit 1 on their next ``session-index`` or
+    ``search``, with the useful message at the bottom. ``cli_session_index`` is
+    also the SessionEnd hook path, whose own contract is "never a crash".
+
+    Four sites is HOW that was missed, so the answer is one site. A test walks
+    the package's AST and fails if ``reconcile_embedder`` is called anywhere but
+    here, which is what stops a fifth caller from reintroducing it.
+
+    Exit 2 and the message alone, matching what the curated path already does
+    for ``IndexModelMismatchError``.
+    """
+    try:
+        store.reconcile_embedder(cfg.embedding_model, embedder.dim)
+    except (SessionStoreModelMismatchError, SessionStoreDimMismatchError) as exc:
+        # Closing here as well as in the caller's own cleanup: sqlite3's close
+        # is idempotent, and leaving it to the caller meant the one site using a
+        # bare `try` leaked the connection on the way out.
+        store.close()
+        click.echo(str(exc), err=True)
+        raise SystemExit(2) from exc
 
 
 def guard_curated_schema(store: IndexStore) -> None:
