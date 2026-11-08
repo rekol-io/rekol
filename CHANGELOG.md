@@ -29,7 +29,17 @@ follow [Semantic Versioning](https://semver.org/).
   Incidental and untested is how a fix regresses, so all five sites now carry a note saying why the
   shape must stay, and two tests pin it: no hook command may be interpolated into a `run()` string,
   and the two call shapes are **executed** through `eval` to show one strips the quotes and the
-  other does not. A real tag-to-tag upgrade turned out not to be reproducible here — on a fresh
+  other does not.
+  The first version of that source guard was **partial**, and Codex caught it: it keyed on the
+  variable's NAME ending in `_CMD`, so it missed the fifth writer site —
+  `--arg cmd '${REKOL_INVOCATION_QUOTED} review --nudge'`, the SessionEnd review-nudge handler,
+  whose variable is not called `*_CMD` and carries a tail after the brace. It keys on the `--arg cmd`
+  value being single-quoted and interpolated now, which is the shape that actually breaks, and its
+  controls assert **both** release shapes match and that this head's shape and `#222`'s path values
+  do not. Restoring either writer shape fails the guard.
+  Five code comments claimed a `v0.5.5 -> HEAD upgrade test` pins this. **No such test exists** — I
+  wrote one, it could not reproduce the bug, and I removed it; the five comments outlived it. They
+  now point at the source guard and QA's real-upgrade run. A real tag-to-tag upgrade turned out not to be reproducible here — on a fresh
   `settings.json` the snippet merge adds those handlers first, so the add-handler step no-ops, and
   chaining real old installers needs a provisioned venv per tag. QA measured the real upgrades from
   the outside; rather than ship a test whose fixture does not reproduce the bug, the source check
@@ -56,6 +66,15 @@ follow [Semantic Versioning](https://semver.org/).
   same allowlist rule, **as the command itself** and anchored at its start; anything more exotic
   goes unreported, which is the safe way round for a check whose failure mode is telling a user
   their own command is broken.
+  The OK line said "every wired hook tries the install's recorded binary before PATH", which claimed
+  more than the check inspects: a PATH-first hook whose path the allowlist refuses — one containing a
+  space, say — got that ✓. It now reads "every rekol hook **this check recognises** tries the
+  install's recorded binary before PATH — a PATH-first command whose path is not one rekol writes is
+  left alone and not inspected".
+  Two further ownership errors are filed rather than fixed (#254): `rekol search '_hook
+  session-tasks'` is reported as a stale hook, because the handler is matched as a substring
+  independently of the invocation; and an unquoted `${HOME}/bin/rekol` is accepted as ours when by
+  #239's own rule an expansion should not be. Both make doctor report too much, never too little.
   One gap is recorded rather than left to be found: `_HANDLER_RE` matches `_hook <name>`, so the two
   owned hooks that are not `_hook` handlers — `session-index --incremental` and `review --nudge` —
   are not reported here even in a PATH-first form. Widening it would change `unrunnable_hooks`,

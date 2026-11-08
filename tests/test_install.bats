@@ -2302,6 +2302,9 @@ JSON
   # verbatim. That came from bfcd3a9, made for the unrelated bash-5.2
   # patsub_replacement fix, so the fix was incidental and untested until now.
   #
+  # ALL FIVE WRITER SITES, including the SessionEnd review-nudge one that the
+  # first version of this guard missed because it keyed on the variable's name.
+  #
   # A SOURCE CHECK, AND WHY NOT A REAL UPGRADE. I tried a real tag-to-tag
   # upgrade first and could not make it reproduce: on a fresh settings.json the
   # snippet merge adds these handlers before the add-handler step, so that step
@@ -2310,15 +2313,23 @@ JSON
   # resolve the local index dir from the venv"). QA measured the real upgrades
   # from the outside. Shipping a test whose fixture does not reproduce the bug
   # would be worse than this, so this asserts the mechanism is absent instead.
-  # Scoped to a HOOK COMMAND (`*_CMD`) and to non-comment lines. My first
-  # version matched any interpolated value on any line and found two things it
-  # should not: this file's own comment quoting the broken shape as
-  # documentation, and `run "jq --arg val '${RESOLVED_HOME}' --arg th
-  # '${TOOLS_HOME}'"` — a real interpolation, but of PATHS. A path with an
-  # apostrophe breaks the same way and that is #222, which product ruled stays
-  # out of this change; widening here would have made this test fail for a bug
-  # it is not about.
-  pattern='^[^#]*run "jq .*--arg [a-z]+ .\$\{[A-Z_]*CMD\}'
+  # KEYED ON THE `--arg cmd` VALUE BEING SINGLE-QUOTED AND INTERPOLATED, which
+  # is the shape that breaks, rather than on the variable's NAME. My first
+  # version required the name to end in `_CMD` and therefore missed the fifth
+  # writer site — `--arg cmd '${REKOL_INVOCATION_QUOTED} review --nudge'`, where
+  # the variable is not called `*_CMD` and carries a tail after the brace
+  # (Codex, 2026-11-07). That site is the SessionEnd review-nudge handler and it
+  # is as much the tag-hold bug as the other four, so missing it made this guard
+  # a partial one.
+  #
+  # `--arg cmd` and not `--arg [a-z]+`: the other interpolated value in this
+  # file is `run "jq --arg val '${RESOLVED_HOME}' --arg th '${TOOLS_HOME}'"`, a
+  # real interpolation but of PATHS. A path containing an apostrophe breaks the
+  # same way and that is #222, which product ruled stays out of this change;
+  # matching it here would fail this test for a bug it is not about.
+  # `^[^#]*` keeps this file's own comments, which quote the broken shape as
+  # documentation, from matching.
+  pattern='^[^#]*run "jq .*--arg cmd '"'"'[^'"'"']*\$\{'
   bad="$(grep -nE "$pattern" "$COMPONENT_DIR/install.sh" || true)"
   [ -z "$bad" ] || {
     echo "FAIL: a hook command is interpolated into a run() string, so eval re-parses it:"
@@ -2326,12 +2337,27 @@ JSON
     echo 'Pass it by variable name instead: --arg cmd "$REKOL_JQ_CMD"'
     false; }
 
-  # NOT VACUOUS: the detector must match the broken shape, or this passes
-  # because the pattern is wrong rather than because the code is right.
+  # NOT VACUOUS, and BOTH release shapes, because the one-shape version of this
+  # control is what let the fifth site through. A detector that matches only the
+  # `*_CMD` shape passes its own probe while missing half the writers.
   probe="$TESTROOT/interp-probe.sh"
-  printf '%s\n' '    run "jq --arg cmd '"'"'${UPDATE_CMD}'"'"' .foo"' > "$probe"
-  grep -qE "$pattern" "$probe" || {
-    echo "FAIL: the detector does not match the shape it exists to catch"; false; }
+  : > "$probe"
+  printf '%s\n' '    run "jq --arg cmd '"'"'${UPDATE_CMD}'"'"' .foo"' >> "$probe"
+  printf '%s\n' '    run "jq --arg cmd '"'"'${REKOL_INVOCATION_QUOTED} review --nudge'"'"' .foo"' >> "$probe"
+  hits="$(grep -cE "$pattern" "$probe" || true)"
+  [ "$hits" -eq 2 ] || {
+    echo "FAIL: the detector matched $hits of 2 release shapes, so it is partial:"
+    cat "$probe"
+    false; }
+
+  # And it must NOT match this head's shape, or it would fire on correct code.
+  ok_probe="$TESTROOT/interp-probe-ok.sh"
+  printf '%s\n' '    run "jq --arg cmd \"\$REKOL_JQ_CMD\" .foo"' > "$ok_probe"
+  printf '%s\n' '      run "jq --arg val '"'"'${RESOLVED_HOME}'"'"' .foo"' >> "$ok_probe"
+  ! grep -qE "$pattern" "$ok_probe" || {
+    echo "FAIL: the detector matches a correct call, or a path value (#222):"
+    grep -nE "$pattern" "$ok_probe"
+    false; }
 }
 
 @test "eval strips the quotes from an interpolated command but not a named one (#221)" {

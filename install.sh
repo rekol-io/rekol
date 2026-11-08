@@ -1421,8 +1421,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
     # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
     # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
-    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
-    # what pins it. Do not inline this variable back into the jq string.
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${COV_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1476,8 +1483,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
     # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
     # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
-    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
-    # what pins it. Do not inline this variable back into the jq string.
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${TASKS_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1534,8 +1548,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
     # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
     # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
-    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
-    # what pins it. Do not inline this variable back into the jq string.
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${UPDATE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -1920,8 +1941,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
     # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
     # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
-    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
-    # what pins it. Do not inline this variable back into the jq string.
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${NUDGE_CMD}"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
@@ -2010,8 +2038,15 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
     # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
     # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
-    # incidental and untested until now; the v0.5.5 -> HEAD upgrade test is
-    # what pins it. Do not inline this variable back into the jq string.
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
     REKOL_JQ_CMD="${REKOL_INVOCATION_QUOTED} review --nudge"
     run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \

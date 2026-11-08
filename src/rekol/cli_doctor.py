@@ -1198,7 +1198,11 @@ def _check_hook_resolution_order() -> list[Finding]:
             Finding(
                 label="hook resolution order",
                 status=Status.OK,
-                detail="every wired hook tries the install's recorded binary before PATH",
+                detail=(
+                    "every rekol hook this check recognises tries the install's "
+                    "recorded binary before PATH — a PATH-first command whose path "
+                    "is not one rekol writes is left alone and not inspected"
+                ),
             )
         ]
     lines = "; ".join(f"{name} — {form}" for name, form in stale)
