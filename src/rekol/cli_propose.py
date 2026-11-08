@@ -29,7 +29,7 @@ from pathlib import Path
 
 import click
 
-from rekol.cli_common import guard_curated_schema
+from rekol.cli_common import guard_curated_schema, guard_session_store_identity
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.corpus_propose import (
     dedupe_against_memory,
@@ -37,7 +37,7 @@ from rekol.corpus_propose import (
     render_corpus_proposal,
 )
 from rekol.embeddings import get_embedder
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
+from rekol.sessions.store import SessionStore
 from rekol.store import IndexStore
 
 # Common leading whitespace + optional bullet marker, applied uniformly.
@@ -173,14 +173,10 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
 
-        # The vector tier can only be queried at the index's own width; fail with
-        # the same actionable message the ingest/search paths use rather than
-        # letting sqlite-vec raise a cryptic width error mid-query.
-        try:
-            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
-        except SessionStoreDimMismatchError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(2) from exc
+        # Width AND identity, with the same message and exit code as the ingest
+        # and search paths — one helper rather than a per-site `except` that
+        # catches only one of the two sibling errors (#229).
+        guard_session_store_identity(session_store, cfg, embedder)
 
         candidates = recall_corpus_candidates(
             session_store, embedder, exclude_patterns=exclude_patterns
