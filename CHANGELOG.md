@@ -19,6 +19,20 @@ follow [Semantic Versioning](https://semver.org/).
   fourteenth free to do it again: **isolation must not be revertible by the code it isolates.**
   `conftest` now holds its patches in a private `pytest.MonkeyPatch` undone at teardown, and a
   `pytest_runtest_call` wrapper **fails** any test left pointing a steering var outside tmp.
+  A four-reviewer panel then found three more, two of them in the tests meant to pin all this:
+  the **undo test was vacuous in CI** — it asserted the variables were ABSENT after `undo()`, which
+  is also what a reverted fixture produces when nothing was exported, so it caught the regression on
+  a developer laptop and never on a clean runner; it now asserts the variables conftest SETS are
+  still set and still under tmp, and the reviewer's mutant fails in a clean environment. The **hook
+  wrapper was never exercised** — every test called the helper directly, so disabling the raise
+  passed 5/5; two subprocess tests now run an inner pytest session and pin both the raise and the
+  gate that stops it masking a test's own failure. And two tests **broke when `HOME` is inside a
+  temp dir**, which is precisely the sandbox shape this guard exists for, so the "real directory"
+  they need is now found rather than assumed to be `~`.
+  Also corrected: the comment claiming the resolution-time check was "filed as a follow-up" when it
+  was not — it is **#255** now — and the claim that the variable list covers *every* steering
+  variable, which it does not (`CLAUDE_SETTINGS_PATH` is read raw by `cli_resume.py` and is not
+  covered; `REKOL_TOOLS_HOME` is listed and read only by `install.sh`).
   **The guard asks `config.py` where it would GO**, rather than re-deriving the expansion itself —
   because re-deriving was wrong twice. Codex caught `REKOL_INDEX_DIR='~'`, whose raw string neither
   exists nor sits under tmp. A review then found the same class again: a set-but-**empty** or

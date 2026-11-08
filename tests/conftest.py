@@ -56,7 +56,7 @@ def _isolate_index_cache(tmp_path_factory) -> None:
     caught a migrate test doing exactly that and then running the CLI, which
     tried to write into Leon's real memory home; a local run has no sandbox and
     would have succeeded.
-    Thirteen tests in this suite call ``undo()``. Converting all of them would
+    Many tests in this suite call ``undo()`` (21 occurrences across 4 files). Converting all of them would
     leave the next one free to do it again: **isolation must not be revertible
     by the code it isolates.** A private instance, undone in teardown, is what
     makes that true, and it fixes every site at once.
@@ -108,7 +108,15 @@ def _apply_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
     monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
 
 
-# Every env var that can steer rekol at a real directory on this machine.
+# The env vars this guard covers. NOT "every variable that can steer rekol" —
+# that is what this comment used to claim, and a review disproved it (2026-11-08):
+#   * `CLAUDE_SETTINGS_PATH` is read by `cli_resume.py` and points rekol at a
+#     settings.json. It is NOT covered: the code reads it raw, with no
+#     `expanduser`, so resolving it here as the others are resolved would flag a
+#     `~` value the code would never expand. Covering it needs its own rule (#255).
+#   * `REKOL_TOOLS_HOME` IS listed and nothing under `src/` reads it — it is
+#     `install.sh`'s. So this is a reviewed set, not one derived from the code,
+#     and it has to be revisited whenever a new destination appears.
 _HOME_STEERING_VARS = (
     "REKOL_HOME",
     "MEMORY_HOME",
@@ -264,7 +272,9 @@ def pytest_runtest_call(item):  # noqa: ANN001, ANN201
     context exits before this looks.
     Checking at resolution time instead — refusing inside `load_config()` when
     the destination is outside tmp under pytest — is the version that would
-    catch those, and it is filed as a follow-up rather than built here.
+    catch those. That is **#255**, filed after a review pointed out this comment
+    claimed it had been filed when it had not. An `xfail` test can also absorb
+    the AssertionError below as an expected failure, which is in #255 too.
     """
     outcome = yield
     offenders = _real_data_offenders()
