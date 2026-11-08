@@ -19,6 +19,21 @@ follow [Semantic Versioning](https://semver.org/).
   fourteenth free to do it again: **isolation must not be revertible by the code it isolates.**
   `conftest` now holds its patches in a private `pytest.MonkeyPatch` undone at teardown, and a
   `pytest_runtest_call` wrapper **fails** any test left pointing a steering var outside tmp.
+  **The guard asks `config.py` where it would GO**, rather than re-deriving the expansion itself —
+  because re-deriving was wrong twice. Codex caught `REKOL_INDEX_DIR='~'`, whose raw string neither
+  exists nor sits under tmp. A review then found the same class again: a set-but-**empty** or
+  whitespace value, which `config.py` treats as unset and resolves to its REAL default while the env
+  scan skipped it for being falsy. Measured, with a tmp `REKOL_HOME`: `XDG_CACHE_HOME=""` and
+  `REKOL_INDEX_DIR=""` both land in `~/.cache/rekol/<hash>`, `XDG_DATA_HOME=""` in
+  `~/.local/share/rekol/archive`, and `CLAUDE_CONFIG_DIR="   "` in `~/.claude/projects` — all four
+  silent. The guard now checks the four destinations `load_config()` resolves (it is read-only, so
+  it cannot create what it warns about) and keeps the env scan as a second layer for when no home is
+  configured. One of my own tests asserted the whitespace case was a harmless sentinel; it was not,
+  and it now asserts the opposite.
+  Also fixed: a set-but-empty `TMPDIR` made `Path("")` resolve to the CWD, so the repo root counted
+  as a temp root and everything inside it was exempt. `tempfile.gettempdir()` ignores an empty
+  TMPDIR. And the isolating fixture's `try` now opens before its first patch, so a failure
+  mid-setup cannot leave patches applied with no teardown.
   **The guard resolves each value the way the code does** before testing it, which is the second
   thing it got wrong: `REKOL_INDEX_DIR='~'` was skipped twice over — the literal `~` neither
   resolves under tmp nor exists — while `config.py` expands it with `os.path.expanduser` and writes

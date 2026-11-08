@@ -30,6 +30,7 @@ Tests that need the resolved cache path import ``cache_dir_for`` from
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,18 @@ def _isolate_index_cache(tmp_path_factory) -> None:
     makes that true, and it fixes every site at once.
     """
     monkeypatch = pytest.MonkeyPatch()
+    # The try starts HERE, before the first patch. It used to open further down,
+    # so an exception from `mktemp` or an early `setenv` left the patches already
+    # applied with no teardown to undo them (review, 2026-11-08).
+    try:
+        _apply_isolation(monkeypatch, tmp_path_factory)
+        yield
+    finally:
+        monkeypatch.undo()
+
+
+def _apply_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:  # noqa: ANN001
+    """Point every destination that steers rekol at a throwaway dir."""
     cache_root = tmp_path_factory.mktemp("xdg-cache")
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
     monkeypatch.delenv("REKOL_INDEX_DIR", raising=False)
@@ -93,10 +106,6 @@ def _isolate_index_cache(tmp_path_factory) -> None:
     # that needs a populated projects dir points claude_projects_dir at its own.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
     monkeypatch.delenv("CLAUDE_SETTINGS_PATH", raising=False)
-    try:
-        yield
-    finally:
-        monkeypatch.undo()
 
 
 # Every env var that can steer rekol at a real directory on this machine.
@@ -133,7 +142,11 @@ def _is_under_a_temp_root(value: str) -> bool:
         resolved = _as_the_code_resolves_it(value).resolve()
     except (OSError, ValueError):
         return False
-    roots = [Path(os.environ.get("TMPDIR", "/tmp")), Path("/tmp"), Path("/private/tmp")]
+    # `tempfile.gettempdir()`, not `os.environ.get("TMPDIR", "/tmp")`: a
+    # set-but-EMPTY TMPDIR makes that `get` return "", and `Path("").resolve()`
+    # is the CWD — so the repo root would count as a temp root and every path
+    # inside it would be exempt. gettempdir ignores an empty TMPDIR (verified).
+    roots = [Path(tempfile.gettempdir()), Path("/tmp"), Path("/private/tmp")]
     for root in roots:
         try:
             resolved.relative_to(root.resolve())
@@ -159,6 +172,47 @@ def _real_data_offenders() -> list[str]:
     caught, because this runs after the test body, when it exists.
     """
     offenders = []
+
+    # FIRST, THE DESTINATIONS THE CODE WOULD ACTUALLY RESOLVE. This is the only
+    # check that cannot drift, because it asks `config.py` where it would go
+    # rather than re-deriving the expansion here — and re-deriving is what has
+    # now been wrong twice. Codex caught `REKOL_INDEX_DIR='~'`, where the raw
+    # string neither existed nor sat under tmp. Then a review found the same
+    # class again: a set-but-EMPTY or whitespace value, which `config.py` treats
+    # as unset and resolves to its REAL default, while the env scan below skips
+    # it for being falsy. Measured, with a tmp REKOL_HOME set:
+    #   XDG_CACHE_HOME=""      -> ~/.cache/rekol/<hash>          (silent)
+    #   REKOL_INDEX_DIR=""     -> ~/.cache/rekol/<hash>          (silent)
+    #   XDG_DATA_HOME=""       -> ~/.local/share/rekol/archive   (silent)
+    #   CLAUDE_CONFIG_DIR="  " -> ~/.claude/projects             (silent)
+    # `load_config()` is read-only — it resolves paths and does not create them
+    # — so calling it here cannot make the directory it is warning about.
+    try:
+        from rekol.config import load_config
+
+        cfg = load_config()
+    except Exception:  # noqa: BLE001 — no home configured is the ordinary case
+        cfg = None
+    if cfg is not None:
+        for label, dest in (
+            ("memory_home", cfg.memory_home),
+            ("index_dir", cfg.index_dir),
+            ("archive_dir", cfg.archive_dir),
+            ("claude_projects_dir", cfg.claude_projects_dir),
+        ):
+            text = str(dest)
+            if _is_under_a_temp_root(text):
+                continue
+            try:
+                if not Path(text).exists():
+                    continue
+            except OSError:
+                continue
+            offenders.append(f"{label} resolves to {text}")
+
+    # THEN the raw env scan, kept as a second layer: it still catches a variable
+    # pointing somewhere real when `load_config()` cannot run at all (no home
+    # configured), which is most of this suite.
     for var in _HOME_STEERING_VARS:
         value = os.environ.get(var)
         if not value or _is_under_a_temp_root(value):
