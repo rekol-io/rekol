@@ -24,6 +24,7 @@ from pathlib import Path
 import click
 import frontmatter
 
+from rekol.atomic_write import AtomicWriteError, write_text_atomically
 from rekol.cli_common import guard_curated_schema, warn_skipped_files
 from rekol.config import Config, load_config
 from rekol.embeddings import get_embedder
@@ -61,6 +62,19 @@ def _reindex_curated(cfg: Config) -> None:
     warn_skipped_files(idx.update())
 
 
+def _write_or_explain(path: Path, text: str) -> None:
+    """Write the memory atomically, or fail with one sentence the user can act on.
+
+    A raw traceback here is worse than unhelpful: the only thing the user wants
+    to know is whether their file survived, and a stack trace does not say.
+    `write_text_atomically` guarantees it did, so this just says so.
+    """
+    try:
+        write_text_atomically(path, text)
+    except AtomicWriteError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @click.command()
 @click.argument("target")
 def confirm(target: str) -> None:
@@ -80,7 +94,7 @@ def confirm(target: str) -> None:
     # A confirmation supersedes a suspicion — drop the suspect flag if present.
     cleared_suspect = post.metadata.pop("suspected_at", None) is not None
     post.metadata.pop("suspect_reason", None)
-    path.write_text(frontmatter.dumps(post) + "\n")
+    _write_or_explain(path, frontmatter.dumps(post) + "\n")
 
     _reindex_curated(cfg)
     suffix = " (cleared prior suspect flag)" if cleared_suspect else ""
@@ -119,7 +133,7 @@ def flag_suspect(target: str, reason: str) -> None:
         post.metadata["suspect_reason"] = reason
     else:
         post.metadata.pop("suspect_reason", None)
-    path.write_text(frontmatter.dumps(post) + "\n")
+    _write_or_explain(path, frontmatter.dumps(post) + "\n")
 
     _reindex_curated(cfg)
     shown_reason = f" — {reason}" if reason else ""
