@@ -107,6 +107,389 @@ follow [Semantic Versioning](https://semver.org/).
   uses `os.walk(onerror=…)` so the failure is visible and reported as UNKNOWN.
 
 ### Fixed
+- **Four ways a BROKEN install reported "first use" (#165/#231, review).** This PR exists to stop
+  `doctor` reporting a fresh install as DEGRADED, and a reviewer sent to look for the opposite error
+  found it four times — neutral on an install that can never index anything, which is the worse
+  direction.
+  **"Absent" turned out to be three different things**, because `os.stat` follows links and collapses
+  them into one ENOENT/ENOTDIR: the name genuinely missing (a real first run), the name existing as a
+  **dangling symlink** (the shape a relocated `~/.claude` leaves when its target moves), and a path
+  **component being a regular file** (nothing can `mkdir` under a file). The last two were reported
+  as "Claude Code creates it on first use" with no remedy. `os.lstat` separates them, and the same
+  split fixes a dangling `sessions.db` link, which read as "not built yet" and offered
+  `rekol session-index --full` — a remedy that writes through the same broken link.
+  **A partial lockout of the transcript tree was silent.** The traversal probe stat'd
+  `next(iterdir(), None)` — a single sample — so an unreadable slug went unreported whenever it was
+  not the entry the filesystem happened to return first. Measured: four slugs with one at mode 000
+  produced **no finding**, while `Path.glob("**/*.jsonl")` — what `sessions/ingest.py` walks —
+  returned 3 of 4 transcripts. A whole project's history missing from the index with nothing said.
+  Every entry is probed now, and `stat` alone was not enough either: stat'ing a mode-000 *directory*
+  succeeds, since the search bit that governs it belongs to the parent. It asks `os.access` whether
+  each slug can be read and traversed — 44 ms at 2400 slugs, measured.
+  This is the sibling of the single-sample fault fixed on the curated side the same day; fixing one
+  and not the other is how it survived.
+  **And the visible check needed the same fix, not just the helper (QA).** For
+  `sessions.db -> somewhere/gone` the `session index` finding a user reads still said "not built
+  yet" and offered `rekol session-index --full` — a remedy QA measured **crashing**: exit 1 with
+  `sqlite3.OperationalError: unable to open database file`. (With the link target's parent present
+  SQLite creates the file through the link instead, so whether it crashes depends on the shape;
+  neither case makes "not built yet" true.) It reports ✗ now, names the broken link, and the remedy
+  is to remove or repoint it. My test for the first half asserted on `_prior_index_state()`, a
+  helper, rather than on what `doctor` prints — the same mistake a review caught in #224 hours
+  earlier, so this one goes through `run_doctor` and reads the finding.
+- **An unreadable sessions DB read as a fresh machine.** The prior-index check returned 0 for a
+  corrupt or unreadable DB, which is indistinguishable from "nothing was ever indexed" — so the one
+  case where `doctor` genuinely cannot tell was reported as the reassuring one. Absent, empty,
+  populated and **unknown** are now four distinct states, unknown is reported as unknown, and the
+  store is closed on every path. There is an explicit control for an initialised-but-empty DB,
+  which the neutral-line test never exercised because it has no DB at all.
+- **Listing a directory is not traversing it.** Mode 0400 lets `iterdir` enumerate names while
+  every child is unopenable, so enumeration alone still reported a locked-out transcript source as
+  healthy. `session-index` has to traverse into the per-project directories to read transcripts, so
+  that is what is now tested.
+- The vanished-storage wording no longer says messages "were indexed from it", which claims
+  per-message provenance this does not check. It says the session index holds them.
+- **The existence probes sat OUTSIDE the error boundary, and what they do depends on the Python
+  version.** Both the sessions DB and the transcript source were tested with `Path.exists()` /
+  `is_dir()` before any `try`. Measured on the same sealed-directory fixture: **3.11.15 raises
+  `PermissionError`**, so `doctor` dies with a traceback, and **3.15.0 answers False**, so the same
+  install reads as ABSENT — a fresh machine with nothing indexed yet. One mode bit on a parent
+  directory produced either a crash or a reassuring lie depending on the interpreter. A
+  self-looping symlink answers False on **both**, so that case was silently wrong everywhere.
+  Both probes are now `os.stat` inside the boundary, classified by errno: `ENOENT`/`ENOTDIR` really
+  means absent, and anything else is reported as "cannot be inspected" / UNKNOWN rather than
+  rounded to absence. First-run neutrality is pinned by its own control, so a fix that answered
+  UNKNOWN unconditionally fails three tests.
+- **The UNKNOWN remedy pointed at a report that is never printed.** It said "check the sessions DB
+  (rekol doctor reports it below)" — but that finding *returns*, so the session-index checks which
+  would have reported the DB never run. It read as if the answer were already on screen. The
+  remedy now names the DB path and gives two real actions, split by cause: move a corrupt DB aside
+  and rebuild, or fix permissions on an unreadable one.
+
+### Fixed
+- **A brand-new install reported `index is DEGRADED` because Claude Code had not created
+  `~/.claude/projects` yet.** An absent projects dir has two causes with opposite meanings, and
+  both were reported as a problem. At the **default** location it simply has not been created yet
+  — Claude Code creates it on first use, and rekol can be installed before that happens — so
+  nothing is wrong and there is merely nothing to index. That is now a neutral line naming
+  `claude_projects_dir`, with no remedy.
+  At an **explicitly configured** location the finding is unchanged and stays a PROBLEM: the user
+  said where it is and it is not there, so `session-index` exits 2 on every SessionEnd — into
+  `>/dev/null 2>&1`, where nobody ever sees it — and the index can never build (#165). The
+  comparison is against the *resolved* default, so a relocated `CLAUDE_CONFIG_DIR` counts as the
+  default too; there the path is correct and merely unpopulated.
+  Verified end to end on a first-run shape: `index is healthy`, exit 0, with the neutral line
+  present and no `✗ transcript source`. Measured for context while fixing it — on a live machine
+  the directory predated the rekol install by nearly three months, so the ordinary case is that it
+  already exists; the gap is narrow, and a first impression is a bad place to be wrong. `doctor`
+  being red out of the box has shipped twice, and each time it taught people to ignore the report.
+- **First-run neutrality hid a real failure: transcript storage that vanished.** The new INFO
+  line was returned for any absent default directory, before looking at the index — so a machine
+  that had indexed transcripts and then lost its `~/.claude/projects` was told "does not exist yet
+  … nothing to index until a session has ended" over a populated database (Codex measured this
+  against a real fixture). Those two states look identical on the filesystem; the index is what
+  tells them apart. A populated sessions DB now means **lost storage**, with a PROBLEM, the message
+  count as evidence, and a remedy. A machine that has never indexed anything keeps the neutral
+  line, which is the point of the change.
+- **`is_dir()` proves type, not access, and its False result covered three different states.**
+  Both of these were pre-existing, and both were made invisible by the neutral line, so they are
+  fixed with it rather than filed:
+  a **regular file** at the projects-dir path entered the "does not exist yet" branch, and an
+  **unreadable** directory was not detected at all — `doctor` reported embeddings and FTS as fine
+  while enumeration raised `PermissionError` on every `session-index` run, into discarded output.
+  Enumeration is what `session-index` actually does, so that is now what is tested, with the
+  failure classified rather than read as "empty".
+
+- **`doctor`'s own tests could fail from a stray `rekol` on the developer's PATH.** Since the
+  console-script check walks PATH (#203), a leftover build shim made five tests in
+  `test_cli_doctor.py` fail — Codex hit this under `uv run` and the suite only passed with a
+  restricted PATH. The module now pins PATH to an empty directory, so the host cannot influence
+  it; tests that care about PATH still set their own. Reproduced before fixing and confirmed after:
+  a broken `rekol` early on PATH fails five tests before, none after.
+- **The guard checker missed a bypass hiding among guarded calls (#223, review).** A **mixed**
+  file — a valid `rekol_bats_run_destructive` wrapper plus one `@test` doing
+  `d="$COMPONENT_DIR"; run "$d/uninstall.sh"` — reported `guard violations: 0`. The checker required
+  `COMPONENT_DIR` on the same line as the script name, so the split assignment meant the `run` line
+  looked like prose that merely names the script, while the wrapper above satisfied every other
+  rule. The existing `reject-split-variable-invocation.bats` fixture has no guarded call at all, so
+  the anti-vacuity rule caught it — proving the checker notices an **empty** inventory, not that it
+  notices a bypass.
+  It keys on the **runner** now (`run`/`bash`/`sh`/`exec`/`source` of a path ending in one of the
+  scripts), however that path was spelled, because spelling is what three rounds of this check kept
+  failing to enumerate. All nine existing fixtures still classify correctly, the accept case
+  included, and `reject-split-variable-among-guarded.bats` covers the mixed shape — picked up
+  automatically by the loop that asserts every `reject-*` fixture fails.
+  Two residual gaps from the same review are filed as **#256**, with the measurement that matters:
+  `setup_file`'s real install already sandboxes `HOME` alongside `REKOL_HOME` and the `XDG_*` dirs,
+  so it is not the 2026-08-18 shape; and adding `HOME` to the guard's override list would make it
+  refuse on every run, because the guard looks before `HOME` is overridden per invocation.
+- **The sandbox guard never resolved the FINAL path component, and the checker could still be
+  blinded (#223, Codex).**
+  `cd -P` resolves every component of a *directory* path, so an escaping directory symlink was
+  caught — but the leaf was only ever examined by name. `$TESTROOT/external-link.json`, a symlink to
+  a file outside the sandbox, passed the check while the destructive call wrote or deleted the
+  target. The chain is now walked by hand (there is no `readlink -f` on macOS bash 3.2) and a loop
+  or an absurd chain **fails closed**, because the target is unknowable. A contained symlinked leaf
+  is still accepted, so the guard does not start crying wolf.
+  And **zero recognised invocations is now a violation.** Codex assembled the path across two
+  assignments — `exe="$COMPONENT_DIR"; exe="$exe/uninstall.sh"` — so no single line carried both
+  halves, the inventory came back empty, and the checker printed `guard violations: 0`: the same line
+  it prints when every invocation is correctly guarded. That is the second time a refactor blinded
+  it, the first being the indirect `${script}` form this PR itself introduced, so the empty
+  inventory is reported rather than passed. The fixture is in the suite.
+- **The bats sandbox guard: a `..` component is refused on sight, there is one invocation site, and
+  an existing file target no longer false-refuses (#223, Codex).** Containment already caught an
+  escape, but only by *reading the filesystem*, so its answer was true only for the instant it was
+  asked — a `..` traversal through a symlink replaced between the check and the delete is a real
+  TOCTOU. The spelling is now refused before anything is resolved, in both the target check and the
+  override check, matched on the path **component** so `..foo` and `foo..bar` stay ordinary names.
+  The six wrappers are **one**, `rekol_bats_run_destructive`, whose first statement must be
+  verbatim `assert_destructive_targets_sandboxed || return 1` — and the checker verifies that exact
+  form rather than accepting a guard call anywhere above the invocation. Six wrappers meant six
+  copies of the guard and six places one line could be deleted while the suite stayed green.
+  **That change nearly shipped the checker blind**, and it is worth recording why: the one wrapper
+  runs `"${COMPONENT_DIR}/${script}"`, the checker was keyed on the literal script names, so it
+  found *zero invocations* and printed "guard violations: 0" — the same line it prints when
+  everything is guarded. Codex's rejected-shape fixtures caught it. The checker now recognises the
+  indirect shape, and a wrapper defined with nothing recognisable inside it is itself a violation.
+  Canonicalisation also **refused a legitimate file**: it stopped at the deepest existing path and
+  `cd`-ed into it, so a regular target — a manifest, `REKOL.md`, a recorded binary — failed the
+  `cd` and read as outside the sandbox. It resolves through the containing directory now, and a
+  file behind a directory symlink pointing out is still refused.
+  The rejection fixtures are **files** under `tests/fixtures/guard/`, one accept and seven reject,
+  shared by a bats test and a pytest. They began as heredocs inside `test_uninstall.bats`; the
+  checker scans that file line by line, so a heredoc holding a second wrapper read as a real second
+  wrapper and the suite flagged itself.
+- **The new bats sandbox guard was loaded but never called in `test_install.bats` (#233).** That is
+  the same defect the guard was written to remove — the copy it replaced there was never called
+  either — and it mattered most in `setup_file`, which performs a real install and
+  `rekol index rebuild`: the exact path that rebuilt a developer's real index with test vectors on
+  2026-08-18. The refusal now runs in both `setup_file` and `setup`, with a test asserting the call
+  exists rather than merely that the file loads the guard.
+- **The sandbox check compared spelling, not containment (#233).** `$TESTROOT/../../outside` carries
+  the right prefix and resolves somewhere else entirely, so it passed. Both sides are now
+  canonicalized — resolving `..`, `.` and symlinks, and handling paths that do not exist yet by
+  resolving their deepest existing ancestor — and the comparison requires a path component
+  boundary, so a sibling named `${TESTROOT}-evil` cannot pass as inside the sandbox either. A
+  symlink whose name is inside the sandbox but whose target is outside is now refused, which the
+  string comparison could never have caught.
+- **The invocation checker accepted a comment as a guard (#233).** It matched the guard's name as a
+  substring within the eight lines above an invocation, so a comment mentioning it satisfied the
+  check — text proximity is not a rule. It is now structural: `uninstall.sh` may be invoked only
+  inside a `run_uninstall*` wrapper, every such wrapper must call the guard as an executable
+  statement, and no wrapper may invoke before that call. The five remaining hand-rolled invocations
+  were converted into wrappers, so there is no longer any path to the uninstaller that a new test
+  could take unguarded. Proven against three controls, each of which must fail and does:
+  a comment-as-guard, a direct invocation in a `@test` body, and a guard placed after the
+  invocation.
+
+### Fixed
+- **The bats suites' safety rested on one `unset` line continuing to exist.** QA measured that
+  deleting it makes the suite delete the developer's real tools home — venv and hooks included —
+  because `uninstall.sh` removes what it is pointed at and an inherited `REKOL_TOOLS_HOME` points
+  it at the live install. The suite still reports pass, so the failure is silent: every rekol hook
+  on the machine fails afterwards, the same reports-healthy-while-dead shape as #203 and #143.
+  Two guards existed and neither stopped it. Traced: `assert_sandboxed` was called at **2 of 20**
+  destructive sites and both calls passed the *index dir* — nothing ever asked it about the tools
+  home. It was not defeated, it was never consulted about the path that got deleted. A second copy
+  in `test_install.bats` was never called at all.
+  Both copies are replaced by `tests/sandbox_guard.bash`, shared so they cannot drift, and the
+  habit is replaced by a property: every destructive invocation now goes through a helper that
+  refuses when an override resolves outside the sandbox, and a test asserts no invocation in the
+  file can skip that check. The refusal sits at the destructive call rather than in `setup()` on
+  purpose — refusing merely because `REKOL_INDEX_DIR` is *set* would refuse on every ordinary
+  machine, since #164 exports it into every session, and a guard that cries wolf gets deleted.
+  The allowlist also no longer accepts a blanket `/tmp/*`, which reached any other suite's sandbox;
+  `mktemp -d` output was already covered by the `TESTROOT` branch, so it bought nothing.
+  Both halves are proven able to fail, not just to pass: with one guard call deleted the
+  invocation check reports the exact line, and with the clearing deleted the suite fails in clean
+  CI rather than only on a machine that happens to have a leaked override.
+- **`rekol.config.yaml` was truncated before being rewritten (#238, product).** It is read, mutated
+  and written back whole, so a fault between the truncation and the write emptied it and lost keys
+  with nothing to do with the change being made — the embedding model, archive settings, whatever
+  else the user had set. It goes through the same staged-and-replaced helper now, and its exemption
+  from the rule check is gone rather than annotated.
+- **A new memory was forced to mode `0644`, exposing it to every local account (#238, Codex).**
+  Under `umask 077` `Path.write_text` produces `0600`, so `capture` kept a new memory private; the
+  atomic-write change staged with `mkstemp` and then `chmod 0644`, which made it world-readable. A
+  regression introduced by that change, and a security-relevant one.
+  The stage is created with `os.open(..., O_CREAT|O_EXCL, <mode>)` so the **kernel** applies the
+  umask — no reading or restoring of the process umask, which would be racy in a library. An
+  existing target still keeps its own mode, so an edit cannot silently re-permission a file the user
+  chmod'ed. Controls at umask 077 and 022, across a new memory, a new proposal and a dangling link's
+  target, plus the counterpart that an existing `0640` file stays `0640` under either umask.
+  `propose` now reports a write failure with the same one sentence as the other commands rather than
+  a traceback.
+  **The private content went into a readable temporary first (#238, Codex + product).** The first
+  version of the above still staged at `0666 & ~umask` and copied the target's mode on afterwards,
+  so under `umask 022` editing a `0600` memory wrote its whole content into a **world-readable
+  `0644`** temporary — and a kill before the `chmod` left that file in the memory home. Another
+  regression from this change, in the same place, which is why the rule is now stated rather than
+  reasoned about each time: **at no point can the staged file be more readable than the file it will
+  replace.** The target's mode is read before the stage exists and passed to `os.open`, which the
+  kernel can only narrow, so the stage is never wider than the final file from the instant it exists
+  — and the exact mode is restored before publication, so a tight umask does not tighten the file
+  either. If the target's mode cannot be read at all, the write is refused rather than guessed at.
+  The test probes the **descriptor** with `os.fstat` at the moment before the first byte, because
+  checking the published file's mode would pass whatever the stage had been.
+- **A symlinked `rekol.config.yaml` is written through, and that is deliberate (#238, product
+  answering Codex).** `os.replace` acts on the name, so publishing without following the link would
+  leave a regular file in the memory home holding the new keys while a dotfile repo kept the old
+  ones — the config silently detached from the one the user edits. Memory files reached through a
+  link out of the home are refused, which is the opposite call: a link leaving the home is an
+  anomaly for a memory and the normal case for a config. Documented at the call site with a test
+  asserting the link survives as a link and its target holds the new content.
+- **The atomic-write property test claimed more than it checked (#238, Codex).** It scanned a fixed
+  five-module list while the change claimed a new command would be caught automatically. It now
+  scans **every** module under `src/rekol` with an explicit reviewed exemption list — each entry
+  carrying the reason it is safe — so a new module must be looked at before it can pass. It also
+  sees `Path.open("w")` and `r+`, which the control for the scan caught it missing, and the test
+  states the shapes it still cannot see (a mode in a variable, `os.open`, `shutil.copy`, a path
+  computed at runtime). Two further controls: an exemption for a module that no longer truncates is
+  reported as a dead decision, and the five commands this fixed cannot be made to pass by exempting
+  them.
+  One exemption is a **known gap** rather than a safe case, and is labelled as such: `config.py`
+  truncates `rekol.config.yaml` inside the memory home.
+- Documented limits of atomic publication, in the helper where they apply rather than in a commit
+  message: hard links to the target are broken, extended attributes and ACLs are not carried over,
+  ownership comes from the staged file, and durability of the directory entry is not claimed (the
+  bytes are fsynced before the rename; the rename is not).
+- **A symlinked memory would have been forked rather than edited (#238, product).** `os.replace`
+  acts on the **name**, so publishing over a symlinked memory deleted the link, left a regular file
+  in the home holding the new text, and left the **real file with the old text** — the user's edit
+  in a different place from the file they believed they edited, with nothing reporting it. This was
+  a regression introduced by the atomic-write change itself: `Path.write_text` follows a symlink, so
+  `confirm` on a symlinked memory works on `main`. The target is resolved first and the temporary is
+  staged beside it, which also keeps the `os.replace` on one filesystem when the link points off the
+  home. A dangling link is followed too, matching `write_text`, and the mode preserved is the
+  **target's**. Tested contained, pointing outside the home, dangling, and dangling into a missing
+  directory.
+- **`tempfile.mkstemp` sat outside the error boundary (#238, product).** A read-only directory or an
+  exhausted inode table raised a raw `OSError` traceback instead of `AtomicWriteError`, which breaks
+  the one promise this module makes — that a failure says in one sentence whether the file survived.
+  A consequence accepted deliberately: a writable file in a read-only directory used to be editable
+  and now fails whole, with that message.
+- **Editing a memory destroyed it first, then wrote the replacement (#238).** `Path.write_text`
+  and `open(path, "w")` **truncate before writing**, and that is how `confirm`, `flag-suspect`,
+  `invalidate` and `review --confirm` all edited a memory in place. A fault between the truncation
+  and the write — ENOSPC, a kill, a full disk on a synced home — left the file truncated or empty,
+  and the truncated copy was the only one. `capture` had the same shape with a different
+  consequence: an interrupted write left a 0-byte or half-written `.md` under a real name, which
+  the indexer reads as a memory.
+  There is now one way rekol writes such a file (`rekol.atomic_write`): stage a temporary in the
+  same directory, `fsync` it, then `os.replace` it over the target. The name holds the old content
+  or the new content, never a partial write, and a failure says **"the file is UNCHANGED"** in one
+  sentence instead of raising a traceback that leaves the user unable to tell whether their memory
+  survived. The retry after a failure works, and leaves one file rather than two.
+  **Keyed on the rule, not on the call sites.** A property test parses each module that writes
+  into the memory home and fails on any `write_text` / `open(…, "w")`, so a new command that
+  writes a memory the old way fails CI even though nobody thought to add a test for it — which is
+  the point, since each of the sites this fixed was added by someone who did not know the rule
+  existed. The detector has its own control, because a property test that cannot fail is worse
+  than no test. It found two sites beyond the ones in the original report, in `propose`.
+  The staged name is `.partial-<random>.md.tmp`: a leading dot is **not** enough on its own, since
+  `Path.glob("**/*.md")` matches dotfiles and that glob *is* the indexer's walk. The test proves
+  that premise rather than asserting it. The replaced file's mode is preserved too — `mkstemp`
+  creates `0600`, so a naive replace silently tightened permissions on every edit.
+- **A command that merely MENTIONED rekol's reindex script was still softened (#235, Codex).**
+  Recognising it with `endswith` accepted `false && <path>/hooks/auto-reindex.sh`,
+  `my-gate --config <path>/hooks/auto-reindex.sh` and `printf <path>/hooks/auto-reindex.sh`. Codex
+  **executed** the first and watched exit 1 become exit 0 — #235 through a different door.
+  The next version required the whole command to be "one path token", as a character class — which
+  then accepted `false${IFS}<path>/hooks/auto-reindex.sh`: no whitespace in the string, a word break
+  the moment the shell expands it, and two commands where the installer counted one. Codex found
+  that too.
+  **Ownership is a positive allowlist now (product ruling, 2026-11-07),** because each round of
+  character class closed one shape and left the next one open: a class describes what we thought of,
+  not what we wrote. A command is rekol's only if, after stripping the one suffix rekol appends, it
+  is a supported prefix (`$HOME`, `${HOME}`, `~`, or an absolute path) followed by **literal** path
+  components — no `$`, `{`, `}`, backtick, quote, whitespace or operator — ending in
+  `/hooks/auto-reindex.sh`. A string that passes cannot expand into anything but itself, which is
+  the property the class never had. Anything else is **not ours and is left alone**: a wrong "not
+  ours" leaves a stale hook in place, which is much better than altering a command of the user's.
+  The list was checked against every form released versions actually wrote (git history plus the
+  v0.5.13 fixtures): the pre-rebrand and pre-#172 literal `$HOME/...` paths and today's absolute
+  tools-home path, each bare or with the suffix. Two forms the installer *can* write are refused and
+  said so in the code — a relative `--tools-home`, and a tools-home containing a space — because
+  both describe a hook that is already broken before rekol touches it. All four attack shapes are
+  negative controls and the two that gate on failure are **executed**, so "it stopped blocking"
+  cannot pass as a byte comparison.
+- **De-duplicating the reindex hook deleted hooks rekol does not own (#235, Codex).** It dropped
+  whole later `PostToolUse` **blocks** whose text contained `auto-reindex.sh`, so a hook of the
+  user's sharing such a block was **deleted** — worse than the softening this issue is about, since
+  a softened hook is recoverable from the backup and a deleted one is not. It now removes only the
+  owned handler, keyed on the same ownership predicate as the softener, and leaves everything else in
+  the block; a block left with no hooks at all is dropped as debris.
+  Reachable on an ordinary path, not just a hand-edited file: two reindex blocks arise from #236's
+  duplicate-append behaviour on an un-upgraded install, and a user hook added to the newer block
+  would then be destroyed by the next install.
+- When the set of rekol-owned commands cannot be collected, the soft-fail pass is skipped — the safe
+  direction, since it cannot touch a hook of the user's — and **says so** rather than leaving a
+  failed collection indistinguishable from a settings.json that holds none of rekol's hooks.
+- **The installer stopped a user's blocking hook from blocking (#235).** The soft-fail step matched
+  any command whose text contained `rekol` or `REKOL`, so a hook of the user's own got
+  ` 2>/dev/null || true` appended — `my-tool --uses rekol --flag`, or anything living under a path
+  such as `~/src/rekol-tools/`. That is not cosmetic: `|| true` forces exit 0 and `2>/dev/null`
+  discards stderr, which is how Claude Code receives a block reason, so the hook silently stopped
+  blocking after any install. **Present since #183 (2026-08-18), so in v0.5.13 and on `main`;** the
+  original is backed up as `settings.json.bak-softfail-*`.
+  Soft-fail is now applied by **whole-command equality**: a command is rekol's only when the entire
+  string equals one the installer is about to write. That set is built from the rendered snippets
+  themselves plus a handler allowlist — one definition, derived from the renderer, driving both the
+  softener and the count — with and without the soft-fail tail, since Step 6.95 rewrites a pre-#159
+  bare invocation to the current rendering *without* the tail and this step is what adds it.
+  An anchored regex was tried first and was wrong in **both** directions (product measured it): it
+  missed rekol's own `@TOOLS_HOME@/hooks/auto-reindex.sh …`, whose command starts with a path, and
+  SessionEnd's `if [ -n "${REKOL_HOME:-…` notice — so a user with no hooks of their own was told the
+  installer had left theirs alone — while *claiming* `rekol _hook x && my-gate` and
+  `"$(my-wrapper)" --check "_hook foo"`, because the subcommand test was an unanchored substring.
+  Both of those are now executed negative controls, and a pristine install and reinstall must print
+  no preserved-hook line at all.
+  Both directions are **executed** in the test rather than inferred, because inference is what let
+  this ship: a user's blocking hook is byte-identical and still exits non-zero with its stderr
+  intact, and rekol's own hook still exits 0 with its binary removed, which is the failure that
+  could otherwise fail a `UserPromptSubmit` and lock someone out of Claude Code.
+  **The "we left N hooks of yours alone" report was written, measured and removed.** Answering that
+  needs the ability to tell a *legacy* rekol rendering from a user's command, and this change does
+  not have it: on a v0.5.13 upgrade fixture with **no user hooks planted** it said `left 4`, and all
+  four were rekol's own handlers still in the `$(command -v rekol || echo …)` form, because Step 6.95
+  here only rewrites the pre-#159 bare invocation. QA measured the same thing as `left 3`, where the
+  third was the old SessionStart loader before a later step adds its `: rekol:backend=` marker — the
+  count was running in the middle of the install and describing a state that no longer existed by the
+  end. It lands with #203, whose allowlist defines every rendering this installer has produced. What
+  this change owns is narrower and complete without it: the softener no longer touches a command that
+  is not rekol's.
+  Also recognised as rekol's: `<tools-home>/hooks/auto-reindex.sh`, by the script name rather than
+  the path, because that path has changed three times (`memory-tools` before the rebrand, then
+  `$HOME/.local/share/rekol`, then `--tools-home`) and an older install's string is not this one's.
+- **A model change crashed `session-index` and `search`, and the message then said to `rm` your
+  transcript store (#229, #230).** Found independently by the 0.6.0 fan-out review and by QA.
+  `SessionStoreModelMismatchError` was caught at **none** of `reconcile_embedder`'s four call
+  sites. Three of them caught its *sibling* `SessionStoreDimMismatchError`, and an `except` written
+  for one does not catch the other — so a user who merely changed `embedding_model` in their config
+  got a full traceback and exit 1, with the useful message at the bottom. `session-index` is the
+  SessionEnd hook path, whose contract — stated in that very file — is "never a crash".
+  Four sites is **how** that was missed, so the fix is one site: `reconcile_embedder` is now called
+  only from `guard_session_store_identity`, which reports both sibling errors and exits 2, matching
+  what the curated path already did. A test walks the package's AST and fails if the call appears
+  anywhere else, so a fifth caller cannot reintroduce partial handling. The now-dead
+  `except SessionStoreDimMismatchError` in `cli_session_index` is **removed, not relocated** — the
+  error has exactly one raiser, reached only through the helper, and a dead `except` that reads as
+  a guard answers "is this handled?" with a yes nothing can reach.
+  **The message now says what to CHECK before what to DELETE.** It led with
+  `rm '<path>/sessions.db' && rekol session-index --full` — and this guard fires precisely when a
+  test-configured run has resolved someone's *real* store through an inherited `REKOL_INDEX_DIR`,
+  so that advice asked the operator to finish the destruction the guard had just prevented. It now
+  names `REKOL_INDEX_DIR`, says it is the highest-precedence setting and used verbatim, and offers
+  the destructive line only afterwards and only when the store's provenance is known. The width
+  message had the identical defect and got the identical fix; fixing one would have left the advice
+  pointed the wrong way on half the paths.
+  On an **unstamped** store there is now no destructive remedy at all. The provenance sentinel was
+  the literal string `"unknown (store predates identity stamping)"`, which rendered as *restore
+  'unknown (store predates identity stamping)' in your config* — advice that cannot be followed,
+  because it is not a model name. It is `None` now and the message branches on it. All four commands
+  are exercised end to end, asserting the exit code **and** the absence of a traceback, since exit 1
+  with the message under a stack trace would pass a "the message is present" check.
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name

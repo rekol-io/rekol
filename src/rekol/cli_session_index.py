@@ -20,12 +20,13 @@ import sys
 
 import click
 
+from rekol.cli_common import guard_session_store_identity
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.embeddings import get_embedder
 from rekol.include_indexer import index_include_dirs
 from rekol.sessions.archive import archive_directory, backfill_once
 from rekol.sessions.ingest import embed_missing, ingest_directory
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
+from rekol.sessions.store import SessionStore
 
 # NOTE: do NOT import index_write_lock here. `session-index` writes `sessions.db`,
 # a separate database from the curated `index.db`; the curated `index_write_lock`
@@ -283,55 +284,64 @@ def main(mode_full: bool, mode_incremental: bool, embed: bool, progress: bool) -
     # sessions.db concurrency is its own WAL + busy_timeout (set in SessionStore);
     # archive-sync above writes idempotent flat files. See the design's "Locking".
     repaired = 0
-    try:
-        with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
-            store.init_schema()
-            # Reconcile the on-disk vector width with the model before any vector
-            # work. The store owns this invariant (empty stale table → recreate;
-            # populated mismatch → raise), so ingest and search behave the same.
-            # Only when embedding: --no-embed writes no vectors and must not be
-            # blocked by an existing index's width.
-            if embedder is not None:
-                store.reconcile_embedder(cfg.embedding_model, embedder.dim)
-            # Auto-once backfill: if the archive is on and we have never
-            # backfilled, reconstruct any indexed-but-unarchived sessions so
-            # nothing predating the archive is lost. Marker guards re-runs. Only
-            # when ingesting from the archive — a soft-failed sync (ingest_root
-            # back on live) skips it, retrying next run.
-            if cfg.archive_enabled and ingest_root == archive_dir:
-                _backfill_once_soft_fail(cfg, archive_dir, store)
-            # --full forces re-walk even of unchanged files; default (incremental)
-            # trusts files_seen mtime+size and skips matches. files_seen is keyed
-            # on ingest_root's paths: the FIRST run after repointing to the archive
-            # re-walks once (keys differ from the old live paths), all dedupe-
-            # skipped via UNIQUE(session_id, message_uuid); the mtime skip then
-            # self-heals on the next run. Benign, documented in the design.
-            stats = ingest_directory(
-                ingest_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
+    # The `except SessionStoreDimMismatchError` that used to wrap this block is
+    # GONE, not relocated, and that is deliberate (#229). It was the only
+    # handler here and it is now dead code: the error is raised from exactly one
+    # place (`reconcile_embedding_dim`, reached only through
+    # `reconcile_embedder`), which only `guard_session_store_identity` calls, and
+    # that helper reports and exits 2 itself. A dead `except` that reads as a
+    # guard is worse than no guard — it answers "is this handled?" with a yes
+    # that nothing can reach.
+    with SessionStore(db_path=cfg.sessions_db_path, dim=store_dim) as store:
+        store.init_schema()
+        # Reconcile the on-disk vector width with the model before any vector
+        # work. The store owns this invariant (empty stale table → recreate;
+        # populated mismatch → raise), so ingest and search behave the same.
+        # Only when embedding: --no-embed writes no vectors and must not be
+        # blocked by an existing index's width.
+        if embedder is not None:
+            # Through the helper, which turns both mismatch errors into the
+            # message and exit 2. This site caught NEITHER of them, so an
+            # ordinary `embedding_model` change produced a full traceback
+            # from the SessionEnd hook path — whose contract, stated in this
+            # very file, is "never a crash" (#229).
+            guard_session_store_identity(store, cfg, embedder)
+        # Auto-once backfill: if the archive is on and we have never
+        # backfilled, reconstruct any indexed-but-unarchived sessions so
+        # nothing predating the archive is lost. Marker guards re-runs. Only
+        # when ingesting from the archive — a soft-failed sync (ingest_root
+        # back on live) skips it, retrying next run.
+        if cfg.archive_enabled and ingest_root == archive_dir:
+            _backfill_once_soft_fail(cfg, archive_dir, store)
+        # --full forces re-walk even of unchanged files; default (incremental)
+        # trusts files_seen mtime+size and skips matches. files_seen is keyed
+        # on ingest_root's paths: the FIRST run after repointing to the archive
+        # re-walks once (keys differ from the old live paths), all dedupe-
+        # skipped via UNIQUE(session_id, message_uuid); the mtime skip then
+        # self-heals on the next run. Benign, documented in the design.
+        stats = ingest_directory(
+            ingest_root, store, force=mode_full, embedder=embedder, progress_cb=progress_cb
+        )
+        # FTS-at-build (C5): a --full reingest is the authoritative "make the
+        # index correct" path, so rebuild the external-content FTS5 index from
+        # `messages` afterwards. This heals any drift (orphaned postings, or
+        # rows that predate the sync triggers) so the #22 read-time staleness
+        # check becomes belt-and-suspenders rather than the only guard. The
+        # incremental path relies on the triggers, which fire on every insert.
+        if mode_full:
+            store.rebuild_fts()
+        # Self-heal: embed any messages that lack an embedding. Catches indices
+        # built FTS-only or with --no-embed, which the mtime skip gate would
+        # otherwise leave keyword-only forever. No-op (cheap count guard) once
+        # everything is embedded.
+        if embedder is not None:
+
+            def _repair_progress(done: int) -> None:
+                click.echo(f"... {done} messages embedded (repair)", err=True)
+
+            repaired = embed_missing(
+                store, embedder, progress_cb=_repair_progress if progress else None
             )
-            # FTS-at-build (C5): a --full reingest is the authoritative "make the
-            # index correct" path, so rebuild the external-content FTS5 index from
-            # `messages` afterwards. This heals any drift (orphaned postings, or
-            # rows that predate the sync triggers) so the #22 read-time staleness
-            # check becomes belt-and-suspenders rather than the only guard. The
-            # incremental path relies on the triggers, which fire on every insert.
-            if mode_full:
-                store.rebuild_fts()
-            # Self-heal: embed any messages that lack an embedding. Catches indices
-            # built FTS-only or with --no-embed, which the mtime skip gate would
-            # otherwise leave keyword-only forever. No-op (cheap count guard) once
-            # everything is embedded.
-            if embedder is not None:
-
-                def _repair_progress(done: int) -> None:
-                    click.echo(f"... {done} messages embedded (repair)", err=True)
-
-                repaired = embed_missing(
-                    store, embedder, progress_cb=_repair_progress if progress else None
-                )
-    except SessionStoreDimMismatchError as exc:
-        click.echo(str(exc), err=True)
-        sys.exit(2)
 
     click.echo(
         f"files_seen={stats.files_seen} "

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from rekol.atomic_write import write_text_atomically
+
 # Name of the skip manifest the indexer writes into the local cache (index_dir)
 # after each run: the count + paths of on-disk files invisible to search because
 # they were rejected at index time. Read by the SessionStart coverage hook (#123).
@@ -441,6 +443,19 @@ def persist_include_scope(
     existing["include_dirs"] = list(include_dirs)
     existing["include_deny"] = list(include_deny)
     memory_home.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    # Staged and replaced, not truncated (#238, product 2026-11-07). This file
+    # holds the user's OTHER config keys too -- it is read, mutated and written
+    # back whole -- so a fault between the truncation and the write emptied it
+    # and lost settings that have nothing to do with include-scope.
+    #
+    # A SYMLINKED CONFIG IS WRITTEN THROUGH, ON PURPOSE (product, 2026-11-07,
+    # answering Codex). `write_text_atomically` follows the link and replaces
+    # the target, so `rekol.config.yaml -> ~/dotfiles/rekol.yaml` keeps working
+    # and the link survives. That is deliberate and is NOT the case product
+    # ruled on for memory files, where a link leaving the home is an anomaly:
+    # a symlinked config is what people using a dotfile manager have, refusing
+    # it would break their setup, and replacing the link with a regular file
+    # would silently detach the config they think they are editing.
+    write_text_atomically(
+        config_file, yaml.safe_dump(existing, sort_keys=False, allow_unicode=True)
     )
