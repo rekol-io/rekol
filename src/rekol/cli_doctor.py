@@ -19,9 +19,12 @@ the whole point is to be the tool you reach for when things look broken.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import re
 import sqlite3
+import stat
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,7 +33,7 @@ from pathlib import Path
 
 import click
 
-from rekol.config import Config, load_config
+from rekol.config import Config, load_config, resolve_claude_config_dir
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
 from rekol.indexer import (
@@ -475,6 +478,305 @@ def _check_curated_coverage(cfg: Config, embedder: BaseEmbedder) -> list[Finding
     ]
 
 
+class _PriorIndex(Enum):
+    """What the sessions DB says about whether anything was ever indexed.
+
+    Four states, kept distinct because collapsing them is what hid a real
+    failure: returning 0 for a corrupt or unreadable DB made it indistinguishable
+    from a fresh machine, so "unknown" was reported as first use (Codex,
+    2026-11-06). Unknown is not evidence of absence.
+    """
+
+    ABSENT = "absent"  # no DB file at all
+    EMPTY = "empty"  # a DB exists and holds no messages
+    POPULATED = "populated"  # a DB exists and holds messages
+    UNKNOWN = "unknown"  # a DB exists but could not be read
+
+
+def _prior_index_state(cfg: Config, embedder: BaseEmbedder) -> tuple[_PriorIndex, int]:
+    """``(state, message_count)``; the count is meaningful only when POPULATED."""
+    db_path = cfg.sessions_db_path
+    # INSIDE the error boundary, and by errno — not ``Path.exists()``, whose
+    # behaviour here is WORSE THAN EITHER OUTCOME ALONE because it depends on the
+    # Python version. MEASURED, both with the same sealed directory:
+    #
+    #   3.11.15  exists() raises PermissionError  -> doctor dies with a traceback
+    #   3.15.0   exists() returns False           -> reads as ABSENT, i.e. "fresh
+    #                                               machine, nothing indexed yet"
+    #
+    # So the same install reports a crash or a reassuring lie depending on which
+    # interpreter it is running under. ELOOP is False on both (a self-looping
+    # symlink at the DB path reads as absent), which is the silent case with no
+    # version dependence at all.
+    #
+    # ENOENT and ENOTDIR are the two answers that genuinely mean "there is no
+    # such file". Everything else means we could not find out, and this enum
+    # exists precisely so that can be said rather than rounded to absence.
+    try:
+        os.stat(db_path)
+    except OSError as exc:
+        # A DANGLING LINK AT THE DB IS NOT "NOT BUILT YET" (review, 2026-11-08).
+        # `os.stat` follows the link, so `sessions.db -> somewhere/gone` gives
+        # ENOENT and read as a fresh install — with a remedy, `session-index
+        # --full`, that would then fail on the same broken link. The name is
+        # there; only the target is missing.
+        if _path_exists_but_cannot_be_a_directory(db_path):
+            return _PriorIndex.UNKNOWN, 0
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return _PriorIndex.ABSENT, 0
+        return _PriorIndex.UNKNOWN, 0
+    store: SessionStore | None = None
+    try:
+        store = SessionStore(db_path=db_path, dim=embedder.dim)
+        store.init_schema()
+        count = store.count_messages()
+    except (sqlite3.DatabaseError, OSError):
+        return _PriorIndex.UNKNOWN, 0
+    finally:
+        # Closed on every path: an open handle on a DB doctor only inspected is
+        # a leak, and on Windows it would block the very remedy we print.
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.close()
+    return (_PriorIndex.POPULATED if count > 0 else _PriorIndex.EMPTY), count
+
+
+def _path_exists_but_cannot_be_a_directory(path: Path) -> bool:
+    """True when the NAME is there but can never resolve to a usable directory.
+
+    `os.stat` follows links, so it collapses three different situations into one
+    ENOENT/ENOTDIR, and reporting all three as "first use" was neutral on a
+    broken install (review, 2026-11-08):
+
+    * the name does not exist at all — genuinely first use, False here;
+    * the name EXISTS as a dangling symlink — ENOENT from `stat`, but it is not
+      absent, and a relocated `~/.claude` whose target moved is exactly this;
+    * a path COMPONENT is a regular file — ENOTDIR, and nothing can `mkdir`
+      under a file, so "Claude Code creates it on first use" is false.
+
+    `os.lstat` separates them because it does not follow the final link.
+    """
+    try:
+        os.lstat(path)
+    except OSError as exc:
+        return exc.errno == errno.ENOTDIR
+    return True
+
+
+def _transcript_source_finding(
+    projects_root: Path, cfg: Config, embedder: BaseEmbedder
+) -> Finding | None:
+    """A problem with the transcript SOURCE itself, or None when it looks usable.
+
+    ``is_dir()`` alone proves type, not access, and its False result conflates
+    three very different states — absent, present-but-not-a-directory, and
+    present-but-unreadable. Reporting all of them as "does not exist yet" is how
+    a real failure hid behind first-run neutrality.
+
+    Which is why the type question is asked with ``os.stat`` INSIDE an error
+    boundary rather than with ``exists()``/``is_dir()``. What those two do with
+    an access failure depends on the Python version — measured 3.11.15 raises
+    ``PermissionError`` while 3.15.0 answers False — so a projects dir whose
+    PARENT has no search bit either killed ``doctor`` with a traceback or looked
+    exactly like a path that is simply not there. A self-looping symlink answers
+    False on both, with no version dependence, and read as absent.
+
+    The probe below separates the answers by errno instead: ENOENT/ENOTDIR is
+    really absent, anything else means we could not find out and must say so.
+    """
+    try:
+        source_mode: int | None = os.stat(projects_root).st_mode
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir cannot be inspected: {projects_root} "
+                    f"({exc}) — so whether transcripts can be read from it is "
+                    "unknown, and session-index fails silently on every session "
+                    "end if they cannot"
+                ),
+                remedy=(
+                    f"fix access to {projects_root} and its parent directories "
+                    "(each must be traversable), or point claude_projects_dir at "
+                    "a readable location"
+                ),
+            )
+        source_mode = None
+
+    if source_mode is not None and not stat.S_ISDIR(source_mode):
+        return Finding(
+            label="transcript source",
+            status=Status.PROBLEM,
+            detail=(
+                f"claude_projects_dir is not a directory: {projects_root} — "
+                "session-index cannot enumerate transcripts, so the index can "
+                "never build"
+            ),
+            remedy=(
+                f"remove or rename {projects_root}, or point claude_projects_dir "
+                "at Claude Code's projects directory"
+            ),
+        )
+
+    if source_mode is None:
+        # "ABSENT" IS THREE DIFFERENT THINGS, and reporting all three as first
+        # use was neutral on a broken install (review, 2026-11-08). `os.stat`
+        # follows links and collapses them:
+        #   * the name does not exist at all          -> genuinely first use
+        #   * the name EXISTS as a dangling symlink   -> ENOENT, but not absent;
+        #     a relocated `~/.claude` whose target moved is exactly this shape
+        #   * a path COMPONENT is a regular file      -> ENOTDIR, and Claude Code
+        #     cannot create the directory, so "creates it on first use" is false
+        # `os.lstat` separates them, because it does not follow the final link.
+        if _path_exists_but_cannot_be_a_directory(projects_root):
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir cannot be used: {projects_root} — the "
+                    f"path exists but does not resolve to a directory (a broken "
+                    f"symlink, or a file where a directory must be), so Claude "
+                    f"Code cannot create it and session-index fails on every "
+                    f"session end"
+                ),
+                remedy=(
+                    f"inspect {projects_root} — remove or repoint it if it is a "
+                    f"broken link, or move the file that is in the way; then run "
+                    f"rekol session-index --full"
+                ),
+            )
+
+        # AT THE DEFAULT LOCATION, absent usually means Claude Code has not
+        # created it yet: it does so on first use, and rekol can be installed
+        # before that happens. (Measured on a live machine: the directory
+        # predated the rekol install by nearly three months, so the ordinary
+        # case is that it already exists — but a brand-new machine legitimately
+        # hits the gap.) Reporting that as a PROBLEM made `doctor` red out of the
+        # box, which this project has shipped twice and which teaches people to
+        # ignore the report.
+        #
+        # Compared against the RESOLVED default, so a relocated
+        # `CLAUDE_CONFIG_DIR` counts as the default too.
+        at_default_location = projects_root == resolve_claude_config_dir() / "projects"
+        if not at_default_location:
+            # The user said where it is and it is not there, so `session-index`
+            # exits 2 on every SessionEnd — into `>/dev/null 2>&1`, where nobody
+            # ever sees it — and the index can NEVER be built. That is #165.
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir is set to a path that does not exist: "
+                    f"{projects_root} — session-index fails on every session end "
+                    "and the index can never build"
+                ),
+                remedy=(
+                    "correct claude_projects_dir in rekol.config.yaml, or unset it "
+                    "to use Claude Code's default location"
+                ),
+            )
+
+        # First use and LOST STORAGE are both "absent at the default location",
+        # and only the index can tell them apart. A populated sessions DB proves
+        # transcripts were being read from here, so the directory did not fail to
+        # appear — it went away, and everything indexed from it is now orphaned.
+        prior, indexed = _prior_index_state(cfg, embedder)
+        if prior is _PriorIndex.POPULATED:
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir has GONE: {projects_root} does not "
+                    f"exist, yet the session index holds {indexed} message(s) — "
+                    "so transcripts were indexed at some point and this path is "
+                    "no longer there. No new session can be indexed, and searches "
+                    "still return the older results"
+                ),
+                remedy=(
+                    "restore the directory, or set claude_projects_dir to its new "
+                    "location and run rekol session-index --full"
+                ),
+            )
+        if prior is _PriorIndex.UNKNOWN:
+            # Not first use, and not provably lost either. Saying "nothing to
+            # index yet" here would be a claim the evidence does not support.
+            return Finding(
+                label="transcript source",
+                status=Status.PROBLEM,
+                detail=(
+                    f"claude_projects_dir does not exist ({projects_root}) and "
+                    f"{cfg.sessions_db_path} could not be read, so whether "
+                    "anything was ever indexed from it is UNKNOWN — this is not a "
+                    "first run, it is a missing answer"
+                ),
+                # NOT "rekol doctor reports it below": on this branch the source
+                # finding RETURNS, so the session-index checks that would have
+                # reported the DB never run. Pointing at a report that is not
+                # printed is worse than no remedy — it reads as if the answer is
+                # somewhere on screen. Name the file and an action instead.
+                remedy=(
+                    f"inspect {cfg.sessions_db_path} — if it is corrupt, move it "
+                    "aside and run rekol session-index --full to rebuild; if it is "
+                    "merely unreadable, fix its permissions. Restore "
+                    "claude_projects_dir first if the transcripts are what moved"
+                ),
+            )
+        return Finding(
+            label="transcript source",
+            status=Status.INFO,
+            detail=(
+                f"claude_projects_dir does not exist yet: {projects_root} — "
+                "Claude Code creates it on first use, so there is nothing to "
+                "index until a session has ended"
+            ),
+        )
+
+    # Present and a directory, but access is a separate question: enumeration is
+    # what `session-index` actually does, so that is what gets tested. Treating a
+    # PermissionError as "empty" would report a locked-out source as first use.
+    # LISTING IS NOT TRAVERSAL (product, 2026-11-06). Mode 0400 lets `iterdir`
+    # enumerate names while every child is unopenable, so enumeration alone
+    # still reported a locked-out source as healthy. `session-index` has to
+    # traverse INTO the slug dirs to read transcripts, so that is what gets
+    # tested.
+    #
+    # EVERY ENTRY, NOT THE FIRST ONE. This stat'd `next(iterdir(), None)` — a
+    # single sample — so a PARTIAL lockout read as healthy whenever the
+    # unreadable slug was not the one the filesystem happened to return first
+    # (review, 2026-11-08). Measured: four slugs with `charlie` at mode 000
+    # produced no finding at all, while `Path.glob("**/*.jsonl")` — which is
+    # what `sessions/ingest.py` walks — silently returned 3 of 4 transcripts.
+    # A whole project's history missing from the index, and doctor said nothing.
+    #
+    # The same single-sample fault was fixed on the curated side earlier today;
+    # this is its sibling, and fixing one and not the other is how it survived.
+    # `stat` ON THE CHILD IS NOT ENOUGH EITHER: stat'ing a mode-000 directory
+    # SUCCEEDS, because what governs it is the search bit on the PARENT. So a
+    # slug the indexer cannot read still looked fine. What `session-index` needs
+    # is read+search on each slug, which `os.access` answers in one syscall per
+    # entry — cheap enough to do for every slug rather than sampling one.
+    try:
+        for entry in projects_root.iterdir():
+            entry.stat()
+            if entry.is_dir() and not os.access(entry, os.R_OK | os.X_OK):
+                raise PermissionError(errno.EACCES, f"cannot read or traverse {entry}", str(entry))
+    except OSError as exc:
+        return Finding(
+            label="transcript source",
+            status=Status.PROBLEM,
+            detail=(
+                f"claude_projects_dir cannot be read: {projects_root} ({exc}) — "
+                "session-index fails on every session end, and the failure is "
+                "discarded, so nothing reports it"
+            ),
+            remedy=f"fix the permissions on {projects_root} (it must be readable and traversable)",
+        )
+
+    return None
+
+
 def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Inspect ``sessions.db``: embedding coverage and FTS sync."""
     findings: list[Finding] = []
@@ -495,25 +797,76 @@ def _check_session_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     # healthy" and exit 0 for an install that had never indexed one transcript
     # (#165). It is a PROBLEM, and a distinct one from "nothing to index yet".
     projects_root = cfg.claude_projects_dir
-    if not projects_root.is_dir():
+    source_finding = _transcript_source_finding(projects_root, cfg, embedder)
+    if source_finding is not None:
+        findings.append(source_finding)
+        # An INFO here means "nothing to index yet", which is a complete answer:
+        # there is no point inspecting an index of a source that has nothing in
+        # it. A PROBLEM means the source is unusable, so the downstream checks
+        # would only add noise about a cause already reported.
+        return findings
+
+    db_path = cfg.sessions_db_path
+    # Same reason as in _prior_index_state: exists() cannot tell "absent" from
+    # "cannot look", and the absent branch below says "not built yet", which for
+    # an unreadable DB is a false statement about a working install.
+    try:
+        os.stat(db_path)
+        db_absent = False
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            findings.append(
+                Finding(
+                    label="session index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"cannot inspect {db_path} ({exc}) — so whether the "
+                        "session index exists at all is unknown, and session "
+                        "search cannot be relied on"
+                    ),
+                    remedy=(
+                        f"fix access to {db_path} and its parent directories, "
+                        "then run rekol doctor again"
+                    ),
+                )
+            )
+            return findings
+        db_absent = True
+
+    # THE SAME lstat SPLIT AS THE SOURCE CHECK, applied to the check a user
+    # actually reads (QA, 2026-11-08). Fixing `_prior_index_state` was not
+    # enough: this is the visible `session index` finding, and for
+    # `sessions.db -> somewhere/gone` it printed "not built yet" with the remedy
+    # `rekol session-index --full` — a remedy that **crashes**. Measured: with
+    # the link target's parent missing, that command exits 1 with
+    # `sqlite3.OperationalError: unable to open database file` and a traceback.
+    # (With the parent present SQLite creates the file through the link instead,
+    # so the crash depends on the shape; both are reported the same way now,
+    # because in neither case is "not built yet" true.)
+    #
+    # My test for the earlier half asserted on `_prior_index_state()`, a helper,
+    # rather than on what doctor prints — the same mistake a review caught in
+    # #224 hours earlier: the helper returning the right answer is not the claim
+    # that the user sees the right thing.
+    if db_absent and _path_exists_but_cannot_be_a_directory(db_path):
         findings.append(
             Finding(
-                label="transcript source",
+                label="session index",
                 status=Status.PROBLEM,
                 detail=(
-                    f"claude_projects_dir does not exist: {projects_root} — "
-                    "session-index fails on every session end and the index can never build"
+                    f"{db_path} exists but does not resolve — it is a broken "
+                    f"symlink, so the session index cannot be read or rebuilt "
+                    f"through it, and session search returns nothing"
                 ),
                 remedy=(
-                    "set claude_projects_dir in rekol.config.yaml, or CLAUDE_CONFIG_DIR "
-                    "if you relocated Claude Code's tree"
+                    f"remove or repoint {db_path} (it points at a path that is "
+                    f"not there), then run rekol session-index --full"
                 ),
             )
         )
         return findings
 
-    db_path = cfg.sessions_db_path
-    if not db_path.exists():
+    if db_absent:
         # Only INFO when there is genuinely nothing to index. If transcripts are
         # sitting there unindexed, the feature is silently not working and saying
         # "healthy" would be false.

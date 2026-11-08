@@ -6,6 +6,105 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **Four ways a BROKEN install reported "first use" (#165/#231, review).** This PR exists to stop
+  `doctor` reporting a fresh install as DEGRADED, and a reviewer sent to look for the opposite error
+  found it four times — neutral on an install that can never index anything, which is the worse
+  direction.
+  **"Absent" turned out to be three different things**, because `os.stat` follows links and collapses
+  them into one ENOENT/ENOTDIR: the name genuinely missing (a real first run), the name existing as a
+  **dangling symlink** (the shape a relocated `~/.claude` leaves when its target moves), and a path
+  **component being a regular file** (nothing can `mkdir` under a file). The last two were reported
+  as "Claude Code creates it on first use" with no remedy. `os.lstat` separates them, and the same
+  split fixes a dangling `sessions.db` link, which read as "not built yet" and offered
+  `rekol session-index --full` — a remedy that writes through the same broken link.
+  **A partial lockout of the transcript tree was silent.** The traversal probe stat'd
+  `next(iterdir(), None)` — a single sample — so an unreadable slug went unreported whenever it was
+  not the entry the filesystem happened to return first. Measured: four slugs with one at mode 000
+  produced **no finding**, while `Path.glob("**/*.jsonl")` — what `sessions/ingest.py` walks —
+  returned 3 of 4 transcripts. A whole project's history missing from the index with nothing said.
+  Every entry is probed now, and `stat` alone was not enough either: stat'ing a mode-000 *directory*
+  succeeds, since the search bit that governs it belongs to the parent. It asks `os.access` whether
+  each slug can be read and traversed — 44 ms at 2400 slugs, measured.
+  This is the sibling of the single-sample fault fixed on the curated side the same day; fixing one
+  and not the other is how it survived.
+  **And the visible check needed the same fix, not just the helper (QA).** For
+  `sessions.db -> somewhere/gone` the `session index` finding a user reads still said "not built
+  yet" and offered `rekol session-index --full` — a remedy QA measured **crashing**: exit 1 with
+  `sqlite3.OperationalError: unable to open database file`. (With the link target's parent present
+  SQLite creates the file through the link instead, so whether it crashes depends on the shape;
+  neither case makes "not built yet" true.) It reports ✗ now, names the broken link, and the remedy
+  is to remove or repoint it. My test for the first half asserted on `_prior_index_state()`, a
+  helper, rather than on what `doctor` prints — the same mistake a review caught in #224 hours
+  earlier, so this one goes through `run_doctor` and reads the finding.
+- **An unreadable sessions DB read as a fresh machine.** The prior-index check returned 0 for a
+  corrupt or unreadable DB, which is indistinguishable from "nothing was ever indexed" — so the one
+  case where `doctor` genuinely cannot tell was reported as the reassuring one. Absent, empty,
+  populated and **unknown** are now four distinct states, unknown is reported as unknown, and the
+  store is closed on every path. There is an explicit control for an initialised-but-empty DB,
+  which the neutral-line test never exercised because it has no DB at all.
+- **Listing a directory is not traversing it.** Mode 0400 lets `iterdir` enumerate names while
+  every child is unopenable, so enumeration alone still reported a locked-out transcript source as
+  healthy. `session-index` has to traverse into the per-project directories to read transcripts, so
+  that is what is now tested.
+- The vanished-storage wording no longer says messages "were indexed from it", which claims
+  per-message provenance this does not check. It says the session index holds them.
+- **The existence probes sat OUTSIDE the error boundary, and what they do depends on the Python
+  version.** Both the sessions DB and the transcript source were tested with `Path.exists()` /
+  `is_dir()` before any `try`. Measured on the same sealed-directory fixture: **3.11.15 raises
+  `PermissionError`**, so `doctor` dies with a traceback, and **3.15.0 answers False**, so the same
+  install reads as ABSENT — a fresh machine with nothing indexed yet. One mode bit on a parent
+  directory produced either a crash or a reassuring lie depending on the interpreter. A
+  self-looping symlink answers False on **both**, so that case was silently wrong everywhere.
+  Both probes are now `os.stat` inside the boundary, classified by errno: `ENOENT`/`ENOTDIR` really
+  means absent, and anything else is reported as "cannot be inspected" / UNKNOWN rather than
+  rounded to absence. First-run neutrality is pinned by its own control, so a fix that answered
+  UNKNOWN unconditionally fails three tests.
+- **The UNKNOWN remedy pointed at a report that is never printed.** It said "check the sessions DB
+  (rekol doctor reports it below)" — but that finding *returns*, so the session-index checks which
+  would have reported the DB never run. It read as if the answer were already on screen. The
+  remedy now names the DB path and gives two real actions, split by cause: move a corrupt DB aside
+  and rebuild, or fix permissions on an unreadable one.
+
+### Fixed
+- **A brand-new install reported `index is DEGRADED` because Claude Code had not created
+  `~/.claude/projects` yet.** An absent projects dir has two causes with opposite meanings, and
+  both were reported as a problem. At the **default** location it simply has not been created yet
+  — Claude Code creates it on first use, and rekol can be installed before that happens — so
+  nothing is wrong and there is merely nothing to index. That is now a neutral line naming
+  `claude_projects_dir`, with no remedy.
+  At an **explicitly configured** location the finding is unchanged and stays a PROBLEM: the user
+  said where it is and it is not there, so `session-index` exits 2 on every SessionEnd — into
+  `>/dev/null 2>&1`, where nobody ever sees it — and the index can never build (#165). The
+  comparison is against the *resolved* default, so a relocated `CLAUDE_CONFIG_DIR` counts as the
+  default too; there the path is correct and merely unpopulated.
+  Verified end to end on a first-run shape: `index is healthy`, exit 0, with the neutral line
+  present and no `✗ transcript source`. Measured for context while fixing it — on a live machine
+  the directory predated the rekol install by nearly three months, so the ordinary case is that it
+  already exists; the gap is narrow, and a first impression is a bad place to be wrong. `doctor`
+  being red out of the box has shipped twice, and each time it taught people to ignore the report.
+- **First-run neutrality hid a real failure: transcript storage that vanished.** The new INFO
+  line was returned for any absent default directory, before looking at the index — so a machine
+  that had indexed transcripts and then lost its `~/.claude/projects` was told "does not exist yet
+  … nothing to index until a session has ended" over a populated database (Codex measured this
+  against a real fixture). Those two states look identical on the filesystem; the index is what
+  tells them apart. A populated sessions DB now means **lost storage**, with a PROBLEM, the message
+  count as evidence, and a remedy. A machine that has never indexed anything keeps the neutral
+  line, which is the point of the change.
+- **`is_dir()` proves type, not access, and its False result covered three different states.**
+  Both of these were pre-existing, and both were made invisible by the neutral line, so they are
+  fixed with it rather than filed:
+  a **regular file** at the projects-dir path entered the "does not exist yet" branch, and an
+  **unreadable** directory was not detected at all — `doctor` reported embeddings and FTS as fine
+  while enumeration raised `PermissionError` on every `session-index` run, into discarded output.
+  Enumeration is what `session-index` actually does, so that is now what is tested, with the
+  failure classified rather than read as "empty".
+
+- **`doctor`'s own tests could fail from a stray `rekol` on the developer's PATH.** Since the
+  console-script check walks PATH (#203), a leftover build shim made five tests in
+  `test_cli_doctor.py` fail — Codex hit this under `uv run` and the suite only passed with a
+  restricted PATH. The module now pins PATH to an empty directory, so the host cannot influence
+  it; tests that care about PATH still set their own. Reproduced before fixing and confirmed after:
+  a broken `rekol` early on PATH fails five tests before, none after.
 - **The guard checker missed a bypass hiding among guarded calls (#223, review).** A **mixed**
   file — a valid `rekol_bats_run_destructive` wrapper plus one `@test` doing
   `d="$COMPONENT_DIR"; run "$d/uninstall.sh"` — reported `guard violations: 0`. The checker required
