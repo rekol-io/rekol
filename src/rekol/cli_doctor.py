@@ -26,6 +26,7 @@ import re
 import sqlite3
 import stat
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -37,10 +38,14 @@ from rekol.config import Config, load_config, resolve_claude_config_dir
 from rekol.embeddings import BaseEmbedder, get_embedder
 from rekol.include_coverage import compute_coverage
 from rekol.indexer import (
+    INDEXED_DIRS,
+    NON_MEMORY_DIRS,
     NON_MEMORY_DIRS_DISPLAY,
     NON_MEMORY_FILES,
+    PROJECTS_DIR,
     _iter_memory_files,
     _skip_reason,
+    is_in_indexed_layer,
     is_non_memory,
     iter_all_markdown,
 )
@@ -98,23 +103,422 @@ def _format_last_indexed(indexed_at_unix: int | None) -> str:
         return "unknown"
 
 
+class _CuratedFiles(Enum):
+    """Whether there is any curated memory to index.
+
+    THREE states, not two (same lesson as #231's prior-index check). Collapsing
+    "cannot tell" into "none" is what turns an unreadable memory home into a
+    reassuring first-run line, which is the defect this check is being fixed to
+    stop making.
+    """
+
+    NONE = "none"  # readable, and holds nothing the indexer would index
+    SOME = "some"  # holds at least one file the indexer would index
+    # Markdown IS there, but all of it outside the layers the indexer walks, so
+    # a rebuild would produce an empty index. Reporting this as NONE would be
+    # true about the index and useless to the user, who has written memory that
+    # nothing will ever read (Codex, 2026-11-06).
+    OUTSIDE_THE_LAYERS = "outside"
+    UNKNOWN = "unknown"  # could not be read, so none of the above is known
+
+
+def _indexer_entry_points(memory_home: Path, on_error: Callable[[OSError], None]) -> list[Path]:
+    """Every directory the indexer resolves BY NAME, and so follows a link at.
+
+    This list IS the indexer's link policy, read off ``_iter_memory_files``:
+    each of these paths is reached by naming it and calling ``is_dir()``, which
+    follows a symlink, and everything below it is reached by
+    ``glob("**/*.md")``, which does not. So a link AT one of these names is
+    followed and a link anywhere deeper is not.
+    """
+    # ORDERED MOST-SPECIFIC-FIRST, and the order is load-bearing. The caller
+    # walks these before the root and prunes by inode, so whichever entry point
+    # reaches an inode first decides how its files are classified. An entry
+    # point that makes a path INDEXABLE therefore has to claim it before one
+    # that makes the same path OUTSIDE.
+    #
+    # The first version listed `projects/` before the per-slug layers, which
+    # fixed the top-level alias and left the same bug one level down (#253,
+    # found by review 2026-11-08): with `projects/a/topics -> projects/a/notes`,
+    # the `projects/` walk met the file as `projects/a/notes/s.md`, classified it
+    # correctly as outside the layers under THAT name, and claimed the inode — so
+    # the `projects/a/topics` walk was pruned and doctor said
+    # OUTSIDE_THE_LAYERS while the indexer read it through `topics`. Doctor then
+    # advised moving files that were already indexed.
+    root_layers = [memory_home / sub for sub in INDEXED_DIRS]
+    projects_root = memory_home / PROJECTS_DIR
+    try:
+        slugs = sorted(projects_root.iterdir())
+    except OSError as exc:
+        # An absent `projects/` is the ordinary case, not a failure to read.
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            on_error(exc)
+        return [*root_layers, projects_root]
+
+    slug_dirs: list[Path] = []
+    slug_layers: list[Path] = []
+    for slug_dir in slugs:
+        try:
+            if not slug_dir.is_dir():
+                continue
+        except OSError as exc:  # is_dir() can raise EACCES on 3.11
+            on_error(exc)
+            continue
+        slug_dirs.append(slug_dir)
+        slug_layers.extend(slug_dir / sub for sub in INDEXED_DIRS)
+
+    # Indexable-claiming first (root layers, then per-slug layers), then the
+    # containers whose walks can only produce `outside` classifications.
+    return [*root_layers, *slug_layers, projects_root, *slug_dirs]
+
+
+def _count_markdown_by_scope(
+    memory_home: Path, on_error: Callable[[OSError], None]
+) -> tuple[int, int]:
+    """``(indexable, outside)`` markdown counts under ``memory_home``.
+
+    Split out of :func:`_curated_memory_file_state` only to keep that function
+    under the complexity limit; the reasoning lives in its docstring.
+
+    LINKS ARE FOLLOWED EXACTLY WHERE THE INDEXER FOLLOWS THEM, and the history
+    is a correction in each direction:
+
+    * ``followlinks=False`` was too narrow. The indexer reaches a symlinked
+      LAYER (``home/topics`` pointing elsewhere), so a walk refusing to follow
+      it counted ZERO and reported "nothing to index" for a home whose memory
+      was sitting right there — memory silently dark on an unbuilt index, which
+      is the worst direction to be wrong in (Codex, 2026-11-07).
+    * ``followlinks=True`` was then too wide, in a way that is wrong in the
+      other direction and so looks harmless until you read the remedy. It also
+      follows a link NESTED INSIDE a layer, which ``Path.glob("**/*.md")`` never
+      does. With only ``home/topics/linked-subdir -> external/``, doctor said
+      SOME and the indexer reached nothing, so doctor's advice to run
+      ``rekol index rebuild`` could not work: the user would be told their
+      memory is there and a rebuild would keep producing an empty index
+      (Codex + product, 2026-11-07). Doctor's job here is to AGREE with the
+      indexer, not to be more generous than it.
+
+    So the walk itself never follows a link, and it is run once per entry point
+    from :func:`_indexer_entry_points` — the places the indexer names, which are
+    the places it follows one. That a memory reachable only through a nested
+    link goes unindexed with nothing saying so is a real gap, filed separately
+    (#247): it is not doctor's to paper over by disagreeing with the indexer.
+
+    Note what this does NOT change: ``is_in_indexed_layer`` is a predicate on
+    path components and knows nothing about links. It is asked only about files
+    this walk actually found, so the two together answer "reachable AND in
+    scope"; the predicate alone answers only the second half.
+    """
+    # Keyed on (device, inode) rather than on the path, so the same directory
+    # reached twice — by the root walk and then as an entry point, or through
+    # `home/topics/loop -> home/topics` — is counted once. This is what makes
+    # running one walk per entry point safe rather than double-counting.
+    visited: set[tuple[int, int]] = set()
+
+    def _ignore_absent(exc: OSError) -> None:
+        # An entry point that does not exist is the ordinary case, not a
+        # failure to read one. Without this, walking `home/topics` on a home
+        # that has no `topics/` would set `walk_failed` and report UNKNOWN for
+        # every empty home — a check that answers "cannot tell" always is worth
+        # no more than one that answers "fine" always.
+        # ELOOP alongside ENOENT/ENOTDIR: a self-looping entry point
+        # (`topics -> topics`) is absent as far as the indexer is concerned,
+        # because `Path.is_dir()` swallows the OSError and returns False. Left
+        # out, it reached `on_error` and made the whole answer UNKNOWN for a home
+        # whose other layers held perfectly readable memory (review,
+        # 2026-11-08). Matching the indexer is the whole contract of this walk.
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return
+        on_error(exc)
+
+    # THE ENTRY POINTS FIRST, THEN THE HOME, and the order is the fix for an
+    # ALIAS (QA, 2026-11-07). With `home/topics -> home/projects/shared`, the
+    # root walk reached `projects/shared/s.md` by its OTHER name, classified it
+    # as outside the layers (which `projects/shared/...` is), and marked the
+    # inode visited — so the `topics` entry-point walk was then pruned and the
+    # file was never counted as indexable. Doctor said OUTSIDE_THE_LAYERS while
+    # the indexer reached it through `topics`, and doctor's advice there was to
+    # move files that are already indexed.
+    #
+    # Walking the entry points first means the indexable NAME claims the inode,
+    # and the root walk skips the alias. That is the right precedence for the
+    # same reason the list exists: the entry points are what the indexer
+    # resolves, so when one inode has two names, the indexer's name wins.
+    indexable = 0
+    outside = 0
+    for entry_point in _indexer_entry_points(memory_home, on_error):
+        more_indexable, more_outside = _count_tree(
+            entry_point, memory_home=memory_home, visited=visited, on_error=_ignore_absent
+        )
+        indexable += more_indexable
+        outside += more_outside
+    # The home last: root-level markdown, and anything under `projects/` that no
+    # entry point already claimed.
+    more_indexable, more_outside = _count_tree(
+        memory_home, memory_home=memory_home, visited=visited, on_error=on_error
+    )
+    return indexable + more_indexable, outside + more_outside
+
+
+def _count_tree(
+    top: Path,
+    *,
+    memory_home: Path,
+    visited: set[tuple[int, int]],
+    on_error: Callable[[OSError], None],
+) -> tuple[int, int]:
+    """``(indexable, outside)`` for one tree, never following a link below ``top``."""
+    indexable = 0
+    outside = 0
+    for dirpath, dirnames, filenames in os.walk(top, onerror=on_error, followlinks=False):
+        here, elsewhere = _count_one_directory(
+            dirpath,
+            dirnames,
+            filenames,
+            memory_home=memory_home,
+            visited=visited,
+            on_error=on_error,
+        )
+        indexable += here
+        outside += elsewhere
+    return indexable, outside
+
+
+def _count_one_directory(
+    dirpath: str,
+    dirnames: list[str],
+    filenames: list[str],
+    *,
+    memory_home: Path,
+    visited: set[tuple[int, int]],
+    on_error: Callable[[OSError], None],
+) -> tuple[int, int]:
+    """Count one directory's markdown, and prune what the indexer never reads.
+
+    Mutates ``dirnames`` (that is how ``os.walk`` is told not to descend) and
+    ``visited``. Split out of :func:`_count_markdown_by_scope` only to clear the
+    complexity limit.
+    """
+    indexable = 0
+    outside = 0
+    try:
+        entry = os.stat(dirpath)
+    except OSError as exc:
+        on_error(exc)
+        dirnames[:] = []
+        return 0, 0
+    key = (entry.st_dev, entry.st_ino)
+    if key in visited:
+        dirnames[:] = []
+        return 0, 0
+    visited.add(key)
+
+    if os.path.samestat(entry, os.stat(memory_home)):
+        # PRUNE WHAT THE INDEXER NEVER READS, BEFORE DESCENDING (Codex).
+        # `tasks/` is the machine-managed task layer, excluded by design — but an
+        # unreadable one still tripped `onerror`, so a home whose curated memory
+        # is perfectly fine reported UNKNOWN because of a directory the answer
+        # does not depend on. Pruned only at the root, which is where the
+        # exclusion applies (`rel.parts[0]`).
+        #
+        # Only the layer dirs and `projects/` can hold anything indexable, so
+        # nothing else is descended into — markdown sitting at the root is still
+        # seen by the file loop below. A hidden directory INSIDE a layer is kept:
+        # the indexer's globs match there, so `always/.old/x.md` really is
+        # indexed.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in NON_MEMORY_DIRS and (d in INDEXED_DIRS or d == PROJECTS_DIR)
+        ]
+    for filename in filenames:
+        if not filename.endswith(".md"):
+            continue
+        path = Path(dirpath) / filename
+        if is_non_memory(path, memory_home):
+            continue
+        if is_in_indexed_layer(path, memory_home):
+            indexable += 1
+        elif not filename.startswith("."):
+            # OUTSIDE the layers, and NOT hidden. A root `.draft.md` is not
+            # something the user is waiting to see in search: `iter_all_markdown`
+            # excludes hidden paths, so reporting it as unreachable memory was
+            # noise on an otherwise empty home (Codex). Hidden files INSIDE a
+            # layer are a different question and are counted as indexable above,
+            # because the indexer's globs really do match them — the two rules
+            # disagree on purpose.
+            outside += 1
+    return indexable, outside
+
+
+def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
+    """``(state, count)``; the count is meaningful for ``SOME``/``OUTSIDE_THE_LAYERS``.
+
+    THE QUESTION IS "would a rebuild index anything", so the answer has to use
+    the indexer's own scope. It used to count every ``.md`` under the home that
+    was not hidden and not deliberately excluded, which is a different question:
+    the indexer walks the layer dirs and ``projects/``, not the whole tree. A
+    home holding only a stray ``note.md`` at its root, or only ``tasks/t.md``,
+    therefore read as SOME — "search returns nothing for your files", with
+    ``rekol index rebuild`` as the remedy, which would have built an empty index
+    and changed nothing (Codex, 2026-11-06).
+
+    ``is_in_indexed_layer`` is the indexer's scope as a predicate, pinned to the
+    real walk by a property test. A predicate rather than the walk itself
+    because this needs ``os.walk``'s ``onerror`` to SEE an unreadable directory;
+    ``glob`` swallows that, which is #232.
+
+    Every disagreement between this and the indexer has been the same fault
+    wearing a different hat — a symlinked layer, a hidden file, a dangling
+    pointer — so they are now checked TOGETHER, as a table of shapes run through
+    both this function and the real ``_iter_memory_files`` and required to
+    agree. That table is the test that matters here.
+    """
+    try:
+        if not memory_home.is_dir():
+            return _CuratedFiles.UNKNOWN, 0
+        # Listing is not traversal (#231): a directory can be listable while its
+        # children cannot be opened, so entries are stat'd rather than only
+        # named.
+        #
+        # ONLY THE ENTRIES THE ANSWER DEPENDS ON, which is the fix for a home
+        # whose `MEMORY.md` is a dangling pointer (Codex, 2026-11-07). This
+        # probed `next(iterdir(), None)` — whichever name the filesystem
+        # happened to return first — so a dangling retirement pointer made the
+        # whole check report UNKNOWN, "a missing answer", about a home that was
+        # perfectly readable. The entries that decide the answer are the layer
+        # dirs and `projects/`; a broken pointer at the root is not one of them.
+        for layer in (*INDEXED_DIRS, PROJECTS_DIR):
+            candidate = memory_home / layer
+            if not (candidate.is_symlink() or candidate.exists()):
+                continue
+            try:
+                candidate.stat()  # follows the link on purpose: the indexer does
+            except OSError as exc:
+                # A DANGLING OR LOOPING LAYER LINK IS ABSENT, NOT UNKNOWABLE
+                # (review, 2026-11-08). `stat` raises ENOENT on a link to
+                # nothing and ELOOP on `topics -> topics`, and that used to make
+                # the whole check answer UNKNOWN — so a home holding
+                # `always/s.md` beside a broken `topics` link reported "cannot be
+                # inspected" when it could have said SOME, and the indexer read
+                # the file perfectly well.
+                #
+                # The indexer's own `is_dir()` returns False for both, silently,
+                # so treating them as absent is what AGREES with it. The comment
+                # above says "the indexer does" follow the link, and for these
+                # two cases that was simply wrong. A dangling `projects/<slug>`
+                # was already handled this way, so the two are consistent now.
+                if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+                    continue
+                raise
+    except OSError:
+        return _CuratedFiles.UNKNOWN, 0
+
+    # NOT `Path.glob`, which SWALLOWS a PermissionError on a subdirectory and
+    # simply yields nothing for it. A readable memory home with one unreadable
+    # layer dir therefore counted 0 files and reported "there is no curated
+    # memory to index" — a file was there, and the answer was identical to
+    # having none. That is the #158 shape: output the same whether or not the
+    # thing held. `os.walk`'s onerror makes the failure visible instead.
+    walk_failed = False
+
+    def _note_walk_error(_exc: OSError) -> None:
+        nonlocal walk_failed
+        walk_failed = True
+
+    indexable, outside = _count_markdown_by_scope(memory_home, _note_walk_error)
+
+    if walk_failed:
+        return _CuratedFiles.UNKNOWN, 0
+    if indexable:
+        return _CuratedFiles.SOME, indexable
+    if outside:
+        return _CuratedFiles.OUTSIDE_THE_LAYERS, outside
+    return _CuratedFiles.NONE, 0
+
+
 def _check_curated_index(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
     """Inspect the curated ``index.db``: existence, schema, identity, counts, age."""
     findings: list[Finding] = []
     db_path = cfg.index_db_path
     if not db_path.exists():
-        # A curated index that was never built is a PROBLEM, not merely INFO:
-        # memory search has nothing to return, which is exactly the "memory
-        # doesn't work" state a user runs `doctor` to diagnose. Reported, not
-        # crashed (we never open a non-existent DB), with the build remedy.
-        findings.append(
-            Finding(
-                label="curated index",
-                status=Status.PROBLEM,
-                detail=f"not built yet (no {db_path})",
-                remedy="rekol index rebuild",
+        # "Not built yet" has three meanings and they are not interchangeable
+        # (#232). Reporting all of them as a PROBLEM made `doctor` red out of the
+        # box on a machine where nothing was wrong — the third time this project
+        # has shipped that, after #165 and #231, and each time it teaches people
+        # to stop reading the report.
+        #
+        # The two checks either side of this one already model it: `transcript
+        # archive` prints a neutral line for the same condition, and `session
+        # index` only fires when transcripts actually exist. This now matches
+        # them.
+        curated, curated_count = _curated_memory_file_state(cfg.memory_home)
+        if curated is _CuratedFiles.SOME:
+            # The real #165 bar: content exists and search cannot reach it.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}) — but {curated_count} curated "
+                        "memory file(s) exist, so searching curated memory returns "
+                        "nothing"
+                    ),
+                    remedy="rekol index rebuild",
+                )
             )
-        )
+        elif curated is _CuratedFiles.OUTSIDE_THE_LAYERS:
+            # A rebuild would index nothing, so "rekol index rebuild" is the
+            # wrong remedy and "nothing to index" is the wrong reassurance. The
+            # files are real and unreachable; say where they have to live.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}), and the {curated_count} "
+                        f"markdown file(s) in {cfg.memory_home} are all OUTSIDE the "
+                        f"directories rekol indexes ({', '.join(INDEXED_DIRS)}, "
+                        f"{PROJECTS_DIR}/) — a rebuild would index none of them, so "
+                        "they are unsearchable wherever the index stands"
+                    ),
+                    remedy=(
+                        f"move them into one of {', '.join(INDEXED_DIRS)} (or "
+                        f"{PROJECTS_DIR}/<name>.md), then rekol index rebuild"
+                    ),
+                )
+            )
+        elif curated is _CuratedFiles.UNKNOWN:
+            # Its own report, because "cannot tell" is not "nothing to index".
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.PROBLEM,
+                    detail=(
+                        f"not built yet (no {db_path}) and {cfg.memory_home} could "
+                        "not be read, so whether there is anything to index is "
+                        "UNKNOWN — this is not a first run, it is a missing answer"
+                    ),
+                    remedy=(
+                        f"check that {cfg.memory_home} exists and is readable, then "
+                        "rekol index rebuild"
+                    ),
+                )
+            )
+        else:
+            # Nothing to index: an index would be empty, and `rekol index
+            # rebuild` would only silence the line rather than make it true.
+            findings.append(
+                Finding(
+                    label="curated index",
+                    status=Status.INFO,
+                    detail=(
+                        f"not built yet, and there is no curated memory to index in "
+                        f"{cfg.memory_home} — it is built when you capture your first "
+                        "memory"
+                    ),
+                )
+            )
         return findings
 
     # Opening or querying a corrupt index.db raises sqlite3.DatabaseError ("file

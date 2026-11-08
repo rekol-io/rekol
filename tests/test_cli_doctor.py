@@ -1463,6 +1463,511 @@ def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
     assert "import hook" in finding.detail
 
 
+# ---------------------------------------------------------------------------
+# "curated index: not built yet" has three meanings (#232)
+# ---------------------------------------------------------------------------
+# Reporting all of them as a PROBLEM made `doctor` red out of the box on a
+# machine where nothing was wrong — the third time this project has shipped
+# that, after #165 and #231. The checks either side already model it: the
+# archive check prints a neutral line for the same condition, and the session
+# index only fires when transcripts actually exist.
+
+
+def _unindexed_home(tmp_path: Path, monkeypatch, *, with_curated: bool) -> Path:
+    """A home with NO curated index built, optionally holding curated files."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "rekol.config.yaml").write_text(
+        f"embedding_model: test-hashing\nclaude_projects_dir: {tmp_path / 'projects'}\n"
+    )
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    if with_curated:
+        (home / "topics").mkdir()
+        (home / "topics" / "sailing.md").write_text(
+            "---\nname: Sailing\ndescription: boats\ntype: topic\n"
+            "tags: ['sailing']\naliases: ['boats']\n---\n\n# Sailing\n\nBoats.\n"
+        )
+    monkeypatch.setenv("REKOL_HOME", str(home))
+    return home
+
+
+def _curated_finding(findings: list) -> object:
+    matches = [f for f in findings if f.label == "curated index"]
+    assert matches, [f.label for f in findings]
+    return matches[0]
+
+
+def test_no_curated_memory_and_no_index_is_neutral(tmp_path: Path, monkeypatch) -> None:
+    """Nothing to index is not a fault, and `index rebuild` would build nothing.
+
+    Running the old remedy did not make the statement true; it only silenced the
+    line. That is the tell that the severity was wrong.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert finding.remedy is None
+    assert "no curated memory to index" in finding.detail
+
+
+def test_curated_memory_without_an_index_is_still_a_problem(tmp_path: Path, monkeypatch) -> None:
+    """The #165 bar, and the negative control for the neutrality above.
+
+    Without this, making every "not built yet" neutral would pass the test above
+    while hiding the case that actually breaks search.
+    """
+    _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert finding.remedy == "rekol index rebuild"
+    # The count is what makes it checkable rather than a guess.
+    assert "1 curated memory file(s) exist" in finding.detail
+    assert "returns nothing" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_is_unknown_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`Path.glob` swallows a PermissionError on a subdirectory and yields nothing.
+
+    So a readable memory home with one unreadable layer dir counted zero files
+    and reported "there is no curated memory to index" — the answer identical to
+    genuinely having none, with a real file sitting right there. That is the #158
+    shape, and it is why the walk now uses `os.walk(onerror=…)`.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "topics").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "topics").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail
+    assert "no curated memory to index" not in finding.detail
+
+
+def test_an_absent_memory_home_is_unknown_not_nothing_to_index(tmp_path: Path, monkeypatch) -> None:
+    """A REKOL_HOME that does not exist is not evidence that nothing was curated."""
+    missing = tmp_path / "gone"
+    monkeypatch.setenv("REKOL_HOME", str(missing))
+    (tmp_path / "cfg").mkdir()
+    from rekol.cli_doctor import _curated_memory_file_state, _CuratedFiles
+
+    state, count = _curated_memory_file_state(missing)
+    assert state is _CuratedFiles.UNKNOWN
+    assert count == 0
+
+
+def test_the_scope_predicate_agrees_with_the_indexer_walk(tmp_path: Path) -> None:
+    """THE ANTI-DRIFT PIN, and the reason a predicate is allowed at all.
+
+    `doctor` answers "would a rebuild index anything?" with a predicate rather
+    than the indexer's walk, because it needs `os.walk`'s `onerror` to see an
+    unreadable directory and `glob` swallows that (#232). A predicate that
+    merely looks right is how #157/#158 happened, so it is compared against the
+    real walk over a tree holding every shape the walk distinguishes — layer
+    dirs, nesting, hidden names, flat and nested `projects/`, `tasks/`, strays
+    at the root, and the shipped pointer files.
+
+    Hidden names are included on purpose: the indexer's globs match them, so
+    `always/.draft.md` really is indexed. If that policy ever changes, the walk
+    and this predicate change together or this test fails.
+    """
+    from rekol.indexer import _iter_memory_files, is_in_indexed_layer
+
+    root = tmp_path / "home"
+    shapes = [
+        "always/a.md",
+        "always/.draft.md",
+        "always/deep/b.md",
+        "always/.hidden/c.md",
+        "when/w.md",
+        "topics/t.md",
+        "knowledge/k.md",
+        "feedback/f.md",
+        "projects/flat.md",
+        "projects/.flathidden.md",
+        "projects/slug/always/p.md",
+        "projects/slug/always/deep/q.md",
+        "projects/slug/stray.md",
+        "projects/slug/notalayer/r.md",
+        "stray.md",
+        "MEMORY.md",
+        "REKOL.md",
+        "tasks/t1.md",
+        "tasks/deep/t2.md",
+        ".hidden/h.md",
+        "random/r.md",
+    ]
+    for shape in shapes:
+        target = root / shape
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+
+    walked = {str(p.relative_to(root)) for p in _iter_memory_files(root)}
+    predicted = {s for s in shapes if is_in_indexed_layer(root / s, root)}
+    assert walked == predicted, {
+        "walk only": sorted(walked - predicted),
+        "predicate only": sorted(predicted - walked),
+    }
+    # And it is not vacuously equal: the fixture must contain both answers.
+    assert walked, "the fixture reached nothing — the comparison proves nothing"
+    assert set(shapes) - walked, "the fixture has no excluded shapes"
+
+
+def test_markdown_only_outside_the_indexed_layers_is_not_nothing_to_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The count used a filesystem-wide walk; the indexer walks the layer dirs.
+
+    So a home holding only a stray `note.md` at its root read as "1 curated
+    memory file(s) exist, so searching curated memory returns nothing", with
+    `rekol index rebuild` as the remedy — which would have built an EMPTY index
+    and changed nothing. Both halves were wrong (Codex, 2026-11-06).
+
+    The right answer is neither of the old two: the file is real, and no rebuild
+    will ever reach it.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "note.md").write_text(
+        "---\nname: Note\ndescription: d\ntype: topic\n---\n\nreal content\n"
+    )
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "OUTSIDE the directories rekol indexes" in finding.detail, finding.detail
+    assert "no curated memory to index" not in finding.detail
+    assert finding.remedy and "move them into" in finding.remedy
+    # The remedy must not be the one that builds an empty index.
+    assert finding.remedy != "rekol index rebuild"
+
+
+def test_a_tasks_only_home_is_neutral_not_a_rebuild_prompt(tmp_path: Path, monkeypatch) -> None:
+    """`tasks/` is machine-managed and excluded by design, so it is not memory.
+
+    It was counted by neither state correctly: excluded from the count by
+    `is_non_memory`, yet still walked — which the test below is about.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    assert finding.status is Status.INFO, finding.detail
+    assert "no curated memory to index" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_tasks_dir_does_not_make_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The answer must not depend on a directory the answer does not depend on.
+
+    `tasks/` is excluded by design, so whether it is readable is irrelevant to
+    "is there curated memory to index". But it was still traversed, so an
+    unreadable one tripped `onerror` and the whole check returned UNKNOWN —
+    turning a perfectly healthy home into "a missing answer" (Codex,
+    2026-11-06). It is pruned before descending now.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=True)
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T\n---\n\ntask\n")
+    (home / "tasks").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "tasks").chmod(0o755)
+
+    assert "UNKNOWN" not in finding.detail, finding.detail
+    # The real curated file is still reported, so pruning did not blind it.
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "1 curated memory file(s) exist" in finding.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits this test relies on")
+def test_an_unreadable_layer_dir_still_makes_the_answer_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The counterpart to the pruning above: prune only what is excluded.
+
+    Without this, pruning everything would silence #232's finding as well — the
+    unreadable directory that DOES decide the answer.
+    """
+    home = _unindexed_home(tmp_path, monkeypatch, with_curated=False)
+    (home / "knowledge").mkdir()
+    (home / "knowledge" / "k.md").write_text("---\nname: K\n---\n\nk\n")
+    (home / "knowledge").chmod(0o000)
+    try:
+        finding = _curated_finding(run_doctor(load_config(), HashingEmbedder(dim=384)).findings)
+    finally:
+        (home / "knowledge").chmod(0o755)
+
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "UNKNOWN" in finding.detail, finding.detail
+
+
+# ---------------------------------------------------------------------------
+# THE AGREEMENT TABLE (#232, product's ruling 2026-11-07)
+# ---------------------------------------------------------------------------
+# Every defect found in this check has been the same fault wearing a different
+# hat: doctor's idea of what is indexed differing from the indexer's. A
+# symlinked layer, a hidden file, a dangling pointer — three findings, one
+# cause. So the two are checked TOGETHER from now on, as a table of shapes run
+# through both, rather than as one test per hat.
+
+
+def _doctor_state(home: Path):
+    from rekol.cli_doctor import _curated_memory_file_state
+
+    return _curated_memory_file_state(home)
+
+
+def _indexer_reaches(home: Path) -> int:
+    from rekol.indexer import _iter_memory_files
+
+    return len(list(_iter_memory_files(home)))
+
+
+def _disagreements(name: str, state, count: int, reached: int, expected) -> list[str]:
+    """Why ``name`` fails, if it does. Split out only to clear the complexity limit."""
+    from rekol.cli_doctor import _CuratedFiles
+
+    if state is not expected:
+        return [f"{name}: doctor said {state.value}, expected {expected.value}"]
+    # THE EQUIVALENCE. UNKNOWN is exempt by definition: it is the answer for
+    # "cannot tell", so it carries no claim about what the indexer reaches.
+    if state is _CuratedFiles.UNKNOWN:
+        return []
+    doctor_says_something = state is _CuratedFiles.SOME
+    if doctor_says_something == (reached > 0):
+        return []
+    return [
+        f"{name}: doctor says {'something' if doctor_says_something else 'nothing'} to index "
+        f"({state.value}, count={count}) but the indexer reaches {reached} file(s)"
+    ]
+
+
+# The shapes for the agreement table below. Module-level rather than nested so
+# the test itself stays under the complexity limit as shapes are added — the
+# table grows every time doctor and the indexer are found to disagree.
+def build_linked_layer(home: Path) -> None:
+    """A top-level layer that is a symlink to a readable directory."""
+    external = home.parent / "external-topics"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics").symlink_to(external)
+
+
+def build_root_hidden_file(home: Path) -> None:
+    """A hidden file at the ROOT: outside every layer, and not user-visible."""
+    (home / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_hidden_in_layer(home: Path) -> None:
+    """A hidden file INSIDE a layer: the indexer's globs do match this."""
+    (home / "always").mkdir()
+    (home / "always" / ".draft.md").write_text("---\nname: D\n---\n\nnotes\n")
+
+
+def build_dangling_pointer(home: Path) -> None:
+    """A retirement pointer whose target is gone."""
+    (home / "MEMORY.md").symlink_to(home / "nowhere-at-all.md")
+
+
+def build_root_stray(home: Path) -> None:
+    """A visible file at the root: real memory the indexer will never reach."""
+    (home / "note.md").write_text("---\nname: N\n---\n\nreal\n")
+
+
+def build_unreadable_tasks(home: Path) -> None:
+    """`tasks/` is excluded by design, so its readability is irrelevant."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "tasks").mkdir()
+    (home / "tasks" / "t1.md").write_text("---\nname: T1\n---\n\nt\n")
+    (home / "tasks").chmod(0o000)
+
+
+def build_unreadable_topics(home: Path) -> None:
+    """A layer dir that cannot be read: the answer DOES depend on it."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics").chmod(0o000)
+
+
+def build_layer_cycle(home: Path) -> None:
+    """A symlink loop inside a layer. Following links must not hang."""
+    (home / "topics").mkdir()
+    (home / "topics" / "t.md").write_text("---\nname: T\n---\n\nt\n")
+    (home / "topics" / "loop").symlink_to(home / "topics")
+
+
+def build_nested_link_in_layer(home: Path) -> None:
+    """A link NESTED INSIDE a layer, which the indexer does not follow.
+
+    `Path.glob("**/*.md")` never descends into a symlinked directory, so
+    this file is unreachable. Doctor used to follow it (`followlinks=True`)
+    and answer SOME, which made its own remedy impossible: the user was told
+    the memory is there and `rekol index rebuild` kept producing an empty
+    index (Codex + product, 2026-11-07). NONE is the agreeing answer; the
+    separate question of whether this file SHOULD be indexed is #247.
+    """
+    (home / "topics").mkdir()
+    external = home.parent / f"{home.name}-nested"
+    external.mkdir()
+    (external / "sailing.md").write_text("---\nname: S\n---\n\nboats\n")
+    (home / "topics" / "linked-subdirectory").symlink_to(external)
+
+
+def build_linked_project_slug(home: Path) -> None:
+    """`projects/<slug>` as a link: an entry point, so it IS followed.
+
+    The indexer reaches this one through `iterdir()` + `is_dir()`, both of
+    which resolve a link. The three project-level shapes are here because
+    the fix turns on exactly which names are entry points, and a list of
+    entry points that is wrong in the other direction fails nothing without
+    them.
+    """
+    (home / "projects").mkdir()
+    external = home.parent / f"{home.name}-slug"
+    (external / "always").mkdir(parents=True)
+    (external / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects" / "slug").symlink_to(external)
+
+
+def build_linked_layer_in_slug(home: Path) -> None:
+    """`projects/<slug>/<layer>` as a link: also an entry point."""
+    (home / "projects" / "slug").mkdir(parents=True)
+    external = home.parent / f"{home.name}-slug-layer"
+    external.mkdir()
+    (external / "q.md").write_text("---\nname: Q\n---\n\nq\n")
+    (home / "projects" / "slug" / "always").symlink_to(external)
+
+
+def build_alias_inside_the_home(home: Path) -> None:
+    """A layer that is an ALIAS for another path INSIDE the home (QA, 2026-11-07).
+
+    `home/topics -> home/projects/shared`. One inode, two names: `topics/s.md`,
+    which the indexer reaches, and `projects/shared/s.md`, which it does not.
+
+    Doctor said OUTSIDE_THE_LAYERS/1 — it met the file by its `projects/` name
+    first, classified it correctly as outside the layers under THAT name, and
+    marked the inode visited, so the `topics` entry-point walk was pruned. The
+    advice it then gave was to move files that were already indexed.
+
+    The fix is an ordering one: walk the entry points before the root, so the
+    name the indexer resolves claims the inode first.
+    """
+    (home / "projects" / "shared").mkdir(parents=True)
+    (home / "projects" / "shared" / "s.md").write_text("---\nname: S\n---\n\nshared\n")
+    (home / "topics").symlink_to(home / "projects" / "shared")
+
+
+def build_slug_layer_alias(home: Path) -> None:
+    """A layer alias one level DOWN: `projects/a/topics -> projects/a/notes`.
+
+    #253, and the case that showed the first ordering fix had moved the bug
+    rather than fixed it (review, 2026-11-08). `projects/` was listed as an
+    entry point before the per-slug layers, so its walk met the file as
+    `projects/a/notes/s.md` — correctly outside the layers under that name —
+    and claimed the inode, pruning the `projects/a/topics` walk. Doctor said
+    OUTSIDE_THE_LAYERS while the indexer read it through `topics`, and advised
+    moving files that were already indexed.
+    """
+    (home / "projects" / "a" / "notes").mkdir(parents=True)
+    (home / "projects" / "a" / "notes" / "s.md").write_text("---\nname: S\n---\n\nn\n")
+    (home / "projects" / "a" / "topics").symlink_to(home / "projects" / "a" / "notes")
+
+
+def build_dangling_layer_beside_real_memory(home: Path) -> None:
+    """A broken `topics` link next to a real `always/` file.
+
+    `stat` raises ENOENT on a link to nothing, which used to make the whole
+    check answer UNKNOWN — "cannot be inspected" about a home whose memory the
+    indexer reads perfectly well. `Path.is_dir()` returns False for it silently,
+    so absent is the answer that AGREES with the indexer.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "nowhere-at-all")
+
+
+def build_self_looping_layer_beside_real_memory(home: Path) -> None:
+    """`topics -> topics`, next to a real `always/` file.
+
+    Same shape as the dangling link but ELOOP rather than ENOENT, and it took a
+    second fix: the pre-check stopped forcing UNKNOWN, and then the WALK still
+    did, because `os.walk` on a self-looping entry point raises ELOOP into
+    `onerror`. Both had to treat it as absent to match `is_dir()`.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "topics")
+
+
+def build_linked_projects_root(home: Path) -> None:
+    """`projects/` itself as a link: the indexer names it, so it follows it."""
+    external = home.parent / f"{home.name}-projects"
+    (external / "slug" / "always").mkdir(parents=True)
+    (external / "slug" / "always" / "p.md").write_text("---\nname: P\n---\n\np\n")
+    (home / "projects").symlink_to(external)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits these shapes rely on")
+def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
+    """One table. `doctor` says "there is something to index" exactly when there is.
+
+    The claim being pinned is an equivalence, not a count: for every shape, the
+    indexer reaching at least one file must coincide with `doctor` answering
+    SOME — and where `doctor` cannot tell, it must say UNKNOWN rather than
+    guessing either way.
+    """
+    from rekol.cli_doctor import _CuratedFiles
+
+    # shape -> (builder, expected doctor state)
+    shapes = {
+        "linked layer": (build_linked_layer, _CuratedFiles.SOME),
+        "nested link in a layer": (build_nested_link_in_layer, _CuratedFiles.NONE),
+        "linked project slug": (build_linked_project_slug, _CuratedFiles.SOME),
+        "linked layer in a slug": (build_linked_layer_in_slug, _CuratedFiles.SOME),
+        "linked projects root": (build_linked_projects_root, _CuratedFiles.SOME),
+        "alias inside the home": (build_alias_inside_the_home, _CuratedFiles.SOME),
+        "slug-layer alias": (build_slug_layer_alias, _CuratedFiles.SOME),
+        "dangling layer beside real memory": (
+            build_dangling_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
+        "self-looping layer beside real memory": (
+            build_self_looping_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
+        "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
+        "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
+        "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),
+        "dangling MEMORY.md only": (build_dangling_pointer, _CuratedFiles.NONE),
+        "root stray only": (build_root_stray, _CuratedFiles.OUTSIDE_THE_LAYERS),
+        "unreadable tasks/": (build_unreadable_tasks, _CuratedFiles.SOME),
+        "unreadable topics/": (build_unreadable_topics, _CuratedFiles.UNKNOWN),
+    }
+
+    failures: list[str] = []
+    for name, (build, expected) in shapes.items():
+        home = tmp_path / name.replace("/", "-").replace(" ", "-")
+        home.mkdir()
+        build(home)
+        try:
+            state, count = _doctor_state(home)
+            reached = _indexer_reaches(home)
+        finally:
+            for path in (home / "tasks", home / "topics"):
+                if path.is_dir():
+                    path.chmod(0o755)
+
+        failures.extend(_disagreements(name, state, count, reached, expected))
+
+    assert not failures, "doctor and the indexer disagree:\n  " + "\n  ".join(failures)
+
+
 # ---- first run: an absent projects dir is not a fault (#165 kept for the real one) ----
 
 
