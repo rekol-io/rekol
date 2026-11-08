@@ -1843,6 +1843,48 @@ def build_alias_inside_the_home(home: Path) -> None:
     (home / "topics").symlink_to(home / "projects" / "shared")
 
 
+def build_slug_layer_alias(home: Path) -> None:
+    """A layer alias one level DOWN: `projects/a/topics -> projects/a/notes`.
+
+    #253, and the case that showed the first ordering fix had moved the bug
+    rather than fixed it (review, 2026-11-08). `projects/` was listed as an
+    entry point before the per-slug layers, so its walk met the file as
+    `projects/a/notes/s.md` — correctly outside the layers under that name —
+    and claimed the inode, pruning the `projects/a/topics` walk. Doctor said
+    OUTSIDE_THE_LAYERS while the indexer read it through `topics`, and advised
+    moving files that were already indexed.
+    """
+    (home / "projects" / "a" / "notes").mkdir(parents=True)
+    (home / "projects" / "a" / "notes" / "s.md").write_text("---\nname: S\n---\n\nn\n")
+    (home / "projects" / "a" / "topics").symlink_to(home / "projects" / "a" / "notes")
+
+
+def build_dangling_layer_beside_real_memory(home: Path) -> None:
+    """A broken `topics` link next to a real `always/` file.
+
+    `stat` raises ENOENT on a link to nothing, which used to make the whole
+    check answer UNKNOWN — "cannot be inspected" about a home whose memory the
+    indexer reads perfectly well. `Path.is_dir()` returns False for it silently,
+    so absent is the answer that AGREES with the indexer.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "nowhere-at-all")
+
+
+def build_self_looping_layer_beside_real_memory(home: Path) -> None:
+    """`topics -> topics`, next to a real `always/` file.
+
+    Same shape as the dangling link but ELOOP rather than ENOENT, and it took a
+    second fix: the pre-check stopped forcing UNKNOWN, and then the WALK still
+    did, because `os.walk` on a self-looping entry point raises ELOOP into
+    `onerror`. Both had to treat it as absent to match `is_dir()`.
+    """
+    (home / "always").mkdir()
+    (home / "always" / "s.md").write_text("---\nname: S\n---\n\na\n")
+    (home / "topics").symlink_to(home / "topics")
+
+
 def build_linked_projects_root(home: Path) -> None:
     """`projects/` itself as a link: the indexer names it, so it follows it."""
     external = home.parent / f"{home.name}-projects"
@@ -1870,6 +1912,15 @@ def test_doctor_and_the_indexer_agree_on_every_shape(tmp_path: Path) -> None:
         "linked layer in a slug": (build_linked_layer_in_slug, _CuratedFiles.SOME),
         "linked projects root": (build_linked_projects_root, _CuratedFiles.SOME),
         "alias inside the home": (build_alias_inside_the_home, _CuratedFiles.SOME),
+        "slug-layer alias": (build_slug_layer_alias, _CuratedFiles.SOME),
+        "dangling layer beside real memory": (
+            build_dangling_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
+        "self-looping layer beside real memory": (
+            build_self_looping_layer_beside_real_memory,
+            _CuratedFiles.SOME,
+        ),
         "hidden file in a layer": (build_hidden_in_layer, _CuratedFiles.SOME),
         "layer with a cycle": (build_layer_cycle, _CuratedFiles.SOME),
         "root hidden file only": (build_root_hidden_file, _CuratedFiles.NONE),

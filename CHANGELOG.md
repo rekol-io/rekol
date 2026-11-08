@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The alias fix moved the bug one level down, and a broken layer link made doctor say "cannot
+  tell" (#232, review).** Three disagreements with the indexer, all found by a reviewer told to go
+  looking for one:
+  1. **`projects/a/topics -> projects/a/notes`** (#253): the `projects/` entry point was listed
+     before the per-slug layers, so its walk met the file as `projects/a/notes/s.md` — correctly
+     outside the layers under *that* name — and claimed the inode, pruning the `topics` walk.
+     Doctor said OUTSIDE_THE_LAYERS while the indexer read the file, and advised moving files that
+     were already indexed. Entry points are ordered **most-specific-first** now: whichever one makes
+     a path indexable claims the inode before one that makes it outside.
+  2. **A dangling `topics` link beside a real `always/s.md`** reported UNKNOWN, because `stat`
+     raises ENOENT on it and that aborted the whole check. `Path.is_dir()` returns False for it
+     silently, so absent is the answer that agrees with the indexer.
+  3. **`topics -> topics`** needed a second fix after the first: the pre-check stopped forcing
+     UNKNOWN, and then the WALK still did, because `os.walk` on a self-looping entry point raises
+     ELOOP into `onerror`.
+  An unreadable layer still reports UNKNOWN, which is correct — the difference is between "I cannot
+  read this" and "this is not there". Three rows added to the agreement table, each failing on its
+  own when its fix is reverted. Verified no regression on a 3-link symlink ring, a cycle inside a
+  layer, a relative alias, and a deep alias target.
 - **An alias inside the memory home read as outside the layers (#232, QA).** With
   `home/topics -> home/projects/shared` — one inode, two names — doctor met the file by its
   `projects/shared/...` name first, classified it correctly as outside the layers under *that* name,

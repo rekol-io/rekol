@@ -129,16 +129,32 @@ def _indexer_entry_points(memory_home: Path, on_error: Callable[[OSError], None]
     ``glob("**/*.md")``, which does not. So a link AT one of these names is
     followed and a link anywhere deeper is not.
     """
-    entry_points = [memory_home / sub for sub in INDEXED_DIRS]
+    # ORDERED MOST-SPECIFIC-FIRST, and the order is load-bearing. The caller
+    # walks these before the root and prunes by inode, so whichever entry point
+    # reaches an inode first decides how its files are classified. An entry
+    # point that makes a path INDEXABLE therefore has to claim it before one
+    # that makes the same path OUTSIDE.
+    #
+    # The first version listed `projects/` before the per-slug layers, which
+    # fixed the top-level alias and left the same bug one level down (#253,
+    # found by review 2026-11-08): with `projects/a/topics -> projects/a/notes`,
+    # the `projects/` walk met the file as `projects/a/notes/s.md`, classified it
+    # correctly as outside the layers under THAT name, and claimed the inode — so
+    # the `projects/a/topics` walk was pruned and doctor said
+    # OUTSIDE_THE_LAYERS while the indexer read it through `topics`. Doctor then
+    # advised moving files that were already indexed.
+    root_layers = [memory_home / sub for sub in INDEXED_DIRS]
     projects_root = memory_home / PROJECTS_DIR
-    entry_points.append(projects_root)
     try:
         slugs = sorted(projects_root.iterdir())
     except OSError as exc:
         # An absent `projects/` is the ordinary case, not a failure to read.
         if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
             on_error(exc)
-        return entry_points
+        return [*root_layers, projects_root]
+
+    slug_dirs: list[Path] = []
+    slug_layers: list[Path] = []
     for slug_dir in slugs:
         try:
             if not slug_dir.is_dir():
@@ -146,11 +162,12 @@ def _indexer_entry_points(memory_home: Path, on_error: Callable[[OSError], None]
         except OSError as exc:  # is_dir() can raise EACCES on 3.11
             on_error(exc)
             continue
-        # The slug dir itself, so the walk can see non-layer markdown under it,
-        # and each layer inside it, because the indexer names those too.
-        entry_points.append(slug_dir)
-        entry_points.extend(slug_dir / sub for sub in INDEXED_DIRS)
-    return entry_points
+        slug_dirs.append(slug_dir)
+        slug_layers.extend(slug_dir / sub for sub in INDEXED_DIRS)
+
+    # Indexable-claiming first (root layers, then per-slug layers), then the
+    # containers whose walks can only produce `outside` classifications.
+    return [*root_layers, *slug_layers, projects_root, *slug_dirs]
 
 
 def _count_markdown_by_scope(
@@ -202,7 +219,13 @@ def _count_markdown_by_scope(
         # that has no `topics/` would set `walk_failed` and report UNKNOWN for
         # every empty home — a check that answers "cannot tell" always is worth
         # no more than one that answers "fine" always.
-        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        # ELOOP alongside ENOENT/ENOTDIR: a self-looping entry point
+        # (`topics -> topics`) is absent as far as the indexer is concerned,
+        # because `Path.is_dir()` swallows the OSError and returns False. Left
+        # out, it reached `on_error` and made the whole answer UNKNOWN for a home
+        # whose other layers held perfectly readable memory (review,
+        # 2026-11-08). Matching the indexer is the whole contract of this walk.
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
             return
         on_error(exc)
 
@@ -365,8 +388,27 @@ def _curated_memory_file_state(memory_home: Path) -> tuple[_CuratedFiles, int]:
         # dirs and `projects/`; a broken pointer at the root is not one of them.
         for layer in (*INDEXED_DIRS, PROJECTS_DIR):
             candidate = memory_home / layer
-            if candidate.is_symlink() or candidate.exists():
+            if not (candidate.is_symlink() or candidate.exists()):
+                continue
+            try:
                 candidate.stat()  # follows the link on purpose: the indexer does
+            except OSError as exc:
+                # A DANGLING OR LOOPING LAYER LINK IS ABSENT, NOT UNKNOWABLE
+                # (review, 2026-11-08). `stat` raises ENOENT on a link to
+                # nothing and ELOOP on `topics -> topics`, and that used to make
+                # the whole check answer UNKNOWN — so a home holding
+                # `always/s.md` beside a broken `topics` link reported "cannot be
+                # inspected" when it could have said SOME, and the indexer read
+                # the file perfectly well.
+                #
+                # The indexer's own `is_dir()` returns False for both, silently,
+                # so treating them as absent is what AGREES with it. The comment
+                # above says "the indexer does" follow the link, and for these
+                # two cases that was simply wrong. A dangling `projects/<slug>`
+                # was already handled this way, so the two are consistent now.
+                if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+                    continue
+                raise
     except OSError:
         return _CuratedFiles.UNKNOWN, 0
 
