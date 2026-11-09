@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **One of the new guard tests only passed on a machine that had run Claude Code.** It asserted
+  that a whitespace `CLAUDE_CONFIG_DIR` is reported as reaching `~/.claude/projects` — but the
+  guard deliberately reports only destinations that EXIST, and a GitHub-hosted runner has no
+  `~/.claude`, so the assertion failed there for a reason unrelated to the guard. (QA's image
+  creates the real defaults on purpose, which is why its run was green.) The guard half now skips
+  with that reason stated, and the half that was actually wrong — blank means *unset*, so the code
+  resolves the real default while a raw-string check reads "pointing at nothing" — is pinned by a
+  new test that needs nothing to exist and so runs everywhere.
 - **A test could write into the developer's REAL memory home, and the suite's isolation was
   revertible by the tests it isolated (#224, Codex + product).** `conftest.py` redirected
   `REKOL_HOME`, the index cache and the archive using the **shared** function-scoped `monkeypatch`

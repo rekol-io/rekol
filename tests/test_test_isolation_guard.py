@@ -111,7 +111,25 @@ def test_a_whitespace_value_that_falls_back_to_a_real_default_is_caught() -> Non
     Same class as the `~` Codex found: the guard inspected a different string
     from the one the code resolves. It now asks `config.py` for the destination
     instead, which is why this is caught and why `/a` above still is not.
+
+    THE GUARD HALF NEEDS THE DEFAULT TO EXIST, which is a property of the host
+    and not of the code: the guard only reports a destination that is really
+    there, deliberately, because one that fires on a sentinel gets deleted. On a
+    machine that has never run Claude Code — a GitHub-hosted runner, where this
+    test failed — `~/.claude/projects` is absent, so there is nothing to report
+    and an unconditional assertion fails for a reason that has nothing to do
+    with the guard. QA's Docker image creates the real defaults on purpose for
+    exactly this reason. The resolution half, which is the part that was
+    actually wrong, is pinned unconditionally by
+    `test_a_whitespace_value_resolves_to_the_real_default` below; this one says
+    out loud when the host cannot exercise it.
     """
+    real_default = Path.home() / ".claude" / "projects"
+    if not real_default.is_dir() or _is_under_a_temp_root(str(real_default)):
+        pytest.skip(
+            f"{real_default} is not a real directory on this host, so the guard has "
+            "nothing to report; the resolution is pinned separately"
+        )
     with pytest.MonkeyPatch.context() as patched:
         patched.setenv("REKOL_HOME", os.environ.get("REKOL_HOME") or "/a")
         patched.setenv("CLAUDE_CONFIG_DIR", "   ")
@@ -120,6 +138,27 @@ def test_a_whitespace_value_that_falls_back_to_a_real_default_is_caught() -> Non
     # Reported as the RESOLVED destination, not the blank string, so the message
     # names the directory at risk.
     assert any(".claude" in o for o in offenders), offenders
+
+
+def test_a_whitespace_value_resolves_to_the_real_default(tmp_path: Path) -> None:
+    """Blank is not a sentinel: `config.py` falls back to the REAL default.
+
+    This is the half that was wrong, and unlike the guard assertion above it
+    needs nothing to exist, so it runs on every host including a clean CI
+    runner. `Path("")` is `PosixPath(".")` and truthy, so a guard that tests the
+    raw string reads whitespace as "pointing at nothing" while the code reads
+    the user's own `~/.claude/projects`.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setenv("REKOL_HOME", str(home))
+        patched.setenv("CLAUDE_CONFIG_DIR", "   ")
+        from rekol.config import load_config
+
+        resolved = load_config().claude_projects_dir
+    assert resolved == Path.home() / ".claude" / "projects", resolved
+    assert "   " not in str(resolved), resolved
 
 
 def test_a_tmp_destination_is_left_alone(tmp_path) -> None:
