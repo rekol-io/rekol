@@ -5,6 +5,112 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-11-08
+### Added
+- **`migrate repo` now leaves a repository's own `MEMORY.md` alone.** The only justification for
+  touching that file is Claude Code's autoMemory, which injects
+  `~/.claude/projects/<slug>/memory/MEMORY.md` into every session — so a migrated auto-memory
+  directory must not leave one behind. Outside that tree the file is quite possibly tracked by the
+  user's own repo (rekol ships one in its template), where archiving it would relocate tracked
+  content and drop an untracked `old-memory-archive/` into their working copy. It is now left in
+  place and **said so explicitly**, not merely skipped in silence — silence would be
+  indistinguishable from the behaviour that moved it.
+  The decision keys on *where the directory is*, not which subcommand was typed, so `migrate repo`
+  pointed at a real auto-memory dir and `migrate auto` reaching the same dir agree about it. A
+  relocated `CLAUDE_CONFIG_DIR` is honoured (#165).
+- **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
+  actually recorded (#203).** A console script can be left pointing at an interpreter where the
+  package no longer resolves, so every call through it dies with
+  `ModuleNotFoundError: No module named 'rekol'`. An interactive shell resolves the working
+  wrapper first, so `command -v rekol` is green and `doctor` passed — while a **hook**, whose PATH
+  order differs, resolves the orphan and the session starts with no memory and nothing saying so.
+  **No program found on PATH is executed.** `--version` is not a safety boundary for an arbitrary
+  program named `rekol`: it can mutate state, read stdin, spawn children or hang, and bounding
+  each candidate still let a scripted `doctor` stall for minutes. (The one thing that *is*
+  executed is a path rekol itself recorded in a hook command — bounded at 5s, in its own process
+  group, killed as a group on timeout, and memoised per path.) Classification reads the shebang
+  and, for a
+  direct Python interpreter, that interpreter's `site-packages` — including following an editable
+  install's `.pth` to its target, because `dist-info` proves a package was *installed*, not that it
+  *resolves*. The real orphan was exactly that shape: `dist-info` present, `.pth` pointing at a
+  deleted worktree.
+  Only exact evidence authorises removal advice — a missing Python interpreter, an absolute-path
+  `.pth` whose target has no `rekol/__init__.py`, or a
+  `site-packages` that was read and does not resolve `rekol`. A non-Python or `env`-resolved
+  shebang is **not classified** (the shipped shim is `#!/usr/bin/env bash`, and "bash has no
+  site-packages" would have advised deleting a working shim), and a `site-packages` that cannot be
+  located or read is **cannot-tell**, never "absent" — reading cannot-tell as absent is the same
+  mistake as #218. A setuptools *finder* `.pth` and a relative-path `.pth` are both cannot-tell:
+  the first resolves through an import hook that would have to be executed, the second against a
+  `sys.path` base we are only guessing at. Both are healthy layouts that an earlier version
+  reported as orphans with removal advice.
+  Hook executability is now its own check that runs **unconditionally**. `unrunnable_hooks()` has
+  existed since #159, but `doctor` only reached it from inside the install-drift check, which
+  returns early with no manifest — so wired-but-dead hooks went unprobed on any machine without
+  one, though probing them needs nothing from the manifest (#215).
+  **Stated limit — this is detection, not prevention.** The PATH walk sees only the PATH of the
+  process running `doctor`, so an entry present solely on a hook's PATH is invisible from there; a
+  green line reports *resolvability*, not a proven hook path. The companion check verifies that the
+  recorded fallback is **runnable**, and does not establish which executable a hook resolves — a
+  hook prefers whatever `command -v rekol` finds in its own environment, and reaches the fallback
+  only when that fails. So in the originally filed failure, where the orphan comes first on the
+  hook's PATH, neither check fires. Preventing that requires preferring the recorded path, which is
+  a separate change.
+- **`uninstall.sh` now names `rekol` console scripts belonging to other interpreters (#203).**
+  It only ever considered `${BIN_DIR}/rekol`, so a script installed through a different
+  interpreter survived an uninstall completely. Reported rather than deleted, deliberately: those
+  files belong to Python environments this installer never created, often need root, and may be
+  an unrelated tool named `rekol`. Deleting another installation's files to finish our own
+  uninstall is not a trade worth making silently — naming them exactly is. It also **never
+  executes** anything it finds on PATH, including under `--dry-run`: a dry run that runs
+  strangers' binaries is not a dry run. Detection is the shebang alone, so it names the
+  definitive case (a Python interpreter that no longer exists) and refers the rest to
+  `doctor`, which holds the full classifier.
+- **`doctor` reports when `rekol --version` disagrees with the code being run (#203).**
+  `cli.py` uses `@click.version_option(package_name="rekol")`, which reads the installed
+  distribution's metadata. For an **editable** install that metadata is frozen at install time,
+  so `--version` keeps reporting whatever was current when `pip install -e` last ran while the
+  source tree moves on. Measured on a live machine: `--version` said 0.5.5 while the executing
+  code was 0.6.1 — six patch releases apart, and that stale number was repeated in coordination
+  notes for days. INFO rather than a problem, since a drifting editable install is the normal
+  state of a development checkout.
+- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
+  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
+  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
+  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
+  despite being the second most common non-resumable code, and the existing `server_error` test
+  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
+  key), so a regression depending on that prose would have slipped past it. The new test uses
+  the real payload shape and was confirmed to fail when `authentication_failed` is added to
+  `LIMIT_ERROR_TYPES`.
+  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
+  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
+  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
+  recorded on the issue rather than changed here, since what to do about it is a design call.
+- **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
+  `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
+  `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
+  — and it only fires when `REKOL.md` is absent. Where both exist, `MEMORY.md` is never read and
+  anything living only there is silently unreachable.
+  Found on a live machine (shipwright, 2026-10-08): both files present, contents diverged, neither
+  a superset — `MEMORY.md` held the infra/topic pointers while `REKOL.md` held the always-on
+  rules. A session read one and got a partial picture with nothing saying so. This is the fourth
+  instance of the same half-finished rename, after #177 (`skill.md`), #188 (`NON_MEMORY_FILES`)
+  and doctor's own exclusion prose.
+  The check reports the byte sizes, names which file is actually read, and gives a different
+  remedy for identical copies (remove the redundant one) than for diverged ones (diff, fold, then
+  remove). Deliberately silent when only `MEMORY.md` exists — that is the un-migrated state the
+  fallback handles correctly, and a check that fires on the healthy path gets ignored.
+
+### Changed
+- The marker is written **after** the legacy pointer is archived, not before, so a failed archive
+  leaves nothing claiming the directory is done. The previous order's stated rationale was false:
+  it claimed the reverse would let a re-run re-migrate already-archived content, but
+  `discover_files_in_dir` iterates files only and never recurses, so the archive cannot be
+  re-discovered. The order is now asserted by observing the calls — the earlier test compared
+  mtimes, which a move preserves, so marker-first passed it too.
+
 ### Fixed
 - **The unquoted-form repair refused paths it should have accepted, including a spaced home
   (#221, review + product).** The upgrade recognised an unquoted legacy command only when the
@@ -195,8 +301,6 @@ follow [Semantic Versioning](https://semver.org/).
   the decoy false-health class again through a different token. The matcher now requires both the
   `$(if [ -x …` opening of rekol's own rendering and the `command -v rekol` that only that
   substitution contains.
-
-### Fixed
 - **Re-running the installer did not actually upgrade existing installs (#203).** Step 6.95 rewrote
   only a bare `rekol <subcommand>`, never the previous `$(command -v rekol || echo '<path>')`
   rendering — which is the form every existing install carries. The handler-presence checks then
@@ -404,8 +508,6 @@ follow [Semantic Versioning](https://semver.org/).
 - `archive_copy_looks_complete()` is removed. It had no production caller, so it implied a recovery
   contract nothing enforced; with placeholder-then-replace there is no partial file under a final
   name for it to detect.
-
-### Fixed
 - **A fault mid-import left a truncated memory under an ordinary name.** The import reserved the
   target name with `O_CREAT|O_EXCL` and then wrote into it, so a write that failed part-way — a full
   disk, a hard kill — left a fragment that *looks* like a memory. QA measured the consequence: the
@@ -420,8 +522,6 @@ follow [Semantic Versioning](https://semver.org/).
   the staging file either.
   Suffixing for a name collision now matches the archive's convention (`-1`, `-2`, …) rather than
   starting at `-2`, because both paths share one publication primitive.
-
-### Fixed
 - **The no-clobber archiving fix introduced a data-loss window, and this closes it.** Copying the
   file and then unconditionally unlinking the source loses an edit made in between: the source is
   gone and the archive holds the old bytes. The `rename` it replaced had no such window, so this
@@ -446,8 +546,6 @@ follow [Semantic Versioning](https://semver.org/).
 - `archive_copy_looks_complete()` exists so a later run does not assume a present archive name is a
   good copy: the fallback path can be interrupted mid-write under a real name. Nothing describes
   that case as complete.
-
-### Fixed
 - **Archiving could overwrite the only byte-complete copy of a file.** `_free_archive_name` tested
   `exists()` and then called `shutil.move`, which replaces its destination — so a file created at
   that name in between was destroyed. Codex reproduced the loss of an earlier archived original
@@ -484,16 +582,6 @@ follow [Semantic Versioning](https://semver.org/).
   the error saying it was not.** It was worded before the retirement was attempted. It is now
   worded after, and on failure says the directory was *not* retired, a later run will retry it, and
   no marker needs deleting because none was written.
-
-### Changed
-- The marker is written **after** the legacy pointer is archived, not before, so a failed archive
-  leaves nothing claiming the directory is done. The previous order's stated rationale was false:
-  it claimed the reverse would let a re-run re-migrate already-archived content, but
-  `discover_files_in_dir` iterates files only and never recurses, so the archive cannot be
-  re-discovered. The order is now asserted by observing the calls — the earlier test compared
-  mtimes, which a move preserves, so marker-first passed it too.
-
-### Fixed
 - **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
   by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
   `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
@@ -528,21 +616,6 @@ follow [Semantic Versioning](https://semver.org/).
   that they are neither imported nor archived, and the marker says "files discovered here"
   rather than implying everything. The retirement invariant held only because discovery defined
   what counted.
-
-### Added
-- **`migrate repo` now leaves a repository's own `MEMORY.md` alone.** The only justification for
-  touching that file is Claude Code's autoMemory, which injects
-  `~/.claude/projects/<slug>/memory/MEMORY.md` into every session — so a migrated auto-memory
-  directory must not leave one behind. Outside that tree the file is quite possibly tracked by the
-  user's own repo (rekol ships one in its template), where archiving it would relocate tracked
-  content and drop an untracked `old-memory-archive/` into their working copy. It is now left in
-  place and **said so explicitly**, not merely skipped in silence — silence would be
-  indistinguishable from the behaviour that moved it.
-  The decision keys on *where the directory is*, not which subcommand was typed, so `migrate repo`
-  pointed at a real auto-memory dir and `migrate auto` reaching the same dir agree about it. A
-  relocated `CLAUDE_CONFIG_DIR` is honoured (#165).
-
-### Fixed
 - **Dry-run previewed the `MEMORY.md` move in only one shape (G1).** `progressed` keyed on
   `migrated > 0`, which stays 0 in dry-run by design, so in the commonest shape of all — a
   `MEMORY.md` beside one topic file — nothing was previewed and the nested-file warning never
@@ -592,8 +665,6 @@ follow [Semantic Versioning](https://semver.org/).
   told that searching will not find it.
 - The `.MIGRATED` marker text no longer wraps mid-clause (it read `KEEP them unless you` / `have` /
   `checked…`), with a test that no line is a single orphaned word.
-
-### Fixed
 - **The alias fix moved the bug one level down, and a broken layer link made doctor say "cannot
   tell" (#232, review).** Three disagreements with the indexer, all found by a reviewer told to go
   looking for one:
@@ -693,8 +764,6 @@ follow [Semantic Versioning](https://semver.org/).
   with one unreadable layer dir counted zero files and reported "there is no curated memory to
   index" — identical output to genuinely having none, with a real file sitting there. The walk now
   uses `os.walk(onerror=…)` so the failure is visible and reported as UNKNOWN.
-
-### Fixed
 - **Four ways a BROKEN install reported "first use" (#165/#231, review).** This PR exists to stop
   `doctor` reporting a fresh install as DEGRADED, and a reviewer sent to look for the opposite error
   found it four times — neutral on an install that can never index anything, which is the worse
@@ -753,8 +822,6 @@ follow [Semantic Versioning](https://semver.org/).
   would have reported the DB never run. It read as if the answer were already on screen. The
   remedy now names the DB path and gives two real actions, split by cause: move a corrupt DB aside
   and rebuild, or fix permissions on an unreadable one.
-
-### Fixed
 - **A brand-new install reported `index is DEGRADED` because Claude Code had not created
   `~/.claude/projects` yet.** An absent projects dir has two causes with opposite meanings, and
   both were reported as a problem. At the **default** location it simply has not been created yet
@@ -787,7 +854,6 @@ follow [Semantic Versioning](https://semver.org/).
   while enumeration raised `PermissionError` on every `session-index` run, into discarded output.
   Enumeration is what `session-index` actually does, so that is now what is tested, with the
   failure classified rather than read as "empty".
-
 - **`doctor`'s own tests could fail from a stray `rekol` on the developer's PATH.** Since the
   console-script check walks PATH (#203), a leftover build shim made five tests in
   `test_cli_doctor.py` fail — Codex hit this under `uv run` and the suite only passed with a
@@ -870,8 +936,6 @@ follow [Semantic Versioning](https://semver.org/).
   could take unguarded. Proven against three controls, each of which must fail and does:
   a comment-as-guard, a direct invocation in a `@test` body, and a guard placed after the
   invocation.
-
-### Fixed
 - **The bats suites' safety rested on one `unset` line continuing to exist.** QA measured that
   deleting it makes the suite delete the developer's real tools home — venv and hooks included —
   because `uninstall.sh` removes what it is pointed at and an inherited `REKOL_TOOLS_HOME` points
@@ -1112,66 +1176,6 @@ follow [Semantic Versioning](https://semver.org/).
   that they are neither imported nor archived, and the marker says "files discovered here"
   rather than implying everything. The retirement invariant held only because discovery defined
   what counted.
-
-### Added
-- **`doctor` now classifies every `rekol` on PATH by static inspection, and probes what the hooks
-  actually recorded (#203).** A console script can be left pointing at an interpreter where the
-  package no longer resolves, so every call through it dies with
-  `ModuleNotFoundError: No module named 'rekol'`. An interactive shell resolves the working
-  wrapper first, so `command -v rekol` is green and `doctor` passed — while a **hook**, whose PATH
-  order differs, resolves the orphan and the session starts with no memory and nothing saying so.
-  **No program found on PATH is executed.** `--version` is not a safety boundary for an arbitrary
-  program named `rekol`: it can mutate state, read stdin, spawn children or hang, and bounding
-  each candidate still let a scripted `doctor` stall for minutes. (The one thing that *is*
-  executed is a path rekol itself recorded in a hook command — bounded at 5s, in its own process
-  group, killed as a group on timeout, and memoised per path.) Classification reads the shebang
-  and, for a
-  direct Python interpreter, that interpreter's `site-packages` — including following an editable
-  install's `.pth` to its target, because `dist-info` proves a package was *installed*, not that it
-  *resolves*. The real orphan was exactly that shape: `dist-info` present, `.pth` pointing at a
-  deleted worktree.
-  Only exact evidence authorises removal advice — a missing Python interpreter, an absolute-path
-  `.pth` whose target has no `rekol/__init__.py`, or a
-  `site-packages` that was read and does not resolve `rekol`. A non-Python or `env`-resolved
-  shebang is **not classified** (the shipped shim is `#!/usr/bin/env bash`, and "bash has no
-  site-packages" would have advised deleting a working shim), and a `site-packages` that cannot be
-  located or read is **cannot-tell**, never "absent" — reading cannot-tell as absent is the same
-  mistake as #218. A setuptools *finder* `.pth` and a relative-path `.pth` are both cannot-tell:
-  the first resolves through an import hook that would have to be executed, the second against a
-  `sys.path` base we are only guessing at. Both are healthy layouts that an earlier version
-  reported as orphans with removal advice.
-  Hook executability is now its own check that runs **unconditionally**. `unrunnable_hooks()` has
-  existed since #159, but `doctor` only reached it from inside the install-drift check, which
-  returns early with no manifest — so wired-but-dead hooks went unprobed on any machine without
-  one, though probing them needs nothing from the manifest (#215).
-  **Stated limit — this is detection, not prevention.** The PATH walk sees only the PATH of the
-  process running `doctor`, so an entry present solely on a hook's PATH is invisible from there; a
-  green line reports *resolvability*, not a proven hook path. The companion check verifies that the
-  recorded fallback is **runnable**, and does not establish which executable a hook resolves — a
-  hook prefers whatever `command -v rekol` finds in its own environment, and reaches the fallback
-  only when that fails. So in the originally filed failure, where the orphan comes first on the
-  hook's PATH, neither check fires. Preventing that requires preferring the recorded path, which is
-  a separate change.
-- **`uninstall.sh` now names `rekol` console scripts belonging to other interpreters (#203).**
-  It only ever considered `${BIN_DIR}/rekol`, so a script installed through a different
-  interpreter survived an uninstall completely. Reported rather than deleted, deliberately: those
-  files belong to Python environments this installer never created, often need root, and may be
-  an unrelated tool named `rekol`. Deleting another installation's files to finish our own
-  uninstall is not a trade worth making silently — naming them exactly is. It also **never
-  executes** anything it finds on PATH, including under `--dry-run`: a dry run that runs
-  strangers' binaries is not a dry run. Detection is the shebang alone, so it names the
-  definitive case (a Python interpreter that no longer exists) and refers the rest to
-  `doctor`, which holds the full classifier.
-- **`doctor` reports when `rekol --version` disagrees with the code being run (#203).**
-  `cli.py` uses `@click.version_option(package_name="rekol")`, which reads the installed
-  distribution's metadata. For an **editable** install that metadata is frozen at install time,
-  so `--version` keeps reporting whatever was current when `pip install -e` last ran while the
-  source tree moves on. Measured on a live machine: `--version` said 0.5.5 while the executing
-  code was 0.6.1 — six patch releases apart, and that stale number was repeated in coordination
-  notes for days. INFO rather than a problem, since a drifting editable install is the normal
-  state of a development checkout.
-
-### Fixed
 - **A hook could resolve an orphaned `rekol` on its PATH instead of the install's own, starting a
   session with no memory (#203).** Hook commands rendered as
   `"$(command -v rekol || echo '<recorded path>')"` — PATH first, recorded path only as a
@@ -1193,8 +1197,6 @@ follow [Semantic Versioning](https://semver.org/).
   path is *absent* — a tree moved without reinstalling — PATH resolution resumes and an orphan
   could win again, which is the cost of keeping a moved install working. Re-running `install.sh`
   re-records the path and closes that window.
-
-### Fixed
 - **Standing down for the Claude plugin skipped the `env.REKOL_HOME` block, leaving the memory
   system dark — and a missing `jq` triggered the same stand-down (release blocker).** Found by
   the 0.6.0 pre-release fan-out review, in #199's own change.
@@ -1226,7 +1228,6 @@ follow [Semantic Versioning](https://semver.org/).
   #199 the installer `die`s when `plugin/hooks/coexistence.sh` is unreadable, so a change under
   `plugin/` can break the primary install path with the install suite never running. Added
   `^plugin/` to the filter; a Python-only change still skips bats.
-
 - **Two `doctor` tests were named for behaviour they never executed (#194).** Found in the
   v0.5.12 external review; the production fix (#188) was correct, the evidence for it was not.
   `test_shipped_index_files_are_excluded_from_coverage` never ran `doctor` and never built an
@@ -1305,7 +1306,6 @@ follow [Semantic Versioning](https://semver.org/).
   (`CREATE TABLE IF NOT EXISTS` plus a stamp, no row rewrite), every message and FTS posting count
   was preserved, identity adopted correctly, and a subsequent test-embedder run was refused. The
   seven new tests were confirmed to fail against the dim-only behaviour.
-
 - **`<env-time>` reported every gap in minutes, so long pauses were unreadable.** The formatter
   only ever did `divmod(seconds, 60)`: a 17-hour pause rendered as `1071m 0s` and an 8-day one as
   `12217m 54s`. Both correct, neither legible — and it is part of why `mac_setup` kept a duplicate
@@ -1320,7 +1320,6 @@ follow [Semantic Versioning](https://semver.org/).
   `17h 51m` from `1071m 0s` is why this shipped. Thirteen cases now pin the boundaries (59/60s,
   3599/3600s, 86399/86400s, negative clamp, `None`), and were confirmed to fail against the old
   formatter.
-
 - **A stood-down plugin went silent after one session, so an inert plugin looked like a working
   one (#201).** The coexistence stand-down printed its explanation once, gated on a state file,
   and exited silently every session after. A user who installs the plugin on a machine that
@@ -1342,36 +1341,6 @@ follow [Semantic Versioning](https://semver.org/).
   installs that predate the backend marker. Conversely, `install.sh` detects an enabled Rekol
   plugin and skips its own hook wiring. Detection failures are handled conservatively so an
   unreadable settings file or unavailable parser cannot silently enable both backends.
-
-### Added
-- **Auto-resume's freeze classifier is pinned against the codes real freezes actually produce
-  (#143).** Measured on a live journal (64 entries): `rate_limit` ×30, `server_error` ×26,
-  `authentication_failed` ×5, `invalid_request` ×3. The classifier is **correct on all 64** —
-  only `rate_limit` is treated as resumable — but `authentication_failed` had no test at all
-  despite being the second most common non-resumable code, and the existing `server_error` test
-  supplies prose that real payloads never carry (`error` holds a bare code, with no `message`
-  key), so a regression depending on that prose would have slipped past it. The new test uses
-  the real payload shape and was confirmed to fail when `authentication_failed` is added to
-  `LIMIT_ERROR_TYPES`.
-  Also measured, and relevant to the feature's design: of the 30 resumable freezes **only 2
-  carry a parseable reset time**. The "reset-aware" path the issue is named for therefore fires
-  on 2 of 30 real cases, with the fixed `FALLBACK_DELAY_MINUTES` branch handling the rest —
-  recorded on the issue rather than changed here, since what to do about it is a design call.
-
-- **`doctor` now reports a store holding both `REKOL.md` and `MEMORY.md`.** The
-  `MEMORY.md` → `REKOL.md` rename shipped without a migration: the SessionStart hook resolves
-  `REKOL.md` and falls back to `MEMORY.md`, so **the fallback was the entire migration strategy**
-  — and it only fires when `REKOL.md` is absent. Where both exist, `MEMORY.md` is never read and
-  anything living only there is silently unreachable.
-  Found on a live machine (shipwright, 2026-10-08): both files present, contents diverged, neither
-  a superset — `MEMORY.md` held the infra/topic pointers while `REKOL.md` held the always-on
-  rules. A session read one and got a partial picture with nothing saying so. This is the fourth
-  instance of the same half-finished rename, after #177 (`skill.md`), #188 (`NON_MEMORY_FILES`)
-  and doctor's own exclusion prose.
-  The check reports the byte sizes, names which file is actually read, and gives a different
-  remedy for identical copies (remove the redundant one) than for diverged ones (diff, fold, then
-  remove). Deliberately silent when only `MEMORY.md` exists — that is the un-migrated state the
-  fallback handles correctly, and a check that fires on the healthy path gets ignored.
 
 ### Documentation
 - **README now covers a Python that is too NEW (#207).** The install troubleshooting list
