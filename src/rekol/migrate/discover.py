@@ -49,6 +49,13 @@ def is_retirement_pointer(memory_md: Path) -> bool:
         head = memory_md.read_text(encoding="utf-8", errors="replace").lstrip()
     except FileNotFoundError:
         return False
+    except OSError:
+        # A looping or otherwise unreadable MEMORY.md raised ELOOP straight out
+        # of the migrator before anything could report it (Codex, 2026-11-06).
+        # It is certainly not a retirement pointer, and the real diagnosis
+        # belongs to the archiving step, which names the file and refuses to
+        # retire the directory. Returning False routes it there.
+        return False
     return LEGACY_RETIREMENT_MARKER in head.splitlines()[0] if head else False
 
 
@@ -91,6 +98,56 @@ def discover_files_in_dir(source_root: Path) -> list[LegacyFile]:
             )
         )
     return files
+
+
+def is_git_work_tree_root(directory: Path) -> bool:
+    """Does ``directory`` hold a ``.git`` entry — i.e. is it a repo's root?
+
+    Checked without shelling out to git: a work-tree root is exactly the
+    directory containing ``.git``, which is a directory normally and a file in a
+    worktree or submodule, so both are accepted.
+
+    This exists because ``migrate repo`` treats any directory that directly
+    contains ``.md`` files as a memory dir, and a repository root usually does —
+    ``README.md``, ``CLAUDE.md``, ``CHANGELOG.md``. QA pointed it at a real repo
+    and ``--commit`` moved the tracked ``README.md`` and ``CLAUDE.md`` into the
+    archive, leaving them deleted in the work tree. Losing ``CLAUDE.md`` also
+    takes a project's instructions out of Claude Code's view.
+
+    Note this does NOT mean a git root can never be a memory dir: a notes repo
+    is a perfectly reasonable migration source, and rekol's own ``git_track``
+    makes ``REKOL_HOME`` a work-tree root. So the caller refuses by default and
+    offers an explicit opt-in, rather than treating the shape as illegitimate.
+    """
+    return (directory / ".git").exists()
+
+
+def is_auto_memory_dir(memory_dir: Path) -> bool:
+    """Is ``memory_dir`` a Claude Code auto-memory dir — ``<projects>/<slug>/memory``?
+
+    This decides whether a ``MEMORY.md`` there may be archived. Only autoMemory
+    injection justifies moving that file: Claude Code injects
+    ``~/.claude/projects/<slug>/memory/MEMORY.md`` into every session, so a
+    migrated directory must not leave one behind. Anywhere else the file is
+    quite possibly tracked by the user's own repository — rekol ships one in its
+    template — and moving it would relocate tracked content and leave an
+    untracked ``old-memory-archive/`` in their working tree.
+
+    Resolved on both sides so a symlinked or relative path cannot slip past, and
+    compared against the same ``resolve_claude_config_dir()`` the discovery
+    above uses, so a relocated ``CLAUDE_CONFIG_DIR`` is honoured here too (#165).
+    """
+    projects_root = resolve_claude_config_dir() / "projects"
+    try:
+        resolved = memory_dir.resolve()
+        root = projects_root.resolve()
+    except OSError:
+        return False
+    if resolved.name != "memory":
+        return False
+    # Exactly <root>/<slug>/memory — not something buried deeper, whose MEMORY.md
+    # autoMemory does not inject either.
+    return resolved.parent.parent == root
 
 
 def discover_auto_memory_sources() -> list[Path]:
