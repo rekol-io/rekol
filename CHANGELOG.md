@@ -225,6 +225,375 @@ follow [Semantic Versioning](https://semver.org/).
   alike — and the real cause was bash 5.2's `patsub_replacement` expanding an unescaped `&`.
   Passing the command by variable is still right, but for its own reasons, and the comments now say
   so.
+- **One of the new guard tests only passed on a machine that had run Claude Code.** It asserted
+  that a whitespace `CLAUDE_CONFIG_DIR` is reported as reaching `~/.claude/projects` — but the
+  guard deliberately reports only destinations that EXIST, and a GitHub-hosted runner has no
+  `~/.claude`, so the assertion failed there for a reason unrelated to the guard. (QA's image
+  creates the real defaults on purpose, which is why its run was green.) The guard half now skips
+  with that reason stated, and the half that was actually wrong — blank means *unset*, so the code
+  resolves the real default while a raw-string check reads "pointing at nothing" — is pinned by a
+  new test that needs nothing to exist and so runs everywhere.
+- **A test could write into the developer's REAL memory home, and the suite's isolation was
+  revertible by the tests it isolated (#224, Codex + product).** `conftest.py` redirected
+  `REKOL_HOME`, the index cache and the archive using the **shared** function-scoped `monkeypatch`
+  fixture — so a test calling `monkeypatch.undo()` to drop one `setattr` of its own also undid all
+  of that. Thirteen tests in the suite call `undo()`. Codex's sandbox caught one of them then
+  running the CLI, which tried to write `.partial-*.md.tmp` into `~/Dropbox/memory/knowledge/`; a
+  local run has no sandbox. Measured with the fix reverted, such a test leaks
+  `REKOL_HOME=~/Dropbox/memory`, `MEMORY_HOME`, `REKOL_INDEX_DIR=~/.cache/rekol/<hash>` and
+  `REKOL_ARCHIVE_DIR=~/.local/share/rekol/archive`.
+  Fixed as a class rather than per test, because converting thirteen call sites leaves the
+  fourteenth free to do it again: **isolation must not be revertible by the code it isolates.**
+  `conftest` now holds its patches in a private `pytest.MonkeyPatch` undone at teardown, and a
+  `pytest_runtest_call` wrapper **fails** any test left pointing a steering var outside tmp.
+  A four-reviewer panel then found three more, two of them in the tests meant to pin all this:
+  the **undo test was vacuous in CI** — it asserted the variables were ABSENT after `undo()`, which
+  is also what a reverted fixture produces when nothing was exported, so it caught the regression on
+  a developer laptop and never on a clean runner; it now asserts the variables conftest SETS are
+  still set and still under tmp, and the reviewer's mutant fails in a clean environment. The **hook
+  wrapper was never exercised** — every test called the helper directly, so disabling the raise
+  passed 5/5; two subprocess tests now run an inner pytest session and pin both the raise and the
+  gate that stops it masking a test's own failure. And two tests **broke when `HOME` is inside a
+  temp dir**, which is precisely the sandbox shape this guard exists for, so the "real directory"
+  they need is now found rather than assumed to be `~`.
+  Also corrected: the comment claiming the resolution-time check was "filed as a follow-up" when it
+  was not — it is **#255** now — and the claim that the variable list covers *every* steering
+  variable, which it does not (`CLAUDE_SETTINGS_PATH` is read raw by `cli_resume.py` and is not
+  covered; `REKOL_TOOLS_HOME` is listed and read only by `install.sh`).
+  **The guard asks `config.py` where it would GO**, rather than re-deriving the expansion itself —
+  because re-deriving was wrong twice. Codex caught `REKOL_INDEX_DIR='~'`, whose raw string neither
+  exists nor sits under tmp. A review then found the same class again: a set-but-**empty** or
+  whitespace value, which `config.py` treats as unset and resolves to its REAL default while the env
+  scan skipped it for being falsy. Measured, with a tmp `REKOL_HOME`: `XDG_CACHE_HOME=""` and
+  `REKOL_INDEX_DIR=""` both land in `~/.cache/rekol/<hash>`, `XDG_DATA_HOME=""` in
+  `~/.local/share/rekol/archive`, and `CLAUDE_CONFIG_DIR="   "` in `~/.claude/projects` — all four
+  silent. The guard now checks the four destinations `load_config()` resolves (it is read-only, so
+  it cannot create what it warns about) and keeps the env scan as a second layer for when no home is
+  configured. One of my own tests asserted the whitespace case was a harmless sentinel; it was not,
+  and it now asserts the opposite.
+  Also fixed: a set-but-empty `TMPDIR` made `Path("")` resolve to the CWD, so the repo root counted
+  as a temp root and everything inside it was exempt. `tempfile.gettempdir()` ignores an empty
+  TMPDIR. And the isolating fixture's `try` now opens before its first patch, so a failure
+  mid-setup cannot leave patches applied with no teardown.
+  **The guard resolves each value the way the code does** before testing it, which is the second
+  thing it got wrong: `REKOL_INDEX_DIR='~'` was skipped twice over — the literal `~` neither
+  resolves under tmp nor exists — while `config.py` expands it with `os.path.expanduser` and writes
+  to the real home (Codex). A guard that checks a different string from the one the code uses is
+  checking nothing. Its report now names the expansion too, so it says which directory was at risk
+  rather than the string that looked harmless.
+  **And it claims only what it does:** a post-test check of configured destinations, not a write
+  barrier. It reports where a test was POINTED, so a test that writes outside tmp and then restores
+  the variable is invisible to it — notably one using `pytest.MonkeyPatch.context()`. Checking at
+  resolution time is filed as a follow-up.
+  The guard is a hook wrapper, not a fixture, and that mattered: as a fixture it caught the
+  undone-isolation case but **not** a test that set a real path deliberately, because the test's own
+  `monkeypatch` is torn down first and the env was already restored before it looked. It also keys
+  on the path **existing**, after firing on seven healthy tests that set `/a`, `/b` and whitespace
+  as deliberate resolution-order sentinels — a guard that fires on those is one somebody deletes.
+  On its first real run it found a pre-existing gap of its own: `REKOL_TOOLS_HOME` was never
+  cleared, so on any machine with rekol installed every test ran with it pointing at the real
+  `~/.local/share/rekol`.
+- **The archive's audit paragraph claimed a narrower accepted window than the code has (#224,
+  Codex).** It said the only accepted window was the interval between the last verification and the
+  unlink. That holds only up to the moment the final hash **opens** the file. The read is
+  sequential, so an in-place write landing **behind** the read position never reaches the digest at
+  all — and with size, inode and mtime restored, every observation agrees while the digest is of a
+  mixture no longer on disk. On the copy path **the edit is lost**.
+  Product accepts the behaviour — it takes an in-place rewrite mid-hash with the mtime put back,
+  which editors do not do, and closing it needs a second full read or a lock in the most-reviewed
+  function in this repo. What was not acceptable was the claim. Both limits are now stated, and the
+  hashing helper's docstring no longer says the opposite of what was measured.
+- **An archive entry was deleted on a guess, and the verification it guarded was optional (#224,
+  Codex + product).** Five faults in the refusal handling, all reproduced before being fixed.
+  **An archive entry was removed while it held the last copy of those bytes.** The hard-link path's
+  mismatch branch unlinked the archive entry on the strength of a comment — "it is a hard link to
+  the still-present source" — that stopped being true one line earlier: replacing the source
+  pathname between the inode check and the final hash leaves the archive entry at link count 1. The
+  unlink destroyed those bytes and the import undo destroyed the only other copy of them. The
+  removal now has the precondition the argument assumed: the entry is the same inode as the live
+  source **and** the link count shows another name. Otherwise it is kept and the message says which.
+  On the copy path that precondition can never hold — a verified copy is a different inode by
+  construction — so a copy-path entry is now always kept, reversing the previous round's "remove it
+  so a retry finds no twin". The cost is an untidy archive after a refusal, which nothing searches;
+  the alternative was destroying bytes on a guess inside a data-loss fix.
+  **Verification was optional on the paths that needed it.** A failed initial hash was logged and
+  the run carried on with no expected digest — turning the import/retire check off for the one file
+  nothing could vouch for, which left old bytes in the home and retired the new ones. It now fails
+  closed: no import, no archive, source untouched, directory not retired. The **duplicate** branch
+  retired without a digest at all, which was the one call site whose entire claim is "these bytes
+  are already in the home"; Codex reached old-in-home / new-archived **with no errors** through it.
+  It passes the digest now.
+  **The byte-identity guard on the import undo was a text comparison.** `read_text` normalises
+  newlines, so a file rewritten from `hello\n` to `hello\r\n` read back identical and the guard
+  deleted an edited file. It compares bytes, and the import is written as UTF-8 with no newline
+  translation so the comparison can be exact.
+  **A source-unlink `PermissionError` bypassed the cleanup**, arriving as a bare `OSError`, missing
+  the refusal branch, and leaving the import in the home under a message that never mentioned it.
+  Both publication paths now report that case as a refusal, and the migrator undoes the import on
+  **any** failure to retire rather than only on its own exception class.
+  **An interrupted-then-edited retry** keeps both versions in the home — product ruled that
+  building provenance to reconcile them is not worth it here, since it needs a kill, then a user
+  edit, then a retry, and nothing is lost — but the run is no longer silent about it: it names the
+  file it wrote, says both are there and that nothing was deleted. Filed for reconciliation.
+- **A migration could leave a STALE memory in the home while the newest text went only to the
+  archive (#224, QA + product).** Measured on the **ordinary hard-link path**, which is why this held
+  the tag: the import read the old bytes, the user edited the file in place, `os.link` published the
+  inode — now carrying the *new* bytes — the source was unlinked and the directory retired. **Exit
+  0, nothing reported.** The newest text survived only in `old-memory-archive/`, which search never
+  reads, and the home held an ordinary-looking memory with the old content.
+  The inode check added earlier passes here, because an in-place write keeps the inode: it proves
+  the file is the same *file* and says nothing about its *bytes*.
+  **The contract now is that the home only ever holds the bytes that were retired.** Each source is
+  hashed *before* classification reads it, and that digest is handed to the archive, which refuses
+  unless the bytes it is about to retire are still those bytes. The check sits immediately before the
+  unlink on **both** publication paths, so the only remaining interval is the last-check-to-unlink
+  one already accepted — not a wider one.
+  **A refused retirement now leaves no import.** The import this run wrote is removed, guarded:
+  only a file this run created, and only while it still holds exactly the bytes this run wrote. If
+  an undo cannot happen, or the file is no longer ours to touch, the message **names the file and
+  says it is still there** rather than claiming a removal.
+  The **archive entry** is a separate question, and the answer is narrower than the first version of
+  this fix assumed: see "an archive entry was deleted on a guess" below.
+  This also closes what QA measured on the copy path: a retry used to leave `p-note.md` (old) beside
+  `p-note-1.md` (new) — same name, same dates, nothing to tell them apart, and search returning both
+  as equals with the stale one first. A retry after a **refusal** now leaves one memory holding the
+  current content. (A retry after an *interruption* that the user then edited keeps both versions
+  and says so — see below.)
+  Tested on both paths with QA's walnut/copper fixture, plus a kill between the import and the
+  archive ending whole after a retry. Each part is revert-proved and fails on its own rows.
+- **An atomic save during the final verification hash was silently deleted (#224, Codex).** Hashing
+  reads through an open descriptor, so an editor replacing the pathname mid-read left the descriptor
+  returning the OLD inode's bytes to EOF. The comparison against the archived copy then *succeeded*
+  and the unlink deleted the NEW file. Reproduced by Codex with a 3 MiB source replaced after the
+  first 1 MiB: publication reported success, the source was gone, the archive held the old content,
+  and the new content existed **nowhere**. That is a whole-hash window, not the brief post-check
+  interval that was accepted.
+  A digest is now taken together with proof of which file it is a digest of: `fstat` on the
+  descriptor before reading, `fstat` on it again after, and `os.stat` on the pathname — device,
+  inode, size and mtime must all agree. On any mismatch, or any failure to establish them, the
+  source is kept and the directory is not retired.
+  **What remains accepted, in one sentence for both paths:** a write of any kind in the interval
+  between the last verification and the unlink. Everything earlier is caught. The docstring no
+  longer says "no content window at all" for the hard-link path, which was too strong — it is not
+  an atomic compare-and-unlink. Two narrower wordings that were in this file and in the code are
+  gone, both wrong: "accepted: an in-place write leaving size, mtime **and content** unchanged"
+  describes nothing at all, and "leaving size and mtime unchanged" is a limit on what the *identity*
+  evidence can see, not something this function accepts — the digest comparison catches those bytes
+  regardless. That limit is now documented where it lives, on the hashing helper.
+- **Archiving deleted new bytes when an editor saved over the source.** The hard-link path's
+  guarantee — same inode, so removing the source name cannot lose content — holds only while the
+  pathname still *denotes* that inode. An editor's atomic save replaces the pathname with a brand
+  new file, so the unconditional unlink removed the **new** bytes while the archive kept the old
+  ones. The source's device and inode are now confirmed against what was just published,
+  immediately before the name is removed; on a mismatch both files are kept, the run reports it,
+  and the directory is not retired. The published copy is deliberately *not* removed — it is the
+  only name left for the bytes that were there, so unlinking it would destroy them.
+- **The no-hard-link fallback wrote bytes under a final name, and imports inherited it.** It copied
+  the whole file into the final name, so an interruption left a valid-frontmatter fragment at
+  `knowledge/<name>.md`, directly visible to the indexer — QA's wrong-memory hazard, reached
+  through a different door. The fallback now claims the name with an **empty placeholder** and then
+  `os.replace`s the staged file over it, so a final name only ever holds the placeholder or the
+  complete file. The worst interruption leaves a 0-byte file, and a test asserts that is inert by
+  running the real indexer over it: zero files indexed, zero chunks.
+- **Verification ran before a copy that could still lose data.** On the fallback the digest check
+  preceded a second full copy, so a source mutated during that copy was lost with the check already
+  behind us. The source is now re-verified **after** publication, covering everything up to the
+  instant before its name is removed. A separate completeness check stays *before* publication, so
+  a short stage is never published — collapsing those two into one check is a hole this fix briefly
+  opened, and a test caught it.
+- `archive_copy_looks_complete()` is removed. It had no production caller, so it implied a recovery
+  contract nothing enforced; with placeholder-then-replace there is no partial file under a final
+  name for it to detect.
+
+### Fixed
+- **A fault mid-import left a truncated memory under an ordinary name.** The import reserved the
+  target name with `O_CREAT|O_EXCL` and then wrote into it, so a write that failed part-way — a full
+  disk, a hard kill — left a fragment that *looks* like a memory. QA measured the consequence: the
+  fragment keeps its frontmatter, so it parses, the indexer indexes it, and in their fixtures search
+  ranked the fragment **above** the whole copy. Not an absent memory but a wrong one, on an ordinary
+  path.
+  Imported files are now staged and published the same way the archive and the marker are: written
+  to a temporary the indexer cannot see (leading dot *and* a `.tmp` suffix the `**/*.md` walk cannot
+  match), fsynced, then published by an atomic no-clobber claim. A fault leaves nothing under an
+  ordinary name and nothing that could be mistaken for a memory, and a retry imports exactly one
+  whole file. The cleanup catches `BaseException`, so a `KeyboardInterrupt` mid-write does not leave
+  the staging file either.
+  Suffixing for a name collision now matches the archive's convention (`-1`, `-2`, …) rather than
+  starting at `-2`, because both paths share one publication primitive.
+
+### Fixed
+- **The no-clobber archiving fix introduced a data-loss window, and this closes it.** Copying the
+  file and then unconditionally unlinking the source loses an edit made in between: the source is
+  gone and the archive holds the old bytes. The `rename` it replaced had no such window, so this
+  was a regression on ordinary filesystems.
+  Publication is now by **hard link** wherever hard links work, which is the ordinary case:
+  `os.link` is atomic, fails on an occupied name, and publishes *the same inode*, so removing the
+  source name afterwards cannot lose bytes — there are no second bytes to go stale. Copying is no
+  longer the ordinary path.
+  Where a real copy is unavoidable — a symlink source, or a filesystem without hard links — the
+  source is re-read and re-hashed after the copy and **before anything is removed**. On any
+  mismatch the source is kept, the failure is reported, and the directory is not retired. A digest
+  rather than a size, because a same-length edit is exactly what a size check waves through.
+  The concurrent-writer contract, stated rather than implied: on the copy path a write landing
+  after the re-verification and before the unlink is still lost; on the hard-link path no such
+  window exists.
+- **A dangling or looping `MEMORY.md` was mishandled at the migration entrypoint.** `exists()`
+  follows the link, so a dangling one looked absent and the directory was retired with no errors at
+  all — the link's content silently abandoned. A self-loop raised an uncaught `ELOOP` out of
+  `is_retirement_pointer`, before anything could report it. Symlink entries are now inspected
+  without being followed, an unreadable target is reported by name, and the directory is not
+  retired when preservation failed. Tested through `migrate_dir`, not only the publication helper.
+- `archive_copy_looks_complete()` exists so a later run does not assume a present archive name is a
+  good copy: the fallback path can be interrupted mid-write under a real name. Nothing describes
+  that case as complete.
+
+### Fixed
+- **Archiving could overwrite the only byte-complete copy of a file.** `_free_archive_name` tested
+  `exists()` and then called `shutil.move`, which replaces its destination — so a file created at
+  that name in between was destroyed. Codex reproduced the loss of an earlier archived original
+  with a deterministic probe; sequential suffix tests cannot see it. Two more holes in the same
+  code: `exists()` is False for a **dangling symlink**, so such a name read as free, and across
+  filesystems `shutil.move` becomes copy-then-unlink, where a failed copy leaves partial debris
+  that the next run's `exists()` would treat as an occupied, complete archive copy.
+  Publication is now staged: the content is copied into a unique `.partial-` temporary, fsynced,
+  and the final name claimed with `os.link`, which is atomic and **fails** if the name is taken —
+  a dangling symlink included, since the check is on the name and not on what it points at. A real
+  archive name therefore only ever appears as a complete file, and the source is unlinked only
+  afterwards. A short copy is refused rather than published.
+- **A relative `MEMORY.md` symlink broke when archived**, making "kept byte-complete in the
+  archive" untrue: moving the link re-resolved its target against the archive directory. Symlink
+  sources are now followed and archived as real content, which makes the claim literally true,
+  while the target file is left exactly where it is — only the link is removed, which is all that
+  is needed to stop autoMemory injecting it. A **dangling** source symlink has no content to
+  preserve, so it is refused and nothing is touched.
+- **A partially written `.MIGRATED` marker was accepted as a completed migration.**
+  `has_migration_marker()` only asks whether the file exists, so a short write produced a
+  directory that reported itself migrated while the same run reported "NOT retired, so re-running
+  retries it" — and the next run believes the file, not the report. The marker is now staged and
+  renamed into place, so it either does not exist or is complete.
+- **Importing a file could overwrite an existing memory, or write through a dangling symlink.**
+  The target write picked a name with `while candidate.exists()` and then called `write_text`:
+  two migrations at once could pick the same free name and the second overwrite the first's
+  import, and a dangling symlink at the candidate name read as absent, so `write_text` followed it
+  and created or truncated whatever it pointed at, anywhere on disk. Both are closed by a single
+  `O_CREAT|O_EXCL` create.
+- **The dry-run preview named a path `--commit` would not use.** It hardcoded
+  `old-memory-archive/MEMORY.md` while a commit would pick `MEMORY-1.md` when the first name was
+  taken. The preview now predicts the same name the publication would choose.
+- **The nested-file warning could announce "this directory is now retired" in the same report as
+  the error saying it was not.** It was worded before the retirement was attempted. It is now
+  worded after, and on failure says the directory was *not* retired, a later run will retry it, and
+  no marker needs deleting because none was written.
+
+### Changed
+- The marker is written **after** the legacy pointer is archived, not before, so a failed archive
+  leaves nothing claiming the directory is done. The previous order's stated rationale was false:
+  it claimed the reverse would let a re-run re-migrate already-archived content, but
+  `discover_files_in_dir` iterates files only and never recurses, so the archive cannot be
+  re-discovered. The order is now asserted by observing the calls — the earlier test compared
+  mtimes, which a move preserves, so marker-first passed it too.
+
+### Fixed
+- **`rekol migrate` permanently deleted a real `MEMORY.md`, with no copy anywhere (#224).** Found
+  by QA against `508b33f` and present in published **v0.5.13**. `write_retirement_pointer` called
+  `legacy_pointer.unlink()`, and because `discover_files_in_dir` deliberately skips the name
+  `MEMORY.md`, the file was neither imported nor archived first — after
+  `rekol migrate auto --commit`, content that lived only there existed **nowhere on disk**. A
+  directory holding only `MEMORY.md` was emptied and marked migrated, exit 0.
+  The unlink could never do the job it was written for. Its stated purpose was removing a
+  *tombstone* left by an older version of this tool, but both callers sit behind
+  `has_migration_marker`, which already treats an old-format tombstone as retired — so a real
+  tombstone never reaches it. **Everything it could delete was a user's own file.** And it was
+  pinned by a test that wrote `"Real content."` and asserted the file was gone, so this was a
+  decision carried from tombstones to real files, not a slip.
+  `MEMORY.md` is now **moved into `old-memory-archive/`**, never unlinked. That still stops
+  Claude Code's autoMemory injecting it — autoMemory cannot inject what is not at that path — and
+  it is the same guarantee `install.sh` already printed ("originals stay in place or move to
+  `old-memory-archive/`") and `archive.py`'s header already claimed ("the only byte-complete
+  copy of each original"). Both were false; now they are true.
+  An earlier archived copy is never overwritten (`MEMORY-1.md`, `MEMORY-2.md`, …), because the
+  archive holds the only original and one silent overwrite is one unrecoverable file.
+  **The move is reported in dry-run and in the real run, and deliberately not gated on
+  `--quiet`** — `install.sh --migrate` passes `--quiet`, and QA measured the deletion producing
+  no output at all on that path, so the one destructive step was also the most silent. Dry-run
+  previously said "would migrate N" and never mentioned `MEMORY.md`, so the only destructive step
+  was the only one a user could not preview.
+  Reach: `migrate auto --commit`, `migrate repo <path> --commit`, and `install.sh --migrate` —
+  which is the flag the README advertises for importing auto-memory, so the users who hit this
+  were the ones trying to keep theirs. A plain `install.sh` was unaffected.
+- **A retired directory could abandon files in subdirectories without saying so (#225).**
+  Discovery is deliberately non-recursive, but retirement is permanent: a nested `.md` was left on
+  disk, never imported, never archived, and no later run looks — while the marker claimed the
+  originals were in `old-memory-archive/`. Migration now names every such file and says plainly
+  that they are neither imported nor archived, and the marker says "files discovered here"
+  rather than implying everything. The retirement invariant held only because discovery defined
+  what counted.
+
+### Added
+- **`migrate repo` now leaves a repository's own `MEMORY.md` alone.** The only justification for
+  touching that file is Claude Code's autoMemory, which injects
+  `~/.claude/projects/<slug>/memory/MEMORY.md` into every session — so a migrated auto-memory
+  directory must not leave one behind. Outside that tree the file is quite possibly tracked by the
+  user's own repo (rekol ships one in its template), where archiving it would relocate tracked
+  content and drop an untracked `old-memory-archive/` into their working copy. It is now left in
+  place and **said so explicitly**, not merely skipped in silence — silence would be
+  indistinguishable from the behaviour that moved it.
+  The decision keys on *where the directory is*, not which subcommand was typed, so `migrate repo`
+  pointed at a real auto-memory dir and `migrate auto` reaching the same dir agree about it. A
+  relocated `CLAUDE_CONFIG_DIR` is honoured (#165).
+
+### Fixed
+- **Dry-run previewed the `MEMORY.md` move in only one shape (G1).** `progressed` keyed on
+  `migrated > 0`, which stays 0 in dry-run by design, so in the commonest shape of all — a
+  `MEMORY.md` beside one topic file — nothing was previewed and the nested-file warning never
+  appeared either. It looked correct only for a directory with no topic files, which takes a
+  different early return that has its own preview; the test covering that shape passed while the
+  ordinary path previewed nothing, so the one destructive step in the run was the one step a user
+  could not see coming. Dry-run and `--commit` are now asserted to agree about the destination.
+- **A directory whose only `.md` files were nested retired in silence (G2).** The warning sat below
+  the `if not files:` return, so those directories reported `migrated 0`, exit 0, and never
+  mentioned the files left behind — the summary line looked like there had been nothing to do.
+  These are the likeliest shapes to be overlooked, and they are now warned about in all four
+  combinations of `MEMORY.md`/topic file/nested file.
+- **The nested-file warning's remedy did nothing when followed (G3).** It said to move the files up
+  one level and re-run; QA did exactly that and nothing happened, because retired directories are
+  filtered out of discovery. It now names `.MIGRATED` as well, and states the files are not
+  imported and not searchable. There is a regression test that *executes* the remedy rather than
+  reading it. In dry-run the wording also no longer claims "this directory is now retired" — a dry
+  run retires nothing, so the past tense was the same species of false claim the warning exists to
+  prevent, and it advises moving the files before committing, where no marker needs deleting at all.
+- **An unwritable archive left the directory permanently retired (G4).** `shutil.move` had no
+  `except`, so a mode-555 `old-memory-archive/` produced an uncaught `PermissionError` traceback —
+  and because the marker was written *first*, `.MIGRATED` claimed completion with `MEMORY.md` still
+  in place, so `has_migration_marker` skipped the directory for good and the file was stranded.
+  The legacy pointer is now archived **first** and the marker written **last**, the failure is
+  caught and reported as a plain error, and nothing claims the directory is done — so a later run
+  retries once the archive is writable.
+  The previous order's stated rationale was also wrong and is corrected in the docstring: it
+  claimed marker-last "would leave neither file on partial failure, causing a re-run to re-migrate
+  already-archived content", but `discover_files_in_dir` iterates files only and never recurses, so
+  the archive cannot be re-discovered and that failure mode does not exist.
+- **`migrate repo <repo root> --commit` moved a repository's tracked files.** QA pointed it at a
+  real git repo and `README.md` and `CLAUDE.md` were moved into `old-memory-archive/`, leaving them
+  deleted in the work tree. Losing `CLAUDE.md` also takes a project's instructions out of Claude
+  Code's view. The reasoning this release uses for sparing `MEMORY.md` — likely a tracked project
+  file, and an untracked `old-memory-archive/` appearing inside someone's repository — applies
+  verbatim to its siblings, so the contract could not be stated truthfully while this stood.
+  `--commit` now refuses at a git work-tree root (exit 2) and names the memory subdirectory to
+  point at instead. It is a refusal rather than a prohibition: a git-tracked notes repo is a
+  legitimate migration source, and rekol's own `git_track` makes `REKOL_HOME` a work-tree root, so
+  `--allow-repo-root` opts in. `.git` as a file counts too, so a worktree or submodule is covered.
+- **Dry-run now names every file it would move**, for any path. It previously printed only a count
+  (`would migrate 2 (defaulted=2)`), so previewing could not reveal which files were about to be
+  moved — the preview was exactly the tool a user would reach for, and it withheld the one detail
+  that mattered.
+- The `moved MEMORY.md` and `MEMORY.md WOULD be moved` lines now also say **not searchable**, which
+  the left-in-place line already said. A user told only that a file was "not imported" has not been
+  told that searching will not find it.
+- The `.MIGRATED` marker text no longer wraps mid-clause (it read `KEEP them unless you` / `have` /
+  `checked…`), with a test that no line is a single orphaned word.
+
+### Fixed
 - **The alias fix moved the bug one level down, and a broken layer link made doctor say "cannot
   tell" (#232, review).** Three disagreements with the indexer, all found by a reviewer told to go
   looking for one:

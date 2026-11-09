@@ -59,24 +59,13 @@ EXEMPT_MODULES: dict[str, str] = {
     "sessions/archive.py": "transcript archive, not curated memory",
     # Writes the file the user asked for, at a path they named.
     "docs_convert/writer.py": "writes its explicit output path",
-    # PENDING, NOT ABSOLVED. Both of these really do call `write_text` on this
-    # branch, and the reasons that used to sit here — "prose in docstrings, not
-    # calls" — were simply false (Codex, 2026-11-07). An exemption whose reason
-    # is wrong is worse than no exemption: it tells the next reader to stop
-    # looking, which is exactly what this test exists to prevent.
-    #
-    # `archive.py` writes the `.MIGRATED` marker and `migrator.py` writes the
-    # imported memory, both by truncation, and both are what #224 replaces with
-    # staged-and-replaced publication. #224 merges before this PR, so these come
-    # out at the rebase rather than being fixed here — and not on anyone
-    # remembering: `test_every_exemption_still_describes_a_real_module` fails on
-    # a dead exemption, so the rebase cannot pass with them still listed.
-    # Verified against #224's head (`387f514`): neither module has a truncating
-    # write there, so both exemptions will go.
-    "migrate/archive.py": "PENDING: write_text at archive.py:101 (the .MIGRATED marker), "
-    "removed by #224 and due out of this list at the rebase",
-    "migrate/migrator.py": "PENDING: write_text at migrator.py:218 (the imported memory), "
-    "removed by #224 and due out of this list at the rebase",
+    # `migrate/archive.py` and `migrate/migrator.py` were listed here as PENDING,
+    # NOT ABSOLVED while their truncating writes were still on the branch. They
+    # came out at this merge, which is what the PENDING note said would happen:
+    # the migrate publication path now stages and replaces, so an exemption for
+    # either one is a dead decision, and
+    # `test_every_exemption_still_describes_a_real_module` fails on a dead
+    # exemption rather than relying on anyone remembering to remove it.
 }
 
 

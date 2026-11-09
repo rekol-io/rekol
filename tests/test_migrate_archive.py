@@ -77,7 +77,10 @@ def test_write_retirement_pointer_archives_legacy_memory_md_never_deletes_it(
     body = "# Original index\n\nReal content.\n"
     (memory_dir / "MEMORY.md").write_text(body)
 
-    archived = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+    outcome = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+    archived = outcome.legacy_pointer_archived
+    assert outcome.retired is True
+    assert outcome.error is None
 
     marker = memory_dir / MIGRATION_MARKER_NAME
     assert marker.is_file()
@@ -106,19 +109,26 @@ def test_archiving_a_legacy_pointer_never_overwrites_an_earlier_copy(
     (memory_dir / "old-memory-archive" / "MEMORY.md").write_text("FIRST\n")
     (memory_dir / "MEMORY.md").write_text("SECOND\n")
 
-    archived = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+    archived = write_retirement_pointer(
+        memory_dir, memory_home=Path("/fake/memory")
+    ).legacy_pointer_archived
+    assert archived is not None
 
     assert archived == memory_dir / "old-memory-archive" / "MEMORY-1.md"
     assert archived.read_text() == "SECOND\n"
     assert (memory_dir / "old-memory-archive" / "MEMORY.md").read_text() == "FIRST\n"
 
 
-def test_write_retirement_pointer_returns_none_when_there_is_no_legacy_pointer(
+def test_write_retirement_pointer_reports_no_archived_path_when_there_is_no_legacy_pointer(
     tmp_path: Path,
 ) -> None:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
-    assert write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory")) is None
+    outcome = write_retirement_pointer(memory_dir, memory_home=Path("/fake/memory"))
+    assert outcome.legacy_pointer_archived is None
+    # Nothing to archive is not a failure: the directory is still retired.
+    assert outcome.retired is True
+    assert outcome.error is None
 
 
 def test_write_retirement_pointer_idempotent(tmp_path: Path) -> None:
