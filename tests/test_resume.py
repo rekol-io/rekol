@@ -610,7 +610,12 @@ def _install_sh_allowlist() -> list[dict]:
     """
     install_sh = Path(__file__).resolve().parent.parent / "install.sh"
     lines = install_sh.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("  REKOL_OWNED_HOOKS_JSON="))
+    # The TOP-LEVEL definition. This looked for the two-space indented copy
+    # inside Step 6.95 until the #239 reconciliation deleted it: two definitions
+    # meant the lower one shadowed the shared list, and this reader would have
+    # gone on checking the shadow. install.sh's bats guard now refuses both a
+    # second definition and an indented one.
+    start = next(i for i, line in enumerate(lines) if line.startswith("REKOL_OWNED_HOOKS_JSON="))
     end = next(i for i, line in enumerate(lines) if i > start and line.strip() == "]'")
     block = "\n".join(lines[start : end + 1])
     block = block.split("=", 1)[1].replace("'", "")

@@ -30,6 +30,58 @@ if TYPE_CHECKING:
 _FTS_HAS_ALNUM = re.compile(r"[^\W_]", re.UNICODE)
 
 
+_CHECK_INDEX_DIR_FIRST = (
+    "Before deleting anything, check REKOL_INDEX_DIR. It is the HIGHEST precedence\n"
+    "setting and is used verbatim, so it overrides REKOL_HOME and XDG_CACHE_HOME\n"
+    "redirection — an inherited one is the usual reason a run reaches a store it did\n"
+    "not mean to. If the path above is not the store you meant to use, nothing is\n"
+    "wrong with that store and nothing needs rebuilding."
+)
+
+
+def _model_mismatch_message(db_path: Path, stored_model: str | None, wanted_model: str) -> str:
+    """The sessions model-mismatch text: what to CHECK before what to DELETE.
+
+    Two branches rather than one sentence with a sentinel in it, because the two
+    situations have different facts and genuinely different remedies — see
+    :class:`SessionStoreModelMismatchError`.
+    """
+    if stored_model is None:
+        # Reached only from the unstamped-with-vectors branch of
+        # `reconcile_embedder`, which refuses ONLY when the configured model is a
+        # test embedder. So this is the leak case almost by construction, and the
+        # message says that rather than describing a model change.
+        return (
+            f"refusing to adopt a test embedder for an existing transcript index.\n"
+            f"  index:            {db_path}\n"
+            f"  built by:         unrecorded — the store predates model stamping\n"
+            f"  configured model: {wanted_model!r} (a TEST embedder)\n"
+            f"\n"
+            f"The store already holds vectors, and a test embedder has no model behind it,\n"
+            f"so adopting it here would mix meaningless vectors into a corpus that may be\n"
+            f"real. Because nothing recorded what built this store, rekol cannot tell\n"
+            f"whether it is yours or a sandbox's, and it will not guess.\n"
+            f"\n"
+            f"{_CHECK_INDEX_DIR_FIRST}\n"
+            f"\n"
+            f"If the store IS the one you meant: set embedding_model back to a real model\n"
+            f"and re-run. No rebuild is needed, and rekol is not suggesting you delete it —\n"
+            f"its provenance is unknown, which is a reason to keep it, not to remove it."
+        )
+    return (
+        f"sessions index at {db_path} was built by {stored_model!r}, but the configured "
+        f"model is {wanted_model!r}. Vectors from different models are not comparable even "
+        f"at the same width, so mixing them returns confidently wrong neighbours.\n"
+        f"\n"
+        f"{_CHECK_INDEX_DIR_FIRST}\n"
+        f"\n"
+        f"If this is the right store and you meant to change models, either restore\n"
+        f"{stored_model!r} in your config, or rebuild the transcript index with the new\n"
+        f"model — which DELETES the existing one, so do it only after the check above:\n"
+        f"  rm '{db_path}' && rekol session-index --full"
+    )
+
+
 class SessionStoreModelMismatchError(RuntimeError):
     """Raised when the configured embedder is not the one that built this store.
 
@@ -44,20 +96,28 @@ class SessionStoreModelMismatchError(RuntimeError):
     Equal dimension is not equal semantics. Two genuinely different real models
     can also share a width, and mixing those is the same silent corruption
     without any test embedder involved.
+
+    THE REMEDY ORDER IS PART OF THE GUARD (#230). This message used to lead with
+    ``rm '<db_path>' && rekol session-index --full``. The guard fires precisely
+    when a test-configured process has resolved someone's REAL ``sessions.db``
+    through an inherited ``REKOL_INDEX_DIR`` — so that advice told the operator
+    to complete the destruction the guard had just prevented. What to CHECK now
+    comes before what to DELETE, and the destructive line is not offered at all
+    when the store's provenance is unknown.
+
+    ``stored_model=None`` means the store predates identity stamping. It used to
+    be passed as the literal string ``"unknown (store predates identity
+    stamping)"``, which the message then rendered as *restore 'unknown (store
+    predates identity stamping)' in your config* — advice that cannot be
+    followed, because it is not a model name. A sentinel that has to read well
+    inside a sentence is a sign the sentence should branch instead.
     """
 
-    def __init__(self, db_path: Path, stored_model: str, wanted_model: str) -> None:
+    def __init__(self, db_path: Path, stored_model: str | None, wanted_model: str) -> None:
         self.db_path = db_path
         self.stored_model = stored_model
         self.wanted_model = wanted_model
-        super().__init__(
-            f"sessions index at {db_path} was built by {stored_model!r}, but the configured "
-            f"model is {wanted_model!r}. Vectors from different models are not comparable even "
-            f"at the same width, so mixing them returns confidently wrong neighbours.\n"
-            f"Either restore {stored_model!r} in your config, or rebuild the transcript index "
-            f"with the new model:\n"
-            f"  rm '{db_path}' && rekol session-index --full"
-        )
+        super().__init__(_model_mismatch_message(db_path, stored_model, wanted_model))
 
 
 class SessionStoreDimMismatchError(RuntimeError):
@@ -72,10 +132,20 @@ class SessionStoreDimMismatchError(RuntimeError):
         self.db_path = db_path
         self.existing_dim = existing_dim
         self.wanted_dim = wanted_dim
+        # Same remedy order as its sibling, and for the same reason (#230): this
+        # message also led with `rm '<db_path>'`, and a width mismatch is reached
+        # by a leaked REKOL_INDEX_DIR just as readily as by a deliberate model
+        # change. Fixing one message and not the other would leave the advice
+        # pointed the wrong way on half the paths.
         super().__init__(
             f"sessions index at {db_path} was built with {existing_dim}-dim embeddings, "
-            f"but the configured model produces {wanted_dim}-dim vectors. Restore the "
-            f"previous embedding_model, or rebuild the transcript index:\n"
+            f"but the configured model produces {wanted_dim}-dim vectors.\n"
+            f"\n"
+            f"{_CHECK_INDEX_DIR_FIRST}\n"
+            f"\n"
+            f"If this is the right store and you meant to change models, either restore the\n"
+            f"previous embedding_model, or rebuild the transcript index — which DELETES the\n"
+            f"existing one, so do it only after the check above:\n"
             f"  rm '{db_path}' && rekol session-index --full"
         )
 
@@ -525,9 +595,10 @@ class SessionStore:
                 # will be its own. Keying this on message count instead refused
                 # the ordinary path where a corpus and its embedder are both the
                 # test ones, which is what the suite's own fixtures do.
-                raise SessionStoreModelMismatchError(
-                    self.db_path, "unknown (store predates identity stamping)", embedding_model
-                )
+                # None, not a prose string: the message branches on provenance
+                # being unknown rather than trying to word it as a model name
+                # (#230).
+                raise SessionStoreModelMismatchError(self.db_path, None, embedding_model)
             self._stamp_embedding_model(embedding_model)
         self.reconcile_embedding_dim(wanted_dim)
 

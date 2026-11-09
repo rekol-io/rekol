@@ -7,6 +7,11 @@
 #
 # On a machine without bats, this file documents manual test steps.
 #
+# Sandbox guard (#223): shared with test_uninstall.bats so the two cannot drift.
+# Provides rekol_bats_clear_path_overrides, rekol_bats_require_sandboxed_env and
+# assert_sandboxed.
+load sandbox_guard
+#
 # These tests deliberately export MEMORY_HOME (not REKOL_HOME) so the installer's
 # MEMORY_HOME-fallback path stays exercised — that path guards existing installs.
 
@@ -27,8 +32,13 @@ setup_file() {
     # happened on 2026-08-18: search over curated memory returned nothing for two
     # days. The #183 fix added these unsets to setup() only and therefore missed
     # the one function that does the destructive work.
-    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
-    unset MEMORY_TOOLS_HOME MEMORY_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+    rekol_bats_clear_path_overrides
+    # And REFUSE if the clearing above ever stops happening. This function runs a
+    # real install and `rekol index rebuild`, which is how a developer's real
+    # index was rebuilt with test vectors on 2026-08-18; loading the guard
+    # without calling it (as this file did until Codex pointed it out) protects
+    # nothing.
+    rekol_bats_require_sandboxed_env || return 1
 
     SHARED_TOOLS="${BATS_FILE_TMPDIR}/shared-tools"
     export SHARED_TOOLS
@@ -74,6 +84,13 @@ setup_file() {
 
 setup() {
     TESTROOT="$(mktemp -d)"
+    # Clear the path overrides BEFORE anything below sets one deliberately --
+    # MEMORY_HOME is exported to a sandbox path two lines down, and clearing
+    # after that would undo it. Sandbox-internal values are what
+    # rekol_bats_require_sandboxed_env permits; inherited outside ones are what
+    # it refuses (#223).
+    rekol_bats_clear_path_overrides
+    rekol_bats_require_sandboxed_env || return 1
     # Export MEMORY_HOME (the fallback) and unset REKOL_HOME so the resolver
     # exercises the fallback path; the missing-home test unsets both.
     export MEMORY_HOME="${TESTROOT}/mem"
@@ -92,9 +109,8 @@ setup() {
     #
     # tests/conftest.py already clears these for pytest; bats never got the same
     # treatment, and hardening one harness is what made the gap in the other
-    # dangerous. Clear every override so only the sandboxed XDG paths decide.
-    unset REKOL_INDEX_DIR REKOL_ARCHIVE_DIR REKOL_TOOLS_HOME || true
-    unset MEMORY_TOOLS_HOME CLAUDE_CONFIG_DIR CLAUDE_SETTINGS_PATH || true
+    # dangerous. The clearing itself now happens at the top of this function, in
+    # the shared guard, so it cannot sit below a line that depends on it.
     export REKOL_INSTALL_SKIP_DEPS=1
     export BATS_TEST_TIMEOUT=300
     BIN_DIR="${TESTROOT}/bin"
@@ -116,19 +132,8 @@ setup() {
     export COMPONENT_DIR TOOLS_HOME BIN_DIR TESTROOT XDG_CACHE_HOME XDG_DATA_HOME
 }
 
-# Refuses to let a destructive test run against a path outside the sandbox.
-# The unset above prevents the KNOWN leak; this catches the next one, whatever
-# shape it takes. Call before anything that deletes.
-assert_sandboxed() {
-    local resolved="$1" label="$2"
-    [[ -n "$resolved" ]] || return 0
-    case "$resolved" in
-        "$TESTROOT"/*|/private"$TESTROOT"/*|/tmp/*|/private/tmp/*) : ;;
-        *) printf 'REFUSING: %s resolved OUTSIDE the sandbox: %s\n' "$label" "$resolved" >&2
-           printf '  TESTROOT=%s\n' "$TESTROOT" >&2
-           return 1 ;;
-    esac
-}
+# assert_sandboxed lives in tests/sandbox_guard.bash (#223). The copy that stood
+# here was never called by this file at all -- a guard that only existed.
 
 teardown() {
     rm -rf "${TESTROOT}"
@@ -1536,6 +1541,391 @@ JSON
   [[ "$output" == *"already soft-fail"* ]] || { echo "second run did not report a no-op"; echo "$output" | grep -i soft; false; }
 }
 
+@test "soft-fail is applied to rekol's own hooks ONLY, and both directions still work (#235)" {
+  # QA's F9. `SOFTEN_PROG` matched any command whose text contained rekol|REKOL,
+  # so a user's hook got ` 2>/dev/null || true` appended. That is not cosmetic:
+  # `|| true` forces exit 0 and `2>/dev/null` discards stderr, which is how
+  # Claude Code receives a block reason — so a BLOCKING hook of theirs silently
+  # stopped blocking after any install. In install.sh since #183, so released.
+  #
+  # Both directions are EXECUTED here, not reasoned about. Inferring from the
+  # rewrite is what let this ship: the text looked harmless.
+  SBHOME="$TESTROOT/sandhome-soften"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-soften"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # A user's BLOCKING hook whose text mentions rekol — QA's exact shape.
+  gate="$TESTROOT/rekol-tools/gate.sh"
+  mkdir -p "$(dirname "$gate")"
+  {
+    printf '#!/bin/sh\n'
+    printf 'printf "blocked by my gate\\n" >&2\n'
+    printf 'exit 2\n'
+  } > "$gate"
+  chmod 755 "$gate"
+  cat > "$SBHOME/.claude/settings.json" <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"","hooks":[
+  {"type":"command","command":"$gate --uses rekol --flag"}
+]}]}}
+JSON
+  before="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$SBHOME/.claude/settings.json")"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+    --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # DIRECTION 1: the user's hook is byte-identical...
+  after="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$SBHOME/.claude/settings.json")"
+  [ "$before" = "$after" ] || {
+    echo "FAIL: rekol rewrote a user hook"; echo "  before: $before"; echo "  after:  $after"; false; }
+
+  # ...and it STILL BLOCKS when run, with its stderr intact. This is the
+  # assertion that matters: the rewrite's damage was to behaviour, not text.
+  user_err="$TESTROOT/user-hook.err"
+  set +e
+  /bin/sh -c "$after" 2>"$user_err"
+  user_rc=$?
+  set -e
+  [ "$user_rc" -ne 0 ] || {
+    echo "FAIL: the user's blocking hook exited 0 — it no longer blocks"; false; }
+  grep -q "blocked by my gate" "$user_err" || {
+    echo "FAIL: the user's hook lost its stderr, so Claude Code sees no block reason"
+    echo "  stderr was: $(cat "$user_err")"; false; }
+
+  # NO REPORT IS ASSERTED HERE ANY MORE. The "we left N hooks of yours alone"
+  # line was written, measured and REMOVED from this step: answering it needs
+  # the ability to tell a LEGACY rekol rendering from a user's command, which
+  # lands with #203. On a v0.5.13 upgrade with no user hooks planted it said
+  # `left 4`, and all four were rekol's own hooks still in the
+  # `$(command -v rekol || echo …)` form. QA measured the same as `left 3`.
+  #
+  # What this test owns is the BEHAVIOUR, which is complete without a message:
+  # the user's hook is byte-identical, still exits non-zero, and keeps its
+  # stderr. Those are asserted above and below.
+
+  # DIRECTION 2: rekol's OWN hooks must still be soft-failing, or a broken
+  # install can fail a UserPromptSubmit and lock the user out of Claude Code.
+  ours="$(jq -r '[.. | objects | .command? // empty | select(test("_hook "))] | .[0]' \
+          "$SBHOME/.claude/settings.json")"
+  [ -n "$ours" ] && [ "$ours" != "null" ] || { echo "FAIL: no rekol handler wired"; false; }
+  [[ "$ours" == *"|| true"* ]] || {
+    echo "FAIL: rekol's own hook is not soft-failing: $ours"; false; }
+
+  # Executed with the recorded binary REMOVED, which is the failure that used to
+  # lock people out: it must still exit 0.
+  mv "$BIN_DIR/rekol" "$BIN_DIR/rekol.hidden"
+  set +e
+  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$ours" >/dev/null 2>&1
+  ours_rc=$?
+  set -e
+  mv "$BIN_DIR/rekol.hidden" "$BIN_DIR/rekol"
+  [ "$ours_rc" -eq 0 ] || {
+    echo "FAIL: rekol's own hook exited $ours_rc with its binary missing — that fails the event"
+    false; }
+}
+
+@test "a pristine install reports NO preserved hooks of your own (#235)" {
+  # THE CONTROL product asked for. My first predicate missed two of rekol's own
+  # commands -- the auto-reindex script, whose command starts with a path, and
+  # SessionEnd's `if [ -n "${REKOL_HOME:-…` notice -- so a user with no hooks of
+  # their own was told the installer had left theirs alone. A reassurance about
+  # something that does not exist is not harmless: it is the line QA was told
+  # not to trust.
+  SBHOME="$TESTROOT/sandhome-pristine-count"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-pristine-count"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: a pristine install claims it preserved hooks of the user's"
+    echo "$output" | grep -i "of your own"
+    false; }
+
+  # And a REINSTALL must be the same: every command rekol wrote is recognised as
+  # rekol's, so nothing is miscounted the second time either.
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: a reinstall claims it preserved hooks of the user's"
+    echo "$output" | grep -i "of your own"
+    false; }
+}
+
+@test "the soften step leaves a compound or quoted user command alone (#235)" {
+  # Product ran my first regex over these two and both came back as rekol's:
+  #
+  #   rekol _hook x && my-gate              the anchor held, but the subcommand
+  #                                         test was an unanchored substring
+  #   "$(my-wrapper)" --check "_hook foo"   same, through a quoted argument
+  #
+  # Each would have had ` 2>/dev/null || true` appended, which is #235 again:
+  # the gate stops blocking, silently. EXECUTED, not inferred -- both must still
+  # exit non-zero with their stderr intact after an install.
+  SBHOME="$TESTROOT/sandhome-compound"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-compound"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  gate="$TESTROOT/my-gate"
+  printf '#!/bin/sh\nprintf "BLOCKED by my gate\\n" >&2\nexit 2\n' > "$gate"
+  chmod +x "$gate"
+  wrapper="$TESTROOT/my-wrapper"
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$gate" > "$wrapper"
+  chmod +x "$wrapper"
+
+  cmd_a="rekol _hook x && $gate"
+  cmd_b="\"\$($wrapper)\" --check \"_hook foo\""
+  jq -n --arg a "$cmd_a" --arg b "$cmd_b" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[
+      {type:"command",command:$a},
+      {type:"command",command:$b}]}]}}' > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  for want in "$cmd_a" "$cmd_b"; do
+    got="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
+            | select(. == $w)] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 1 ] || {
+      echo "FAIL: rekol rewrote a command it does not own:"
+      echo "  wanted byte-identical: $want"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # EXECUTED: the second one resolves to the gate, so both must still block.
+  after_b="$(jq -r --arg w "$cmd_b" '[.. | objects | .command? // empty
+             | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
+  set +e
+  stderr_file="$TESTROOT/gate.err"
+  env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after_b" >/dev/null 2>"$stderr_file"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { echo "FAIL: the user's gate stopped blocking (exit 0)"; false; }
+  grep -q "BLOCKED by my gate" "$stderr_file" \
+    || { echo "FAIL: the gate's stderr was discarded"; cat "$stderr_file"; false; }
+}
+
+@test "upgrading a v0.5.13 install with NO user hooks reports none of your own (#235)" {
+  # QA measured `left 3` on the first install and `left 2` on the second, with
+  # no hooks of their own planted. All three were rekol's, and the count dropped
+  # because it ran in the MIDDLE of the install:
+  #
+  #   * the old SessionStart loader, before Step 7 adds its `: rekol:backend=`
+  #     marker -- the one that disappeared on the second run
+  #   * `<tools-home>/hooks/auto-reindex.sh`, whose command starts with a path
+  #   * SessionEnd's `if [ -n "${REKOL_HOME:-...` notice
+  #
+  # The report runs after every hook-rewriting step now, so it describes the
+  # state the install actually leaves. This fixture is the v0.5.13 hook shapes.
+  SBHOME="$TESTROOT/sandhome-v0513"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-v0513"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # The loader WITHOUT the `: rekol:backend=` marker, the old PATH-first
+  # handlers, the old auto-reindex path, and the SessionEnd notice.
+  old_inv="\"\$(command -v rekol || echo '/old/bin/rekol')\""
+  loader="HOME_DIR=\"\${REKOL_HOME:-\$MEMORY_HOME}\"; IDX=\"\$HOME_DIR/REKOL.md\"; if [ -n \"\$HOME_DIR\" ] && [ -f \"\$IDX\" ]; then cat \"\$IDX\"; fi; ${old_inv} _hook session-confidence 2>/dev/null || true"
+  jq -n --arg loader "$loader" \
+        --arg tasks "${old_inv} _hook session-tasks 2>/dev/null || true" \
+        --arg reindex '$HOME/.local/share/rekol/hooks/auto-reindex.sh' \
+        --arg notice 'if [ -n "${REKOL_HOME:-$MEMORY_HOME}" ]; then echo '"'"'[rekol] session ended — if you learned something durable, run `rekol capture` (see the memory skill)'"'"'; fi' \
+        --arg nudge "${old_inv} review --nudge 2>/dev/null || true" \
+    '{hooks:{
+      SessionStart:[{matcher:"",hooks:[{type:"command",command:$loader},
+                                       {type:"command",command:$tasks}]}],
+      PostToolUse:[{matcher:"Edit|Write",hooks:[{type:"command",command:$reindex}]}],
+      SessionEnd:[{matcher:"",hooks:[{type:"command",command:$notice},
+                                      {type:"command",command:$nudge}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+  jq -e . "$SBHOME/.claude/settings.json" >/dev/null || { echo "bad fixture"; false; }
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [[ "$output" != *"of your own"* ]] || {
+    echo "FAIL: an upgrade with no user hooks claims it preserved some"
+    echo "$output" | grep -i "of your own"
+    jq -r '[.. | objects | .command? // empty | select(test("rekol|REKOL"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+
+  # The legacy loader must end SOFT-FAILING. Before #239 the softener caught it
+  # by mention; now it does not match, so Step 7's whole-command replacement is
+  # what has to deliver it (product asked for this confirmed, not assumed).
+  after_loader="$(jq -r '[.. | objects | .command? // empty
+      | select(test("REKOL.md") and test("REKOL_HOME:-"))] | .[0]' \
+      "$SBHOME/.claude/settings.json")"
+  [ -n "$after_loader" ] && [ "$after_loader" != "null" ] || {
+    echo "FAIL: the memory loader is gone after the upgrade"; false; }
+  [[ "$after_loader" == *"|| true"* ]] || {
+    echo "FAIL: the upgraded loader is not soft-failing: $after_loader"; false; }
+  [[ "$after_loader" == *": rekol:backend=install.sh"* ]] || {
+    echo "FAIL: the loader was not upgraded to the marked form"; false; }
+
+  # And the old auto-reindex path is recognised as ours, not reported as yours.
+  reindex_count="$(jq -r '[.. | objects | .command? // empty
+      | select(test("auto-reindex\\.sh"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$reindex_count" -ge 1 ] || { echo "FAIL: the auto-reindex hook vanished"; false; }
+}
+
+@test "a command that merely MENTIONS our reindex script is not softened (#235)" {
+  # Codex P1: `endswith` accepted all three of these, and executing the first
+  # showed exit 1 becoming exit 0 — #235 again, through a different door.
+  #
+  #   false && <path>/hooks/auto-reindex.sh
+  #   my-gate --config <path>/hooks/auto-reindex.sh
+  #   printf <path>/hooks/auto-reindex.sh
+  #
+  # The whole command has to be ONE script invocation now. EXECUTED, not
+  # inferred: the first must still exit non-zero after an install.
+  SBHOME="$TESTROOT/sandhome-reindex-mention"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-reindex-mention"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  fake="$TESTROOT/fake-tools/hooks"
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/auto-reindex.sh"
+  chmod +x "$fake/auto-reindex.sh"
+
+  cmd_a="false && $fake/auto-reindex.sh"
+  cmd_b="my-gate --config $fake/auto-reindex.sh"
+  cmd_c="printf $fake/auto-reindex.sh"
+  # Codex, batch 6: no whitespace in the STRING, a word break once the shell
+  # expands it. The "single path token" character class accepted this because
+  # `$`, `{` and `}` were in the class for the literal `$HOME` forms. Ownership
+  # is a positive allowlist now, so the components permit no expansion at all.
+  cmd_d='false${IFS}'"$fake/auto-reindex.sh"
+  jq -n --arg a "$cmd_a" --arg b "$cmd_b" --arg c "$cmd_c" --arg d "$cmd_d" \
+    '{hooks:{PreToolUse:[{matcher:"Bash",hooks:[
+      {type:"command",command:$a},
+      {type:"command",command:$b},
+      {type:"command",command:$c},
+      {type:"command",command:$d}]}]}}' > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  for want in "$cmd_a" "$cmd_b" "$cmd_c" "$cmd_d"; do
+    got="$(jq -r --arg w "$want" '[.. | objects | .command? // empty
+            | select(. == $w)] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 1 ] || {
+      echo "FAIL: rekol rewrote a command that only MENTIONS its script:"
+      echo "  wanted byte-identical: $want"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # EXECUTED, not inferred: both gate shapes must still fail. With
+  # ` 2>/dev/null || true` appended either one exits 0, which is how a gate
+  # stops gating.
+  for gate in "$cmd_a" "$cmd_d"; do
+    after="$(jq -r --arg w "$gate" '[.. | objects | .command? // empty
+               | select(. == $w)] | .[0]' "$SBHOME/.claude/settings.json")"
+    set +e
+    env -i PATH="/usr/bin:/bin" HOME="$SBHOME" /bin/sh -c "$after" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || {
+      echo "FAIL: a blocking command now exits 0 — it stopped blocking:"
+      echo "  $after"
+      false; }
+  done
+
+  # And our OWN form, bare, is still recognised and softened.
+  ours="$(jq -r '[.. | objects | .command? // empty
+          | select(test("auto-reindex\\.sh") and test("\\|\\| true"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+  [ "$ours" -ge 1 ] || {
+    echo "FAIL: rekol's own auto-reindex hook is not soft-failing"
+    jq -r '[.. | objects | .command? // empty | select(test("auto-reindex"))] | .[]' \
+      "$SBHOME/.claude/settings.json"
+    false; }
+}
+
+@test "de-duplicating auto-reindex never deletes a hook of yours (#235)" {
+  # Codex: the de-duplication dropped whole later PostToolUse BLOCKS whose text
+  # contained `auto-reindex.sh`. A hook of the user's sharing such a block was
+  # DELETED — worse than softening it, because softening is recoverable from the
+  # backup and deleting something we never owned is not.
+  SBHOME="$TESTROOT/sandhome-dedupe"
+  mkdir -p "$SBHOME/.claude"
+  REKOLH="$TESTROOT/rekolhome-dedupe"
+  mkdir -p "$REKOLH"
+  printf 'embedding_model: test-hashing\nupdate_check: false\nsession_search_enabled: false\ngit_track: false\n' \
+    > "$REKOLH/rekol.config.yaml"
+  printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
+
+  # Two blocks each carrying an auto-reindex handler; the SECOND also carries a
+  # hook of the user's. The duplicate must go, the user's hook must not.
+  old_reindex='$HOME/.local/share/rekol/hooks/auto-reindex.sh 2>/dev/null || true'
+  jq -n --arg r "$old_reindex" --arg mine "my-own-watcher --on-edit" \
+    '{hooks:{PostToolUse:[
+      {matcher:"Edit|Write",hooks:[{type:"command",command:$r}]},
+      {matcher:"MultiEdit",hooks:[{type:"command",command:$r},
+                                  {type:"command",command:$mine}]}]}}' \
+    > "$SBHOME/.claude/settings.json"
+
+  run env -u MEMORY_HOME -u TEST_MODE \
+    REKOL_HOME="$REKOLH" HOME="$SBHOME" \
+    "$COMPONENT_DIR/install.sh" --no-skill --no-shellrc \
+      --tools-home "$TOOLS_HOME" --bin-dir "$BIN_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  mine_left="$(jq -r '[.. | objects | .command? // empty
+               | select(test("my-own-watcher"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$mine_left" -eq 1 ] || {
+    echo "FAIL: the user's hook was deleted by de-duplication (found $mine_left)"
+    jq -r '.hooks.PostToolUse' "$SBHOME/.claude/settings.json"
+    false; }
+
+  # Exactly one auto-reindex handler survives: de-duplication still works.
+  ar="$(jq -r '[.. | objects | .command? // empty
+        | select(test("auto-reindex\\.sh"))] | length' "$SBHOME/.claude/settings.json")"
+  [ "$ar" -eq 1 ] || {
+    echo "FAIL: expected exactly 1 auto-reindex handler, found $ar"
+    jq -r '.hooks.PostToolUse' "$SBHOME/.claude/settings.json"
+    false; }
+}
+
 @test "a wired hook runs the recorded path even when an orphan rekol is first on its PATH (#203)" {
   # THE #203 failure, end to end. The orphan console script is FIRST on the
   # hook's PATH, so `command -v rekol` succeeds and — under the old resolution
@@ -1783,6 +2173,7 @@ _install_into_bin_dir_and_run_hooks() {
   [ "$faults" -eq 0 ] || { echo "$faults hook command(s) failed to parse"; false; }
 }
 
+
 @test "install survives a bin-dir containing a space and an ampersand, and its hooks run" {
   # The `&` is the load-bearing character here. bash >= 5.2 expands `&` in the
   # replacement of ${var//pat/rep} to the matched text, and every snippet
@@ -2029,7 +2420,13 @@ JSON
   # The allowlist, read out of install.sh itself. It holds no apostrophes by
   # construction (they would end the single-quoted jq program), so stripping
   # them is safe and leaves valid JSON.
-  allow="$(sed -n "/REKOL_OWNED_HOOKS_JSON=/,/^  ]'/p" "$COMPONENT_DIR/install.sh" \
+  #
+  # The terminator is the TOP-LEVEL `]'`. It was `/^  ]'/` — two spaces — which
+  # matched the copy inside Step 6.95; the #239 reconciliation deleted that, so
+  # the range then ran to EOF and jq failed on the rest of the script. A
+  # terminator keyed on the indentation of a block that moved is why this test,
+  # not the guard, is what caught the move.
+  allow="$(sed -n "/^REKOL_OWNED_HOOKS_JSON=/,/^]'/p" "$COMPONENT_DIR/install.sh" \
            | sed "s/.*REKOL_OWNED_HOOKS_JSON=//" | tr -d "'")"
   echo "$allow" | jq -e 'type == "array" and length > 0' >/dev/null || {
     echo "FAIL: could not read the allowlist out of install.sh"; echo "$allow"; false; }
@@ -2237,8 +2634,14 @@ JSON
 
 @test "an unquoted fallback that is not a literal path is left alone (#221)" {
   # The allowlist rule from #239, applied here: unquoted means the shell will
-  # expand and word-split it, so anything but literal characters changes what
-  # runs. Those are not ours and must survive byte-identical.
+  # expand it, so a character that changes what runs makes the command not ours,
+  # and it must survive byte-identical.
+  #
+  # BOTH SIDES OF THE BOUNDARY are asserted here, because the boundary moved
+  # (product, 2026-11-08) and this test had the old one baked in: it asserted
+  # that a path with ONE space was not ours, which was never measured — a single
+  # space comes through the double-quoted capture unchanged in bash, zsh and
+  # zsh+EXTENDED_GLOB, so that hook works and is ours to repair.
   SBHOME="$TESTROOT/sandhome-unquoted-notours"
   mkdir -p "$SBHOME/.claude"
   REKOLH="$TESTROOT/rekolhome-unquoted-notours"
@@ -2247,13 +2650,28 @@ JSON
     > "$REKOLH/rekol.config.yaml"
   printf '# Memory Index\n\n- a pointer\n' > "$REKOLH/REKOL.md"
 
-  a='"$(command -v rekol || echo /opt/generic bin/rekol)" _hook session-tasks'
+  # NOT OURS — the shell would turn the text into something else, so whatever
+  # we matched would not be the command that ran.
   b='"$(command -v rekol || echo ${HOME}/bin/rekol)" _hook update-check'
   c='"$(command -v rekol || echo /tmp/x;id)" _hook capture-nudge'
-  jq -n --arg a "$a" --arg b "$b" --arg c "$c" \
-    '{hooks:{SessionStart:[{hooks:[{type:"command",command:$a},
-                                   {type:"command",command:$b},
-                                   {type:"command",command:$c}]}]}}' \
+  d='"$(command -v rekol || echo /opt/generic  bin/rekol)" _hook record-stop'
+  e='"$(command -v rekol || echo /opt/gen*ric/bin/rekol)" _hook session-coverage'
+  # OURS, and upgraded since the allowlist was widened (product, 2026-11-08).
+  # `d` above differs from `f` by ONE character — a second space — and that is
+  # the whole boundary: a single space is measured unchanged by bash, zsh and
+  # zsh+EXTENDED_GLOB, while two collapse to one.
+  f='"$(command -v rekol || echo /opt/generic bin/rekol)" _hook session-tasks'
+  g='"$(command -v rekol || echo /opt/rekol@2/bin/rekol)" _hook time-context'
+  h='"$(command -v rekol || echo /opt/rekol+x/bin/rekol)" _hook stop-failure-record'
+  jq -n --arg b "$b" --arg c "$c" --arg d "$d" --arg e "$e" \
+        --arg f "$f" --arg g "$g" --arg h "$h" \
+    '{hooks:{SessionStart:[{hooks:[{type:"command",command:$b},
+                                   {type:"command",command:$c},
+                                   {type:"command",command:$d},
+                                   {type:"command",command:$e},
+                                   {type:"command",command:$f},
+                                   {type:"command",command:$g},
+                                   {type:"command",command:$h}]}]}}' \
     > "$SBHOME/.claude/settings.json"
 
   run env -u MEMORY_HOME -u TEST_MODE \
@@ -2270,14 +2688,38 @@ JSON
   # for someone else's defect and pass only once #239 merges. #221's claim is
   # narrower and is what is checked: the MIGRATION does not rewrite an
   # invocation whose unquoted path is not a literal path.
-  for want in "$a" "$b" "$c"; do
-    head="${want%%\" _hook\"*}"
-    got="$(jq -r --arg h "$head" '[.. | objects | .command? // empty
+  for want in "$b" "$c" "$d" "$e"; do
+    got="$(jq -r --arg h "$want" '[.. | objects | .command? // empty
             | select(startswith($h))] | length' "$SBHOME/.claude/settings.json")"
     [ "$got" -eq 1 ] || {
       echo "FAIL: the migration rewrote an invocation that is not ours:"
-      echo "  expected this invocation intact: $head"
+      echo "  expected this invocation intact: $want"
       jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+
+  # AND THE OTHER SIDE OF THE BOUNDARY, in the same real install: the three
+  # shapes the widening added are gone from the file and their handlers are
+  # recorded-path-first. Without this half, narrowing the allowlist back down
+  # would leave this test green — which is how the old space case came to be
+  # asserted as "not ours" in the first place.
+  for want in "$f" "$g" "$h"; do
+    got="$(jq -r --arg h "$want" '[.. | objects | .command? // empty
+            | select(startswith($h))] | length' "$SBHOME/.claude/settings.json")"
+    [ "$got" -eq 0 ] || {
+      echo "FAIL: this invocation is ours and should have been upgraded:"
+      echo "  still present: $want"
+      jq -r '[.. | objects | .command? // empty] | .[]' "$SBHOME/.claude/settings.json"
+      false; }
+  done
+  for handler in session-tasks time-context stop-failure-record; do
+    n="$(jq -r --arg h "$handler" '[.. | objects | .command? // empty
+          | select(test("_hook " + $h)) | select(test("if \\[ -x"))] | length' \
+          "$SBHOME/.claude/settings.json")"
+    [ "$n" -ge 1 ] || {
+      echo "FAIL: $handler has no recorded-path-first command after the upgrade"
+      jq -r --arg h "$handler" '[.. | objects | .command? // empty
+             | select(test("_hook " + $h))] | .[]' "$SBHOME/.claude/settings.json"
       false; }
   done
 
@@ -2419,5 +2861,236 @@ JSON
     echo "FAIL: passing by name did not preserve the command"
     echo "  wanted: $cmd"
     echo "  got   : $got_named"
+    false; }
+}
+
+@test "the unquoted literal-path allowlist accepts every inert spelling and refuses every active one (#221)" {
+  # THE TABLE, run through the REAL def rather than a restatement of it. Every
+  # row's verdict was decided by EXECUTING the character inside this very
+  # substitution -- `out="$(command -v <missing> || echo <path>)"` -- in bash, in
+  # zsh, and in zsh with EXTENDED_GLOB. The comment above the def in install.sh
+  # records those measurements; this test is what stops the pattern drifting
+  # away from them.
+  #
+  # Why a table and not a handful of cases: this predicate has now been wrong
+  # three times, each time because the character class described what someone
+  # had thought of rather than what the installer writes. A class is only as
+  # good as its enumeration, so the enumeration is the test.
+  def="$(sed -n '/def is_our_literal_path/,/;$/p' "$COMPONENT_DIR/install.sh")"
+
+  # POSITIVE CONTROL ON THE EXTRACTION. An empty def and a def that accepts
+  # everything both produce "0 mismatches" if the rows are never evaluated, so
+  # the extraction is checked before the verdicts are believed.
+  [ -n "$def" ] || {
+    echo "FAIL: could not extract is_our_literal_path from install.sh"; false; }
+  lines="$(printf '%s\n' "$def" | wc -l | tr -d ' ')"
+  [ "$lines" -ge 2 ] || {
+    echo "FAIL: extracted only $lines line(s) of the def:"; printf '%s\n' "$def"; false; }
+  printf '%s' "$def" | grep -q 'test(' || {
+    echo "FAIL: the extracted def has no test() in it:"; printf '%s\n' "$def"; false; }
+
+  table="$TESTROOT/literal-path-table.jq"
+  cat > "$table" <<'JQ'
+[
+  {p:"/plain/bin/rekol",            want:true,  why:"the ordinary case"},
+  {p:"/opt/rekol",                  want:true,  why:"one component above the binary"},
+  {p:"/opt/rekol@2/bin/rekol",      want:true,  why:"@ measured inert in bash, zsh, zsh+EG"},
+  {p:"/opt/rekol+x/bin/rekol",      want:true,  why:"+ measured inert"},
+  {p:"/opt/a,b/bin/rekol",          want:true,  why:", measured inert"},
+  {p:"/opt/a=b/bin/rekol",          want:true,  why:"= measured inert"},
+  {p:"/opt/a%b/bin/rekol",          want:true,  why:"% measured inert"},
+  {p:"/opt/a:b/bin/rekol",          want:true,  why:": measured inert"},
+  {p:"/Users/John Smith/bin/rekol", want:true,  why:"ONE space: measured unchanged in all three shells"},
+  {p:"/Users/John /rekol",          want:true,  why:"space before the binary: measured unchanged in all three"},
+  {p:"/Users/John/ bin/rekol",      want:true,  why:"space after a slash: measured unchanged in all three"},
+  {p:"/Users/John  Smith/bin/rekol",want:false, why:"TWO spaces: measured collapsing to one in all three"},
+  {p:"/Users/John\tSmith/bin/rekol",want:false, why:"tab: measured collapsing to one space in all three"},
+  {p:"/Users/John\nSmith/bin/rekol",want:false, why:"newline is not U+0020"},
+  {p:"/opt/a^b/bin/rekol",          want:false, why:"^ measured failing under zsh EXTENDED_GLOB"},
+  {p:"/opt/a#b/bin/rekol",          want:false, why:"# measured failing under zsh EXTENDED_GLOB"},
+  {p:"/opt/a~b/bin/rekol",          want:false, why:"~ measured inert, left out by ruling"},
+  {p:"/o)ld/bin/rekol",             want:false, why:") measured mangling the substitution"},
+  {p:"$HOME/bin/rekol",             want:false, why:"$ expands"},
+  {p:"/opt/a*b/bin/rekol",          want:false, why:"* measured failing under zsh"},
+  {p:"/opt/a?b/bin/rekol",          want:false, why:"glob"},
+  {p:"/opt/a[b]/bin/rekol",         want:false, why:"glob"},
+  {p:"/opt/a;b/bin/rekol",          want:false, why:"command separator"},
+  {p:"/opt/a&b/bin/rekol",          want:false, why:"backgrounds"},
+  {p:"/opt/a|b/bin/rekol",          want:false, why:"pipe"},
+  {p:"/opt/a{b}/bin/rekol",         want:false, why:"brace expansion"},
+  {p:"/opt/a<b/bin/rekol",          want:false, why:"redirection"},
+  {p:"/opt/a>b/bin/rekol",          want:false, why:"redirection"},
+  {p:"/opt/a!b/bin/rekol",          want:false, why:"history expansion"},
+  {p:"~/bin/rekol",                 want:false, why:"tilde expansion at word start"},
+  {p:"relative/bin/rekol",          want:false, why:"not absolute: depends on the cwd"},
+  {p:"/opt/a'b/bin/rekol",          want:false, why:"apostrophe: the writer never escaped it (#222)"},
+  {p:"/opt/a\"b/bin/rekol",         want:false, why:"double quote"},
+  {p:"/opt/a\\b/bin/rekol",         want:false, why:"backslash escapes"},
+  {p:"/opt/a`b/bin/rekol",          want:false, why:"command substitution"},
+  {p:"/opt/bin/not-rekol",          want:false, why:"not the binary this installer records"},
+  {p:"/opt/bin/rekol-old",          want:false, why:"not the binary this installer records"}
+]
+| map(. + {got: is_our_literal_path(.p)})
+| map(. + {bad: (.got != .want)})
+| ((.[] | select(.bad) | "MISMATCH want=\(.want) got=\(.got) \(.p|tojson)   # \(.why)"),
+   "mismatches: \([.[] | select(.bad)] | length) of \(length)")
+JQ
+
+  rows="$(grep -c '^  {p:' "$table")"
+  [ "$rows" -eq 37 ] || {
+    echo "FAIL: the table has $rows rows, expected 37 — a row was lost"; false; }
+
+  prog="$TESTROOT/literal-path.jq"
+  { printf '%s\n' "$def"; cat "$table"; } > "$prog"
+  run jq -nr -f "$prog"
+  [ "$status" -eq 0 ] || { echo "FAIL: jq could not run the extracted def:"; echo "$output"; false; }
+  echo "$output"
+  [[ "$output" == *"mismatches: 0 of 37"* ]] || {
+    echo "FAIL: the literal-path allowlist does not match its measured table"; false; }
+
+  # REVERT CONTROLS. Both must fail, or a green table proves nothing.
+  #
+  # 1. The pre-#221 class: refuses the six inert characters and every spaced path.
+  old_prog="$TESTROOT/literal-path-old.jq"
+  { printf '%s\n' "$def" \
+      | sed 's|\^(/\[A-Za-z0-9\._@+,=%: -\]+)+/rekol\$|^(/[A-Za-z0-9._-]+)+$|'
+    cat "$table"; } > "$old_prog"
+  grep -q 'A-Za-z0-9\._-\]+)+\$' "$old_prog" || {
+    echo "FAIL: the control did not actually restore the old class:"; head -3 "$old_prog"; false; }
+  run jq -nr -f "$old_prog"
+  [[ "$output" == *"mismatches: 11 of 37"* ]] || {
+    echo "FAIL: the old class should miss 11 rows, got:"; echo "$output"; false; }
+
+  # 2. The class WITHOUT the consecutive-space clause: accepts the doubled space,
+  #    whose text is not what the shell produced.
+  # Built by DELETING the clause's line and re-terminating the def, not by a
+  # sed substitution: the clause contains `|`, and the first version of this
+  # control used `|` as sed's delimiter, which produced "bad flag in substitute
+  # command" and left the def unmodified — a control that tests the original.
+  nodup_prog="$TESTROOT/literal-path-nodup.jq"
+  { printf '%s\n' "$def" | grep -v 'test("  ")' | awk '{print} END {print ";"}'
+    cat "$table"; } > "$nodup_prog"
+  ! grep -q 'test("  ")' "$nodup_prog" || {
+    echo "FAIL: the control did not remove the consecutive-space clause:"
+    head -3 "$nodup_prog"; false; }
+  run jq -nr -f "$nodup_prog"
+  [[ "$output" == *"mismatches: 1 of 37"* ]] || {
+    echo "FAIL: dropping the consecutive-space clause should miss exactly the"
+    echo "doubled-space row, got:"; echo "$output"; false; }
+}
+
+@test "the owned-hooks allowlist is defined exactly once and every reader uses it (#221/#239)" {
+  # WHY THIS EXISTS AT ALL. #221 and #239 were written in parallel and both
+  # needed "which hook commands are ours". #239 put the answer at the top level,
+  # on purpose, so no step could find it unset. #221 kept a second copy inside
+  # Step 6.95, which SHADOWED the shared one for every line below it and was one
+  # entry short. Nothing broke on the day, because the only consumer above the
+  # shadow had already read the shared list -- but two copies of this predicate
+  # is precisely how #235 shipped (the softener and the message describing it
+  # used different tests), so the duplicate is refused rather than kept in sync.
+  #
+  # A SOURCE CHECK. The shadow is invisible from the outside: both lists accept
+  # the same commands on a pristine install, which is the class of bug whose
+  # output is identical whether or not it is there.
+  #
+  # THE PATTERNS BELOW WERE WIDENED AFTER REVIEW (2026-11-08), which found four
+  # ways the first version could pass while false or fail while fine:
+  #   * a second definition spelled `export`/`declare`/`readonly`/`local NAME=`
+  #     or `NAME+=` was not counted at all;
+  #   * a reader whose `--argjson owned` sat inside a COMMENT counted as a
+  #     reader that was not using the shared list, which is a false alarm
+  #     waiting to happen -- today's comment escapes it only by luck, because a
+  #     backtick follows the word `owned`;
+  #   * a legitimate reader written `"$REKOL_OWNED_HOOKS_JSON"` without braces
+  #     would have failed;
+  #   * a reader split across a line continuation is still not counted, and that
+  #     one is now a STATED CONVENTION rather than a hole: the value must sit on
+  #     the same line as `--argjson owned`, and the failure message says so.
+  [ -f "$COMPONENT_DIR/install.sh" ] || {
+    echo "FAIL: $COMPONENT_DIR/install.sh does not exist, so this guard checked nothing"
+    false; }
+
+  # `local` is in the list even though a top-level definition cannot be local:
+  # a copy moved inside a function is exactly the shadow this refuses.
+  def_pattern='^[[:space:]]*((export|declare|readonly|local)[[:space:]]+)?REKOL_OWNED_HOOKS_JSON\+?='
+  top_level_pattern='^((export|declare|readonly)[[:space:]]+)?REKOL_OWNED_HOOKS_JSON='
+  # `^[^#]*` so a comment mentioning the flag is not read as a reader.
+  read_pattern='^[^#]*--argjson owned'
+  shared_read='^[^#]*--argjson owned[[:space:]]+"\$\{?REKOL_OWNED_HOOKS_JSON\}?"'
+
+  defs="$(grep -cE -- "$def_pattern" "$COMPONENT_DIR/install.sh" || true)"
+  [ "$defs" -eq 1 ] || {
+    echo "FAIL: REKOL_OWNED_HOOKS_JSON is defined $defs times; it must be defined once:"
+    grep -nE -- "$def_pattern" "$COMPONENT_DIR/install.sh" || true
+    echo "A second definition shadows the shared one for every line below it."
+    false; }
+
+  # Top level, not inside a step: an unset jq program reads as a result of zero,
+  # which is the silent kind of wrong. An indented definition is inside an `if`.
+  grep -qE -- "$top_level_pattern" "$COMPONENT_DIR/install.sh" || {
+    echo "FAIL: the definition is indented, so it sits inside a step:"
+    grep -nE -- "$def_pattern" "$COMPONENT_DIR/install.sh" || true
+    false; }
+
+  # POSITIVE CONTROL ON THE REAL FILE. Zero readers because the pattern is right
+  # and zero readers because the scan found nothing to look at print the same
+  # line, which is the #233 shape.
+  readers="$(grep -cE -- "$read_pattern" "$COMPONENT_DIR/install.sh" || true)"
+  [ "$readers" -ge 2 ] || {
+    echo "FAIL: expected at least 2 --argjson owned readers in install.sh, found $readers."
+    echo "Either a consumer was removed, or this guard is scanning the wrong file."
+    false; }
+
+  shared="$(grep -cE -- "$shared_read" "$COMPONENT_DIR/install.sh" || true)"
+  [ "$shared" -eq "$readers" ] || {
+    echo "FAIL: $shared of $readers --argjson owned readers use the shared list."
+    echo "Every reader must pass \${REKOL_OWNED_HOOKS_JSON} ON THE SAME LINE as"
+    echo "--argjson owned, not a list of its own and not across a continuation:"
+    grep -nE -- "$read_pattern" "$COMPONENT_DIR/install.sh" || true
+    false; }
+
+  # AND THE DETECTOR MUST BITE, on every shape the review named. A guard that
+  # only ever passes is one nobody can trust.
+  dup_probe="$TESTROOT/owned-dup-probe.sh"
+  {
+    printf '%s\n' 'REKOL_OWNED_HOOKS_JSON='"'"'[{"argtail":"_hook a"}]'"'"''
+    printf '%s\n' '  REKOL_OWNED_HOOKS_JSON='"'"'[{"argtail":"_hook a"}]'"'"''
+    printf '%s\n' 'export REKOL_OWNED_HOOKS_JSON='"'"'[]'"'"''
+    printf '%s\n' '  local REKOL_OWNED_HOOKS_JSON='"'"'[]'"'"''
+    printf '%s\n' 'REKOL_OWNED_HOOKS_JSON+='"'"'[]'"'"''
+  } > "$dup_probe"
+  dup_defs="$(grep -cE -- "$def_pattern" "$dup_probe" || true)"
+  [ "$dup_defs" -eq 5 ] || {
+    echo "FAIL: the duplicate detector saw $dup_defs of 5 definition spellings:"
+    grep -nE -- "$def_pattern" "$dup_probe" || true
+    cat "$dup_probe"
+    false; }
+
+  # An indented-only file must fail the top-level check.
+  indented_probe="$TESTROOT/owned-indented-probe.sh"
+  printf '%s\n' '  REKOL_OWNED_HOOKS_JSON='"'"'[]'"'"'' > "$indented_probe"
+  ! grep -qE -- "$top_level_pattern" "$indented_probe" || {
+    echo "FAIL: an indented definition passed the top-level check:"
+    cat "$indented_probe"
+    false; }
+
+  inline_probe="$TESTROOT/owned-inline-probe.sh"
+  {
+    printf '%s\n' '    jq --argjson owned '"'"'[{"argtail":"_hook a"}]'"'"' .foo'
+    printf '%s\n' '  # --argjson owned is mentioned in prose here'
+    printf '%s\n' '    jq --argjson owned "$REKOL_OWNED_HOOKS_JSON" .foo'
+    printf '%s\n' '    jq --argjson owned "${REKOL_OWNED_HOOKS_JSON}" .foo'
+  } > "$inline_probe"
+  inline_readers="$(grep -cE -- "$read_pattern" "$inline_probe" || true)"
+  inline_shared="$(grep -cE -- "$shared_read" "$inline_probe" || true)"
+  # 3 readers: the inline list and the two variable forms. The COMMENT is not a
+  # reader. 2 of them are shared: braced and unbraced both count.
+  [ "$inline_readers" -eq 3 ] || {
+    echo "FAIL: counted $inline_readers readers, expected 3 (the comment must not count):"
+    grep -nE -- "$read_pattern" "$inline_probe" || true
+    false; }
+  [ "$inline_shared" -eq 2 ] || {
+    echo "FAIL: counted $inline_shared shared readers, expected 2 (braced and unbraced):"
+    grep -nE -- "$shared_read" "$inline_probe" || true
     false; }
 }

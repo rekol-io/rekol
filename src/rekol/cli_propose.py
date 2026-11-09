@@ -29,7 +29,8 @@ from pathlib import Path
 
 import click
 
-from rekol.cli_common import guard_curated_schema
+from rekol.atomic_write import AtomicWriteError, write_text_atomically
+from rekol.cli_common import guard_curated_schema, guard_session_store_identity
 from rekol.config import load_config, load_rekolignore_patterns
 from rekol.corpus_propose import (
     dedupe_against_memory,
@@ -37,7 +38,7 @@ from rekol.corpus_propose import (
     render_corpus_proposal,
 )
 from rekol.embeddings import get_embedder
-from rekol.sessions.store import SessionStore, SessionStoreDimMismatchError
+from rekol.sessions.store import SessionStore
 from rekol.store import IndexStore
 
 # Common leading whitespace + optional bullet marker, applied uniformly.
@@ -134,7 +135,7 @@ def _propose_from_notes(cfg, input_file: str | None, quiet: bool) -> None:
     finally:
         store.close()
 
-    proposal.write_text("\n".join(lines))
+    _write_or_explain(proposal, "\n".join(lines))
 
     if not quiet:
         click.echo(f"wrote {proposal} ({new_count} new, {dup_count} already-captured)")
@@ -173,14 +174,10 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)
         session_store.init_schema()
 
-        # The vector tier can only be queried at the index's own width; fail with
-        # the same actionable message the ingest/search paths use rather than
-        # letting sqlite-vec raise a cryptic width error mid-query.
-        try:
-            session_store.reconcile_embedder(cfg.embedding_model, embedder.dim)
-        except SessionStoreDimMismatchError as exc:
-            click.echo(str(exc), err=True)
-            raise SystemExit(2) from exc
+        # Width AND identity, with the same message and exit code as the ingest
+        # and search paths — one helper rather than a per-site `except` that
+        # catches only one of the two sibling errors (#229).
+        guard_session_store_identity(session_store, cfg, embedder)
 
         candidates = recall_corpus_candidates(
             session_store, embedder, exclude_patterns=exclude_patterns
@@ -201,12 +198,26 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
             memory_store.close()
 
     proposal, ts = _pending_proposal_path(cfg)
-    proposal.write_text(render_corpus_proposal(new_candidates, already_captured, timestamp=ts))
+    _write_or_explain(
+        proposal, render_corpus_proposal(new_candidates, already_captured, timestamp=ts)
+    )
     if not quiet:
         click.echo(
             f"wrote {proposal} ({len(new_candidates)} new, "
             f"{len(already_captured)} already-captured)"
         )
+
+
+def _write_or_explain(path: Path, text: str) -> None:
+    """Write atomically, or fail with the same one sentence the other commands use.
+
+    A raw traceback tells the user nothing about whether their file survived,
+    which is the only thing they want to know.
+    """
+    try:
+        write_text_atomically(path, text)
+    except AtomicWriteError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @click.command()

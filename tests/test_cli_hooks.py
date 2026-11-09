@@ -132,11 +132,20 @@ def test_migration_list_covers_every_shipped_hook_invocation():
     either append a duplicate or skip forever, silently reproducing the original
     bug. So the omission has to fail CI, not a user.
 
-    One deliberate exception, asserted rather than assumed: an invocation that
-    appears ONLY inside the memory-loader command. That command is a paragraph
-    of shell which has gained content across releases, so no exact form could
-    match an older install; Step 7 replaces it whole, recognised by its stable
-    ``REKOL.md`` marker, and its trailing invocation goes with it.
+    One exception is TOLERATED and asserted rather than assumed: an invocation
+    that appears ONLY inside the memory-loader command. That command is a
+    paragraph of shell which has gained content across releases, so no exact
+    form could match an older install; Step 7 replaces it whole, recognised by
+    its stable ``REKOL.md`` marker, and its trailing invocation goes with it.
+
+    As of the #239 reconciliation **nothing uses that exception**: the shared
+    allowlist includes ``_hook session-confidence``, which used to be excused on
+    exactly those grounds. Measured before including it — the loader paragraph
+    is untouched either way, because every form must match the whole command or
+    its two ends and the loader starts with its own ``: rekol:backend=`` marker,
+    while a STANDALONE legacy session-confidence hook is upgraded only when the
+    handler is listed. The excusing branch stays because the reasoning still
+    holds for the next invocation that lives only in the loader.
     """
     import json as _json
     import re
@@ -147,9 +156,15 @@ def test_migration_list_covers_every_shipped_hook_invocation():
     # The allowlist, read out of install.sh. It holds no apostrophes by
     # construction (one would end the single-quoted jq program it feeds), so
     # stripping them leaves valid JSON.
+    # Keyed on the TOP-LEVEL definition. It used to look for the two-space
+    # indented one, which was the copy inside Step 6.95 — deleted in the #239
+    # reconciliation, since a second definition shadowed the shared list for
+    # every line below it. install.sh's own bats guard now refuses a second
+    # definition and refuses an indented one, so this locator cannot go stale
+    # without that failing too.
     lines = install_sh.splitlines()
     start = next(
-        (i for i, line in enumerate(lines) if line.startswith("  REKOL_OWNED_HOOKS_JSON=")),
+        (i for i, line in enumerate(lines) if line.startswith("REKOL_OWNED_HOOKS_JSON=")),
         None,
     )
     assert start is not None, "could not locate REKOL_OWNED_HOOKS_JSON in install.sh"
