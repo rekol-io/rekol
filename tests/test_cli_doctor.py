@@ -1464,6 +1464,148 @@ def test_an_import_line_beside_a_missing_path_in_one_file_is_cant_tell(
 
 
 # ---------------------------------------------------------------------------
+# #221: a hook the upgrade cannot reach must not also be silent
+# ---------------------------------------------------------------------------
+
+_RECORDED_FIRST = (
+    "\"$(if [ -x '/opt/generic/bin/rekol' ]; then printf %s '/opt/generic/bin/rekol'; "
+    "else command -v rekol || printf %s '/opt/generic/bin/rekol'; fi)\" "
+    "_hook session-tasks 2>/dev/null || true"
+)
+_PATH_FIRST_QUOTED = (
+    "\"$(command -v rekol || echo '/opt/generic/bin/rekol')\" "
+    "_hook update-check 2>/dev/null || true"
+)
+_PATH_FIRST_UNQUOTED = (
+    '"$(command -v rekol || echo /opt/generic/bin/rekol)" _hook capture-nudge 2>/dev/null || true'
+)
+_BARE = "rekol _hook time-context 2>/dev/null || true"
+_NOT_OURS = "my-own-gate --strict _hook session-tasks"
+
+
+def _settings_with(*commands: str) -> dict:
+    return {
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": c} for c in commands]}]
+        }
+    }
+
+
+def test_path_first_hooks_names_every_form_the_upgrade_may_miss() -> None:
+    """QA found the unquoted form left behind; a form left behind cannot be silent.
+
+    Keyed on the ABSENCE of the current recorded-path-first rendering rather
+    than on a list of legacy ones — the one direction that stays correct when a
+    form nobody anticipated turns up, which is exactly what happened in #221.
+    """
+    from rekol.update import path_first_hooks
+
+    stale = path_first_hooks(
+        _settings_with(_RECORDED_FIRST, _PATH_FIRST_QUOTED, _PATH_FIRST_UNQUOTED, _BARE, _NOT_OURS)
+    )
+    names = {name for name, _ in stale}
+    # The three PATH-first shapes are reported.
+    assert names == {"update-check", "capture-nudge", "time-context"}, names
+    # The current rendering is not.
+    assert "session-tasks" not in names, "the current form was reported as stale"
+    # A command that is not ours is never reported, whatever it mentions —
+    # `_NOT_OURS` contains `_hook session-tasks` precisely to catch that.
+    forms = dict(stale)
+    assert "no fallback at all" in forms["time-context"], forms
+    assert "with an absolute fallback" in forms["update-check"], forms
+
+
+_PATH_FIRST_REVIEW_NUDGE = "\"$(command -v rekol || echo '/opt/generic/bin/rekol')\" review --nudge"
+_PATH_FIRST_SESSION_INDEX = (
+    "nohup \"$(command -v rekol || echo '/opt/generic/bin/rekol')\" "
+    "session-index --incremental >/dev/null 2>&1 &"
+)
+
+
+def test_the_two_non_hook_handlers_are_reported_too() -> None:
+    """A review found both of these reported OK, which was a wrong green.
+
+    `review --nudge` is the SessionEnd handler and `session-index --incremental`
+    is the detached indexer. Both are rekol's own hooks, and both were invisible
+    here because the handler was matched with `_hook <name>` — so a PATH-first
+    version of either got a clean tick from the very check that exists to report
+    it. The tail is matched now instead of the report being reworded.
+    """
+    from rekol.update import path_first_hooks
+
+    for command in (_PATH_FIRST_REVIEW_NUDGE, _PATH_FIRST_SESSION_INDEX):
+        stale = path_first_hooks(_settings_with(command))
+        assert stale, f"reported OK for a PATH-first rekol hook:\n  {command}"
+
+    # And the CURRENT rendering of the same handler is still not reported, so
+    # this did not become a check that fires on everything.
+    current = (
+        "\"$(if [ -x '/o/rekol' ]; then printf %s '/o/rekol'; "
+        "else command -v rekol || printf %s '/o/rekol'; fi)\" review --nudge"
+    )
+    assert path_first_hooks(_settings_with(current)) == []
+
+
+def test_a_users_command_mentioning_a_handler_is_not_reported_as_ours() -> None:
+    """The negative control, and it caught a real defect in my first attempt.
+
+    `my-own-gate --strict _hook session-tasks` contains `_hook session-tasks`, so
+    keying the check on the handler name alone reported a user's own command as a
+    broken rekol hook. That is #235's mistake in a new place and the shape of
+    #241. A command is ours only when a rekol INVOCATION is recognisable in it —
+    the `command -v` substitution, or a bare `rekol` in command position.
+    """
+    from rekol.update import path_first_hooks
+
+    not_ours = [
+        "my-own-gate --strict _hook session-tasks",
+        "printf '%s' 'rekol _hook update-check' >> /tmp/log",
+        "my-gate --config rekol.yaml _hook capture-nudge",
+        "false && rekol _hook time-context",
+        # CODEX'S FALSE POSITIVE (batch 7): the rekol text here is an ARGUMENT
+        # being printed, not an invocation. The first version of this check
+        # searched for the `command -v` substitution anywhere in the string and
+        # reported it. Doctor now matches only what the UPGRADE would own, as
+        # the command itself, anchored at the start.
+        "printf '%s\\n' '\"$(command -v rekol || echo /opt/generic/bin/rekol)\" _hook session-tasks'",
+        # A gate in front of our invocation is not our command either.
+        'false && "$(command -v rekol || echo /opt/generic/bin/rekol)" _hook update-check',
+    ]
+    assert path_first_hooks(_settings_with(*not_ours)) == []
+
+    # NOT VACUOUS: the same function reports the real forms in the same shape.
+    assert path_first_hooks(_settings_with(_PATH_FIRST_UNQUOTED)) != []
+
+
+def test_doctor_flags_a_path_first_hook_and_is_quiet_when_there_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finding exists, says which handler, and does not cry wolf.
+
+    Both directions in one test on purpose: a check that only ever fires, or
+    only ever passes, reads identically to a working one (the #157/#158 shape).
+    """
+    import rekol.update as update_mod
+    from rekol.cli_doctor import _check_hook_resolution_order
+
+    # Status is imported at module scope from rekol.cli_doctor.
+
+    monkeypatch.setattr(update_mod, "load_settings", lambda: _settings_with(_PATH_FIRST_UNQUOTED))
+    finding = _check_hook_resolution_order()[0]
+    assert finding.status is Status.PROBLEM, finding.detail
+    assert "capture-nudge" in finding.detail, finding.detail
+    assert "PATH FIRST" in finding.detail, finding.detail
+    assert finding.remedy and "install.sh" in finding.remedy
+
+    monkeypatch.setattr(update_mod, "load_settings", lambda: _settings_with(_RECORDED_FIRST))
+    ok = _check_hook_resolution_order()[0]
+    assert ok.status is Status.OK, ok.detail
+
+    monkeypatch.setattr(update_mod, "load_settings", lambda: {})
+    none = _check_hook_resolution_order()[0]
+    assert none.status is Status.INFO, none.detail
+
+
 # "curated index: not built yet" has three meanings (#232)
 # ---------------------------------------------------------------------------
 # Reporting all of them as a PROBLEM made `doctor` red out of the box on a

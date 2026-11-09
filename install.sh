@@ -23,6 +23,20 @@
 # Note: set -euo pipefail used here per explicit installer design requirement.
 set -euo pipefail
 
+# bash 5.2 added `patsub_replacement`, ON by default, which expands `&` in the
+# replacement string of ${var//pattern/replacement} to the text the pattern
+# matched. Every snippet placeholder here is filled that way with a PATH, so a
+# tools dir or bin dir containing `&` silently produced `@REKOL@@REKOL@` instead
+# of the path — the placeholder survived and the guard below refused the install.
+# That is how an `&&` in the rendered invocation broke every hook-wiring test on
+# ubuntu (bash 5.2) while passing on macOS (bash 3.2, no such option).
+#
+# Turning it off restores the literal behaviour this script was written against.
+# Verified on both: bash 5.2.21 goes from "placeholder remains" to intact for `&`
+# and `&&` paths, and on bash 3.2.57 the option does not exist, so this is a
+# clean no-op (rc=0 via the guard). Backslash in a path is unaffected either way.
+shopt -u patsub_replacement 2>/dev/null || true
+
 # Resolve installer's own directory so it works from any working directory
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 readonly COMPONENT_DIR
@@ -855,12 +869,29 @@ fi
 # rest were failing silently behind `|| true` and output redirection, which is
 # worse, not better.
 #
-# The fallback is BIN_DIR (not a hardcoded ~/bin) so `--bin-dir` installs stay
-# correct. `command -v` is still tried first, so the hooks keep working if the
-# install is later moved and PATH is what's accurate.
+# The recorded path is BIN_DIR (not a hardcoded ~/bin) so `--bin-dir` installs
+# stay correct.
+#
+# RESOLUTION ORDER, INVERTED (#203). `command -v rekol` used to be tried FIRST,
+# on the reasoning that PATH is what stays accurate if the install is later
+# moved. That reasoning had the risk backwards: PATH is the *unreliable* half in
+# a hook environment, and whatever it finds first wins. A stale `rekol` console
+# script left by another interpreter — the #203 orphan — therefore beat a
+# perfectly good recorded path, and the session started with no memory.
+#
+# Now: use the recorded path when it is executable, and fall through to
+# `command -v` only when it is not. A moved or reinstalled tree still adapts,
+# because the recorded path stops being executable and the PATH lookup takes
+# over exactly as before. What is no longer possible is an orphan earlier on a
+# hook's PATH hijacking a working install.
+#
+# The remaining failure is a recorded path that EXISTS but is broken, which is a
+# genuinely broken install rather than a resolution accident — and `doctor`'s
+# hook-executability check reports it by name.
 #
 # This is the pattern hooks/auto-reindex.sh already used to be the only hook
-# immune to the bug; Step 6.9 just applies it everywhere.
+# immune to the #159 bug; Step 6.9 applies it everywhere, now with the order
+# that also survives a hostile PATH.
 
 RENDERED_HOOK_DIR=""
 if [[ "$DO_HOOK" == "1" ]]; then
@@ -868,7 +899,29 @@ if [[ "$DO_HOOK" == "1" ]]; then
   # shellcheck disable=SC2064  # expand RENDERED_HOOK_DIR now, not at trap time
   trap "rm -rf '${RENDERED_HOOK_DIR}'" EXIT
 
-  REKOL_INVOCATION="\$(command -v rekol || echo '${BIN_DIR}/rekol')"
+  # Single-quote-escape the recorded path before embedding it in a shell command.
+  # The rendered invocation quotes the path, so a path containing an apostrophe
+  # (`/Users/o'brien/bin`) would otherwise close the quote early and leave the
+  # hook command unparseable — `sh: unexpected EOF while looking for matching '`.
+  # POSIX has no escape inside single quotes, so the idiom is to close, emit an
+  # escaped quote, and reopen: ' -> '\''. Spaces need no special handling once the
+  # path is quoted; the apostrophe is the case that actually breaks.
+  # POSIX has no escape inside single quotes, so the idiom is close-escape-reopen:
+  # ' becomes '\''. Built from two variables because writing that replacement
+  # inline is easy to get wrong — the first attempt here produced
+  # `Dir\'\\'\'s` and was caught only by executing the rendered command.
+  BIN_DIR_SQ="'"
+  BIN_DIR_SQ_ESCAPED="'\''"
+  BIN_DIR_SHELL_SAFE="${BIN_DIR//$BIN_DIR_SQ/$BIN_DIR_SQ_ESCAPED}"
+  # NO `&&` ANYWHERE IN THIS STRING, deliberately. It is substituted in via
+  # `${body//@REKOL@/${REKOL_INVOCATION}}`, and **bash 5.2 expands `&` in the
+  # replacement to the text the pattern matched**. An `&&` therefore became
+  # `@REKOL@@REKOL@`, the placeholder survived, and install.sh's own guard
+  # correctly refused with "a placeholder is still present" — on bash 5 only,
+  # which is why this passed on macOS (bash 3.2) and failed every hook-wiring
+  # test on ubuntu. Escaping the `&` is not the fix: the escape itself differs
+  # between bash 3.2 and 5.2, so the `if` form avoids the character entirely.
+  REKOL_INVOCATION="\$(if [ -x '${BIN_DIR_SHELL_SAFE}/rekol' ]; then printf %s '${BIN_DIR_SHELL_SAFE}/rekol'; else command -v rekol || printf %s '${BIN_DIR_SHELL_SAFE}/rekol'; fi)"
   # Same value, pre-quoted, for the steps that build a command string directly
   # rather than rendering a snippet.
   REKOL_INVOCATION_QUOTED="\"${REKOL_INVOCATION}\""
@@ -907,7 +960,10 @@ fi
 # its de-duplication. Two copies of this predicate is how #235 shipped: the
 # softener matched any command MENTIONING rekol, and the message that claimed we
 # had left the user's alone used a different test again. That message is gone
-# (see Step 7Z), so there is now exactly one consumer pair, both here.
+# (see Step 7Z), so the softener and the count are the only two things that ask
+# "is this command ours", and both ask it here. Step 6.95 also reads this list,
+# for a different question — which legacy renderings to upgrade — and reads THIS
+# one rather than a copy of its own, which it carried until the #239 merge.
 #
 # Defined at the top level rather than inside a step so a later step cannot find
 # it unset -- an unset jq program reads as a result of zero, which is the silent
@@ -1046,7 +1102,7 @@ REKOL_OWNERSHIP_JQ='
 '
 
 # =============================================================================
-# Step 6.95 — MIGRATE existing bare `rekol` hook commands in settings.json (#159)
+# Step 6.95 — UPGRADE hook commands this installer wrote earlier (#159, #203)
 # =============================================================================
 # This step is what makes #159 safe to ship. Without it, changing the command
 # text actively breaks existing installs, because the five merge steps disagree
@@ -1065,23 +1121,217 @@ REKOL_OWNERSHIP_JQ='
 # Rewriting in place (rather than uninstall + reinstall) preserves any hooks the
 # user added or customised themselves — a blind uninstall would drop those.
 #
-# Only these exact invocations are rewritten. Prose mentions inside echo strings
-# (e.g. run `rekol capture`) are deliberately left alone, and the replacement is
-# literal, so it is naturally idempotent: once rewritten, `rekol <subcmd>` no
-# longer appears as a contiguous substring.
+# EXACT FORMS, NOT A PATTERN (product's redirect, 2026-11-06). This matcher went
+# through three rounds of near-misses: a `gsub` of the old substitution anywhere
+# in a command, then a shell-context guess, then an ownership regex. Each round
+# shipped, and each time a reviewer found another command it should not have
+# touched — a `printf` that merely prints the text, a user's own command built on
+# the same substitution. The lesson is not that the regex needed one more
+# refinement. A pattern cannot express "we wrote this"; an equality can.
+#
+# So: a command is rewritten only when the WHOLE string equals a rendering this
+# installer produces for a handler on the allowlist below, with the only freedom
+# being the recorded path inside the old invocation (an existing install
+# recorded whatever BIN_DIR was then, which is not necessarily this one).
+# Anything else is left byte-for-byte alone and counted, so the skip is visible.
 
 if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS_JSON}" ]]; then
+  # THE ALLOWLIST IS STEP 6.94's `REKOL_OWNED_HOOKS_JSON`, and there is exactly
+  # one of it. This step had its own copy until the #239 merge (2026-11-08):
+  # same shape, one entry short, and shadowing the shared one for every line
+  # below it. Two copies of this list is the #235 shape — the softener and the
+  # message that described it used different tests — so `tests/test_install.bats`
+  # now fails if the list is defined more than once, or if this step's
+  # `--argjson owned` reads anything else.
+  #
+  # The copy omitted `_hook session-confidence`, on the grounds that the memory
+  # loader carries it and Step 7 replaces that whole command. The first half is
+  # right and the conclusion was wrong. MEASURED with both lists against the
+  # loader paragraph and a standalone hook (probe, 2026-11-08):
+  #
+  #   * the loader paragraph is UNTOUCHED either way — every form here must
+  #     match the whole string or its two ends, and the loader starts with its
+  #     own `: rekol:backend=` marker, so no form can match it. It is still
+  #     Step 7's to upgrade, by the `REKOL.md` + `REKOL_HOME:-` markers;
+  #   * a STANDALONE legacy `_hook session-confidence` hook is upgraded under
+  #     the shared list and was left PATH-first under the copy — so the omission
+  #     was not neutral, it left one shape of the #203 bug in place.
+  #
+  # `_hook context-watch` is in neither list: it is a statusline recorder, not a
+  # hook. `_hook stop-failure-record` is in the shared list even though
+  # install.sh never writes it, because `rekol resume enable` does, in exactly
+  # the old PATH-first shape; a pytest pins that renderer to this form so the
+  # two cannot drift apart silently.
+
+  # NO APOSTROPHE MAY APPEAR INSIDE THE jq PROGRAM BELOW. The program is a
+  # single-quoted bash string, so one apostrophe ends it and the rest of the
+  # script becomes an unterminated quote — `bash -n` reported the failure 1100
+  # lines later, at EOF. The old invocation that has to be matched is full of
+  # them, so the three apostrophe-bearing literals are built here and passed in
+  # with --arg, which also keeps them out of any expansion.
+  REKOL_SQ="'"
+  REKOL_OLD_HEAD="\"\$(command -v rekol || echo ${REKOL_SQ}"
+  REKOL_OLD_FOOT="${REKOL_SQ})\" "
+  # THE UNQUOTED FALLBACK, which this step used to leave behind (QA, 2026-11-07).
+  # Same rendering with no quotes around the path:
+  #   "$(command -v rekol || echo /abs/path/rekol)" _hook session-tasks …
+  # The quotes were the only difference, and the quoted one was upgraded while
+  # this one kept resolving PATH first — the bug #203 exists to fix — on three
+  # handlers in a real file.
+  #
+  # MEASURED PROVENANCE, and my first answer here was wrong (Codex + QA
+  # confirmed it, 2026-11-07). I had written "no release tag ever wrote this
+  # form", from reading install.sh's SOURCE at each tag — where the invocation
+  # is quoted. That answered the wrong question: what matters is what the
+  # installer WRITES.
+  #
+  # `run()` is `eval "$@"` (line ~165, SC2294). Releases insert a missing
+  # handler as
+  #     run "jq --arg cmd '${UPDATE_CMD}' …"
+  # and `${UPDATE_CMD}` itself contains `echo '<path>'`. Interpolated between
+  # apostrophes, its own apostrophes close and reopen the quoting, and eval's
+  # quote removal then drops them. Reproduced standalone:
+  #     variable: "$(command -v rekol || echo '/p/rekol')" _hook update-check …
+  #     on disk:  "$(command -v rekol || echo /p/rekol)"  _hook update-check …
+  #
+  # So v0.5.2 — the first tag with both an add-handler step and the quoted
+  # invocation — through v0.5.13 all WRITE this form whenever they add a
+  # missing handler. The snippet-merge sites pass a file (`--slurpfile`), so
+  # their text never meets the eval, which is why only the `--arg cmd` handlers
+  # are affected, and why they are the later-added ones.
+  #
+  # This head does not write it: see the note at the five `REKOL_JQ_CMD` sites.
+  REKOL_UQ_HEAD="\"\$(command -v rekol || echo "
+  REKOL_UQ_FOOT=")\" "
+
   # `|| true` matters: under `set -e` a failing command substitution ABORTS the
   # install. A migration that cannot run must be skipped, never fatal — repairing
   # old hooks is a best-effort courtesy, not a precondition for installing.
   # (Caught by the uninstall suite: install died right here after an uninstall.)
+  #
+  # The invocation is passed with --arg, never interpolated into the program: it
+  # contains `$(`, `'` and `|`, and every attempt to splice it in has produced a
+  # different quoting bug.
   MIGRATED="$(
-    jq --arg rekol "${REKOL_INVOCATION}" '
-      ["_hook time-context","_hook record-stop","_hook session-confidence",
-       "_hook session-coverage","_hook session-tasks","_hook capture-nudge",
-       "_hook stop-failure-record","_hook update-check",
-       "review --nudge","session-index --incremental"]
-      as $subs
+    jq --arg rekol "${REKOL_INVOCATION}" \
+       --arg sq "${REKOL_SQ}" \
+       --arg oldhead "${REKOL_OLD_HEAD}" \
+       --arg oldfoot "${REKOL_OLD_FOOT}" \
+       --arg uqhead "${REKOL_UQ_HEAD}" \
+       --arg uqfoot "${REKOL_UQ_FOOT}" \
+       --argjson owned "${REKOL_OWNED_HOOKS_JSON}" '
+      # Every WHOLE-STRING rendering rekol has ever written for each handler.
+      #
+      # Two legacy invocations, both of which this installer produced:
+      #   pre-#159      rekol <argtail>                        (unquoted, bare)
+      #   #159 … #203   the quoted command -v form, with a recorded path
+      #
+      # and two tails, because Step 6.96 only began appending ` 2>/dev/null ||
+      # true` in #183 — an install older than that stored the command without it,
+      # and that form must still be recognised or the handler-presence checks see
+      # a correctly-named hook and no-op on it forever.
+      def forms:
+        . as $e
+        | ($e.pre // "") as $pre
+        | ($e.suffix // " 2>/dev/null || true") as $suf
+        | ($pre + "\"" + $rekol + "\" " + $e.argtail + $suf) as $new
+        | [$suf, ""][]
+        | . as $tail
+        | {
+            new: $new,
+            # pre-#159: an exact string, no freedom at all.
+            bare: ($pre + "rekol " + $e.argtail + $tail),
+            # #159…#203: exact either side of the recorded path.
+            head: ($pre + $oldhead),
+            foot: ($oldfoot + $e.argtail + $tail),
+            # The same, UNQUOTED (QA, 2026-11-07). Note the quoted head is this
+            # head plus an apostrophe, so a quoted command also startswith this
+            # one -- what keeps them apart is that the path extracted under this
+            # form would then still carry its apostrophes, and the literal-path
+            # allowlist below refuses those. The guard is what disambiguates,
+            # not the order of the alternatives.
+            uqhead: ($pre + $uqhead),
+            uqfoot: ($uqfoot + $e.argtail + $tail)
+          };
+
+      # IS THIS A PATH WE WROTE, UNQUOTED? A positive allowlist of the one form
+      # the renderer produces, by the same rule as Step 6.94 (product, #239):
+      # an absolute path of LITERAL components. The renderer expands ${BIN_DIR}
+      # in bash before writing, so the text on disk is always absolute and plain.
+      #
+      # Unquoted means the shell will expand it, so anything but literal
+      # characters changes what runs: `echo $(curl x)/rekol` is not ours and must
+      # be left exactly alone. The quoted form can afford to be permissive -- the
+      # quotes protect it -- and that is why these two forms get different guards
+      # rather than one shared one.
+      #
+      # THE FIRST CLASS WAS TOO NARROW, and the fix is measured rather than
+      # reasoned (review + product, 2026-11-08). It allowed only
+      # `[A-Za-z0-9._-]`, so a command recording `/opt/rekol@2/bin/rekol` or
+      # `/Users/John Smith/bin/rekol` was refused and LEFT PATH-FIRST -- the bug
+      # this step exists to fix, on a bin dir the installer will happily write,
+      # since `--bin-dir` takes any path and a spaced home is ordinary on macOS.
+      #
+      # Each character was EXECUTED inside this very substitution,
+      # `out="$(command -v <missing> || echo <path>)"`, in bash, zsh, and zsh
+      # with EXTENDED_GLOB:
+      #   @ + , = % :        unchanged in all three -> accepted
+      #   ONE space          unchanged in all three -> accepted (the capture is
+      #                      double-quoted, so the hook as written really works;
+      #                      it is merely PATH-first, and ours to repair)
+      #   TWO spaces, a tab  collapse to one space in all three -> REFUSED: the
+      #                      text we matched is not the text that ran
+      #   ^ and #            fail under zsh EXTENDED_GLOB (`no matches found`),
+      #                      and nothing here establishes which shell runs a hook
+      #                      command, so they stay refused (product)
+      #   *                  fails under zsh
+      #   )                  mangles the substitution everywhere
+      #   ~                  measured inert mid-path, left out anyway (product)
+      # The path must also END in the binary this installer records, so a
+      # substitution naming something else is not claimed.
+      #
+      # The whole table lives in `test_install.bats::"the unquoted literal-path
+      # allowlist ..."`, which runs THIS def through jq rather than restating the
+      # pattern, and is revert-proved against both the old class and a version
+      # with the consecutive-space clause removed.
+      def is_our_literal_path($p):
+        ($p | test("^(/[A-Za-z0-9._@+,=%: -]+)+/rekol$"))
+        and (($p | test("  ")) | not);
+
+      # Does this command equal one of those renderings? The recorded path is the
+      # only part allowed to vary, and it is read by SPLITTING on the literal text
+      # either side of it rather than by a pattern — so a path containing `)` or a
+      # shell metacharacter is handled, and a path containing an apostrophe is
+      # refused
+      # because the renderer that wrote these did not escape it, so such a command
+      # was never one of ours -- that breakage is #222, and an unparseable hook
+      # is not something this step can repair by guessing.
+      def upgraded($forms):
+        . as $c
+        | (first(
+            $forms[]
+            # Bound to variables, not read as `.head`: inside the slice below the
+            # input is the COMMAND, so `.head` there indexes a string and jq dies
+            # with "Cannot index string with string".
+            | .head as $h | .foot as $f | .bare as $bare | .new as $new
+            | .uqhead as $uh | .uqfoot as $uf
+            | select(
+                ($c == $bare)
+                or (($c | startswith($h))
+                    and ($c | endswith($f))
+                    and (($c | length) > (($h | length) + ($f | length)))
+                    and (($c[($h | length):(($c | length) - ($f | length))]) as $path
+                         | ($path | length) > 0 and ($path | contains($sq) | not)))
+                or (($c | startswith($uh))
+                    and ($c | endswith($uf))
+                    and (($c | length) > (($uh | length) + ($uf | length)))
+                    and (($c[($uh | length):(($c | length) - ($uf | length))]) as $path
+                         | is_our_literal_path($path)))
+              )
+            | $new
+          ) // $c);
+
+      [$owned[] | forms] as $forms
       # Type-guard every level. `(.hooks // {}) |= ...` LOOKS safe but throws
       # "Invalid path expression" when .hooks is absent entirely — which is
       # exactly the post-uninstall shape ({} or {"env":...}), and combined with
@@ -1093,8 +1343,7 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
               if (.hooks? | type) == "array" then
                 .hooks |= map(
                   if (.command? // "") != "" then
-                    .command |= ( . as $c | reduce $subs[] as $s
-                        ($c; gsub("(?<p>^|[;&|( ])rekol " + $s; "\(.p)\"" + $rekol + "\" " + $s)) )
+                    .command |= upgraded($forms)
                   else . end)
               else . end) else . end)
           )
@@ -1112,12 +1361,48 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1 && [[ -f "${SETTINGS
     printf '%s\n' "$MIGRATED" > "${local_tmp}"
     if jq -e . "${local_tmp}" >/dev/null 2>&1; then
       run "mv '${local_tmp}' '${SETTINGS_JSON}'"
-      log_journal "MIGRATED bare rekol hook commands in ${SETTINGS_JSON} (#159)"
-      say "repaired existing hooks that invoked a bare 'rekol' (PATH-independent now)"
+      log_journal "MIGRATED rekol hook commands in ${SETTINGS_JSON} (#159, #203)"
+      say "repaired existing hooks that could resolve the wrong rekol"
     else
       rm -f "${local_tmp}"
       say "hook migration produced invalid JSON — left settings.json untouched" >&2
     fi
+  fi
+
+  # OUTSIDE the "we changed something" branch. Inside it, this reported nothing
+  # on the case that matters most — a settings.json holding ONLY commands we do
+  # not own, where the migration correctly changes nothing and the user most
+  # needs to be told what was skipped. A message whose absence is
+  # indistinguishable from success is the defect this project keeps shipping.
+  #
+  # OCCURRENCES, not lines. `grep -c` counts matching LINES, and a settings.json
+  # that jq has formatted puts every command on its own line only by accident —
+  # two old-form invocations inside one command counted as one.
+  local_skipped="$(
+    jq '[ .. | objects | .command? // empty
+          | ((. / "command -v rekol || echo") | length - 1) ] | add // 0' \
+       "${SETTINGS_JSON}" 2>/dev/null || printf 0
+  )"
+  local_skipped="${local_skipped:-0}"
+  if [[ "${local_skipped}" -gt 0 ]]; then
+    # The claim here is deliberately narrow: THIS STEP left them alone. An
+    # earlier version of this message said "rekol does not rewrite what it
+    # does not own", which the same install then falsified — Step 6.96's
+    # soft-fail pass appends ` 2>/dev/null || true` to any command whose text
+    # merely mentions rekol, so a preserved command does NOT come back
+    # byte-identical (QA's F9, #235). Printing a guarantee the next step
+    # breaks is worse than printing nothing, so this says only what is true
+    # and names the gap.
+    say "left ${local_skipped} occurrence(s) of the old 'command -v rekol' text alone:"
+    say "  they do not match any hook command rekol writes (a literal string, an"
+    say "  option rekol does not pass, a handler rekol does not own, or your own"
+    say "  command), so this migration step did not rewrite them."
+    say "  KNOWN GAP (#235): a later step still appends ' 2>/dev/null || true'"
+    say "  to any command whose text mentions rekol, so such a command is not"
+    say "  left byte-identical, and a BLOCKING hook of yours would stop"
+    say "  blocking. Check ${SETTINGS_JSON} if you have one."
+    say "  If one of them IS meant to be a rekol hook, update it by hand."
+    log_journal "PRESERVED ${local_skipped} non-owned old-form occurrence(s) in ${SETTINGS_JSON} (see #235)"
   fi
 fi
 
@@ -1171,10 +1456,13 @@ if [[ "$DO_HOOK" == "1" ]] && [[ -f "${SETTINGS_JSON}" ]] && command -v jq >/dev
   # themselves plus the handler allowlist — one definition, derived from the
   # renderer, driving both the softener and the de-duplication below.
   #
-  # WITH AND WITHOUT the soft-fail tail, because that is the point of the step:
-  # Step 6.95 rewrites a pre-#159 bare invocation to the current rendering
-  # WITHOUT adding the tail, and this step is what adds it. Matching only the
-  # tailed form would leave such a hook unsoftened forever.
+  # WITH AND WITHOUT the soft-fail tail. The reason used to be that Step 6.95
+  # rewrote a bare invocation without adding the tail; since #221 its `forms.new`
+  # carries the suffix, so an upgraded hook arrives here already tailed. The
+  # matching stays because 6.95 is not the only way a hook gets here: one it does
+  # not recognise — any form outside the allowlist — is left exactly as the user
+  # has it, which for an install older than #183 means no tail at all. Matching
+  # only the tailed form would leave such a hook unsoftened forever.
   #
   SOFTEN_PROG="${REKOL_OWNERSHIP_JQ}"'
     def is_ours: (.command? // "") as $c | command_is_ours($c);
@@ -1338,7 +1626,37 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart coverage banner already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${COV_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
+    REKOL_JQ_CMD="${COV_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart coverage banner to ${SETTINGS_JSON}"
@@ -1370,7 +1688,37 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart task injection already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${TASKS_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
+    REKOL_JQ_CMD="${TASKS_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart task injection to ${SETTINGS_JSON}"
@@ -1405,7 +1753,37 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "SessionStart update check already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${UPDATE_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
+    REKOL_JQ_CMD="${UPDATE_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED SessionStart update check to ${SETTINGS_JSON}"
@@ -1768,7 +2146,37 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     say "UserPromptSubmit capture-nudge already present — no-op"
   else
     local_tmp="${SETTINGS_JSON}.tmp.$$"
-    run "jq --arg cmd '${NUDGE_CMD}' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
+    REKOL_JQ_CMD="${NUDGE_CMD}"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:\"\",hooks:[{type:\"command\",command:\$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "ADDED UserPromptSubmit capture-nudge to ${SETTINGS_JSON}"
@@ -1835,7 +2243,37 @@ if [[ "$DO_HOOK" == "1" ]] && command -v jq >/dev/null 2>&1; then
     # Use the PATH-independent invocation (#159). This step used to write a
     # hardcoded bare `rekol review --nudge`, i.e. the installer itself
     # reintroduced the exit-127 bug on any machine where Step 7D no-ops.
-    run "jq --arg cmd '${REKOL_INVOCATION_QUOTED} review --nudge' \
+    # The command is handed to `jq` through a VARIABLE, not interpolated into the
+    # eval'd string. `run` is `eval "$@"`, and the invocation itself contains
+    # single quotes, so embedding it inside '...' splits it apart and whatever
+    # shell operators land outside the quoted pieces become live. Passing by
+    # variable removes that class of problem and is worth keeping on its own.
+    #
+    # It was NOT, however, the cause of the 18 hook-test failures, which an
+    # earlier version of this comment claimed. A container run disproved that:
+    # `eval` of this exact invocation returned 0 on bash 3.2 AND 5.2. The real
+    # cause was bash 5.2's `patsub_replacement`, which expands an unescaped `&`
+    # in `${var//pat/rep}` to the matched text — which is why
+    # `shopt -u patsub_replacement` now sits next to `set -euo pipefail`.
+    # PASSED BY VARIABLE NAME, AND IT MUST STAY THAT WAY (#221, 2026-11-07).
+    # `run()` evals its argument, so interpolating the command as
+    # `--arg cmd '${CMD}'` lets eval's quote removal strip the apostrophes
+    # inside `echo '<path>'` — which is how every release from v0.5.2 to
+    # v0.5.13 writes the PATH-first unquoted form when it adds a handler.
+    # `"$REKOL_JQ_CMD"` expands inside double quotes at eval time and the
+    # value is used verbatim, so the quotes survive. bfcd3a9 introduced this
+    # shape for the unrelated bash-5.2 patsub_replacement fix, so the fix was
+    # incidental, so what pins it is the source guard in test_install.bats
+    # ("no hook command is interpolated into a run() string") plus QA's real
+    # tag-to-tag upgrade run. There is NO v0.5.5 -> HEAD upgrade test in this
+    # repo: I wrote one, it could not reproduce the bug (on a fresh
+    # settings.json the snippet merge adds these handlers before the
+    # add-handler step, so that step no-ops), and I removed it rather than ship
+    # a fixture that proves nothing. Five earlier copies of this comment
+    # claimed that test existed (Codex, 2026-11-07).
+    # Do not inline this variable back into the jq string.
+    REKOL_JQ_CMD="${REKOL_INVOCATION_QUOTED} review --nudge"
+    run "jq --arg cmd \"\$REKOL_JQ_CMD\" \
       '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher: \"\", hooks: [{type: \"command\", command: \$cmd}]}])' \
       '${SETTINGS_JSON}' > '${local_tmp}' && mv '${local_tmp}' '${SETTINGS_JSON}'"
     log_journal "MERGED SessionEnd review-nudge handler into ${SETTINGS_JSON}"
@@ -1851,20 +2289,24 @@ fi
 #
 # The claim it makes is "of the commands mentioning rekol, these are yours and
 # we left them as they were". Answering it needs the ability to tell a LEGACY
-# rekol rendering apart from a user's command — and on this branch that does not
-# exist yet. Measured on a v0.5.13 upgrade fixture with no user hooks planted:
+# rekol rendering apart from a user's command. When this was written that did
+# not exist: measured on a v0.5.13 upgrade fixture with no user hooks planted,
 # the report said `left 4`, and all four were rekol's own hooks still in the
-# `$(command -v rekol || echo …)` form, because Step 6.95 here only rewrites the
+# `$(command -v rekol || echo …)` form, because Step 6.95 then rewrote only the
 # pre-#159 bare invocation. QA measured the same thing as `left 3` before this.
 #
-# So the report would be wrong in exactly the direction that matters: it tells a
-# user with no hooks of their own that we touched, or spared, something.
+# So the report was wrong in exactly the direction that matters: it told a user
+# with no hooks of their own that we touched, or spared, something.
 #
-# Where it belongs is #203, whose Step 6.95 carries the allowlist that defines
-# every rendering this installer has produced — the only thing that can answer
-# the question. It lands there, with the v0.5.13 upgrade fixture below as its
-# test. What #235 owns is narrower and complete without it: the softener no
-# longer touches a command that is not ours.
+# THAT CAPABILITY NOW EXISTS HERE (#203/#221 merged with #235, 2026-11-08).
+# Step 6.95 matches every rendering this installer has produced — the pre-#159
+# bare form, the quoted `command -v` form, and the unquoted one — each with and
+# without the soft-fail tail, against the shared allowlist in Step 6.94. So the
+# blocker this paragraph described is gone, and re-adding the report is now a
+# question of whether it is worth printing rather than whether it can be
+# computed. It stays out until someone decides that, with the v0.5.13 upgrade
+# fixture below as its test. What #235 owns is narrower and complete without it:
+# the softener no longer touches a command that is not ours.
 
 # =============================================================================
 # Step 8 — (removed) sync-ignore file for the local vector index
