@@ -269,6 +269,22 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
         # holds — an empty real index is still not ours to replace with test data.
         raise RealIndexClobberError(db_path, stored_model, incoming_model)
 
+    # From here the identity is UNKNOWN on BOTH sides, and that is the one
+    # combination this guard does not decide (product's ruling, 2026-11-08: "for
+    # `None` the refusal fires when the stored identity is a real model, and the
+    # enumeration removes unknown-over-unknown"). An anonymous writer over an
+    # index of unproven provenance is the shape that `IndexStore`'s own
+    # enumeration test eliminates at source -- every production construction
+    # names its model -- so refusing here would only break the remaining
+    # legitimate anonymous writer: a test or script writing into the index it
+    # built itself a moment ago, which is most of this repo's own suite.
+    #
+    # A TEST embedder still has to get past the content check below, because
+    # there the stakes are a user's legacy index and the writer is known to be
+    # producing meaningless vectors.
+    if incoming_model is None:
+        return
+
     # From here the identity is UNKNOWN, and the two states that look identical
     # are distinguished only by content.
     holds_data = _index_holds_data(db_path)

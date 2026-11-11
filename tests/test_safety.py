@@ -448,8 +448,16 @@ def test_init_schema_refuses_to_brand_a_populated_unstamped_index(tmp_path: Path
 
 
 # ---------------------------------------------------------------------------
-# The memo cannot outlive the file it answered about (QA's T12)
+# No verdict outlives the file it was about (QA's T12)
 # ---------------------------------------------------------------------------
+# These began as tests of a per-store memo keyed on the DB file's
+# `(st_dev, st_ino, st_size, st_mtime_ns)`. Review then measured that such a key
+# cannot work here: the connection runs in WAL mode, so a committed write --
+# including another connection stamping a REAL identity -- lives in `-wal` and
+# leaves the main file's size and mtime untouched, after which the cached
+# "allowed" answer let a test embedder write into a now-real index. The cache is
+# gone rather than patched, and these tests now pin the property that replaced
+# it: every write asks again.
 
 
 def _store_schema_index(db_path: Path, model: str | None) -> Path:
@@ -476,8 +484,8 @@ def _passing_store(tmp_path: Path):
     return db_path, store
 
 
-def test_the_memo_notices_a_renamed_in_db(tmp_path: Path) -> None:
-    """`rebuild` swaps via os.replace, so path alone is not identity."""
+def test_a_swapped_in_db_is_re_checked(tmp_path: Path) -> None:
+    """`rebuild` swaps via os.replace, so a verdict about the old file is void."""
     import os
 
     db_path, store = _passing_store(tmp_path)
@@ -488,12 +496,14 @@ def test_the_memo_notices_a_renamed_in_db(tmp_path: Path) -> None:
     store.close()
 
 
-def test_the_memo_notices_an_in_place_overwrite(tmp_path: Path) -> None:
-    """The inode survives an in-place overwrite, so the key carries size+mtime.
+def test_an_in_place_overwrite_is_re_checked(tmp_path: Path) -> None:
+    """The inode survives an in-place overwrite, which is why a key was wrong.
 
-    This is why the memo is keyed on `(st_dev, st_ino, st_size, st_mtime_ns)`
-    rather than on the inode: QA's T12 ran both shapes, and the rename variant
-    alone would have passed a key that cannot see this one.
+    QA's T12 ran both shapes. A rename changes the inode and an in-place
+    overwrite does not, so any cache keyed on file identity had to grow a term
+    for each shape — and WAL made even `(size, mtime)` insufficient. Asking
+    again on every write is the only answer that needs no enumeration of the
+    ways a file can change underneath it.
     """
     db_path, store = _passing_store(tmp_path)
     real_bytes = _store_schema_index(tmp_path / "real.db", REAL_MODEL).read_bytes()
@@ -599,32 +609,56 @@ def test_every_IndexStore_construction_passes_its_embedding_model() -> None:
     crash the CLI on first run, which means they create and initialise the file.
 
     NO ALLOWLIST. An exemption needs a reason, a reason has to be true, and the
-    only available reason ("it cannot write") is false for all three. So the
-    rule is every construction, and this test is what keeps it that way.
+    only available reason ("it cannot write") is false for all three.
+
+    THIS CHECK WAS WEAK AND REVIEW BROKE IT (#266). The first version searched
+    the call text for the word `embedding_model`, so it accepted
+    `embedding_model=None` — the exact anonymous shape it exists to catch — and
+    accepted the word appearing in a comment or in another keyword's value. It
+    also keyed on the literal `IndexStore(`, so `S = IndexStore; S(...)` slipped
+    past, and its `found >= 10` floor would have tolerated four constructions
+    vanishing. Each of those is now a case below.
     """
     import re
 
     source_dir = Path(__file__).resolve().parent.parent / "src" / "rekol"
+    # Every name the class is reachable under, so an alias cannot hide a call.
+    names = {"IndexStore"}
+    for path in sorted(source_dir.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        names.update(re.findall(r"import\s+IndexStore\s+as\s+(\w+)", text))
+        names.update(re.findall(r"^\s*(\w+)\s*=\s*IndexStore\s*$", text, re.M))
+
     anonymous: list[str] = []
     found = 0
     for path in sorted(source_dir.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for match in re.finditer(r"IndexStore\(", text):
-            if text[: match.start()].rstrip().endswith("class"):
-                continue
-            found += 1
-            depth, i = 1, match.end()
-            while i < len(text) and depth:
-                depth += {"(": 1, ")": -1}.get(text[i], 0)
-                i += 1
-            if "embedding_model" not in text[match.end() : i]:
-                anonymous.append(f"{path.name}:{text[: match.start()].count(chr(10)) + 1}")
+        raw = path.read_text(encoding="utf-8")
+        # Strip comments so a mention in prose cannot satisfy the check.
+        text = "\n".join(line.split("#")[0] for line in raw.splitlines())
+        for name in sorted(names):
+            for match in re.finditer(rf"(?<![\w.]){re.escape(name)}\(", text):
+                if text[: match.start()].rstrip().endswith("class"):
+                    continue
+                found += 1
+                depth, i = 1, match.end()
+                while i < len(text) and depth:
+                    depth += {"(": 1, ")": -1}.get(text[i], 0)
+                    i += 1
+                call = text[match.end() : i]
+                value = re.search(r"embedding_model\s*=\s*([^,)\s]+)", call)
+                if value is None or value.group(1) == "None":
+                    line = text[: match.start()].count(chr(10)) + 1
+                    anonymous.append(f"{path.name}:{line}")
 
-    assert found >= 10, (
-        f"the scan found only {found} constructions — it is looking in the wrong place"
+    # EXACT, not a floor: the floor was the weak part. If a construction is
+    # added or removed, this number is meant to be updated deliberately —
+    # that is the point at which someone looks at whether it declares a model.
+    assert found == 14, (
+        f"the scan found {found} IndexStore constructions, expected 14. If that is a "
+        "deliberate change, update the number; if not, the scan has gone blind."
     )
     assert not anonymous, (
-        "these IndexStore constructions do not declare their embedding model, so they can "
+        "these IndexStore constructions do not declare a real embedding model, so they can "
         "write an index with no recorded provenance:\n  " + "\n  ".join(anonymous)
     )
 
@@ -657,3 +691,55 @@ def test_the_refusal_message_does_not_call_an_unknown_writer_a_test_embedder(
         assert_not_clobbering_real_index(db_path, TEST_MODEL)
     assert "(a TEST embedder)" in str(test_writer.value)
     assert repr(TEST_MODEL) in str(test_writer.value)
+
+
+def test_a_write_under_a_switched_model_is_refused_not_silently_restamped(
+    tmp_path: Path,
+) -> None:
+    """A REGRESSION THIS PR WOULD OTHERWISE HAVE INTRODUCED (review, #266).
+
+    Before it, `capture`, `confirm`, `invalidate`, `bootstrap` and `propose`
+    passed no model, so they stamped nothing — a user who switched
+    `embedding_model` kept the old identity on disk and their next `search`
+    failed loudly. Making every writer declare its model means
+    `replace_file_and_chunks` keeps the stamp current, so without a check here
+    the switched-model `capture` would quietly overwrite the evidence and the
+    mixed-model index would then pass every later identity check.
+
+    None of those commands calls `check_model_identity` themselves — only
+    `search`, `index update` and `doctor` do — so the check belongs at the write.
+    """
+    from rekol.store import IndexModelMismatchError
+
+    db_path = _store_schema_index(tmp_path / "index.db", REAL_MODEL)
+    other_real = "sentence-transformers/all-MiniLM-L6-v2"
+    store = _reopen(db_path, other_real)
+    with pytest.raises(IndexModelMismatchError):
+        store.upsert_file("/real/n.md", 1, "cafe")
+    assert store.get_metadata("embedding_model") == REAL_MODEL, "the stamp was overwritten"
+    store.close()
+
+
+def test_a_populated_pre_files_index_is_not_treated_as_this_stores_own(
+    tmp_path: Path,
+) -> None:
+    """`_created_fresh` was set even when the content check said "populated".
+
+    Review found this one, and it defeated the fix two lines above it: on a
+    pre-`files` schema a populated index looks fresh to `is_fresh`, so the stamp
+    was correctly withheld — and then the WRITE was let through on the strength
+    of "this store created the schema", stamping `test-hashing` after all. The
+    flag now means what it says: this store created an EMPTY schema here.
+    """
+    db_path = _legacy_populated_index(tmp_path / "index.db")
+    connection = sqlite3.connect(db_path)
+    connection.execute("DROP TABLE files")  # pre-`files` schema: looks fresh
+    connection.commit()
+    connection.close()
+
+    store = _reopen(db_path, TEST_MODEL)
+    store.init_schema()
+    with pytest.raises(RealIndexClobberError):
+        store.replace_file_and_chunks(path="/sandbox/n.md", mtime=1, content_hash="cafe", chunks=[])
+    assert store.get_metadata("embedding_model") is None, "the index was branded after all"
+    store.close()

@@ -145,16 +145,6 @@ class IndexStore:
         # NOT load a vec extension today — search is a full numpy scan. Kept as an
         # attribute so indexer.rebuild can pass the same value to its temp store.
         self.use_sqlite_vec = use_sqlite_vec
-        # Set by `init_schema` when it CREATED the schema in this process: such a
-        # DB is provably this store's own, so a write into it cannot be the
-        # clobber the guard exists to refuse. Without this the guard would refuse
-        # an ordinary second write into an index the same process had just built
-        # and not yet stamped, which is most of the test suite and every first
-        # build on a machine whose config names a test embedder.
-        self._created_fresh = False
-        # Memo for the write guard, keyed on the DB file's identity -- see
-        # `_assert_write_allowed`.
-        self._write_guard_key: tuple[int, int, int, int] | None = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         try:
@@ -234,50 +224,48 @@ class IndexStore:
                 # check exists for.
                 if not self._holds_content_without_identity():
                     self.stamp_identity_no_commit(self.embedding_model, self.dim)
-            self._created_fresh = True
         self.conn.commit()
 
     def _assert_write_allowed(self) -> None:
-        """Refuse a write that would put test-built data into someone's real index.
+        """Refuse a write that would put foreign data into someone's real index.
 
         THE INVARIANT LIVES WHERE THE DESTRUCTION HAPPENS (#216). The same check
-        was already called before the rebuild-and-swap, and only there, so four
+        was already called before the rebuild-and-swap, and only there, so six
         commands reached a destructive write through a different door and were
-        never inspected -- `capture`, `confirm`, `invalidate` and `flag-suspect`,
-        plus `bootstrap` and `propose`, which the issue did not name. Calling it
-        per write rather than per caller means the next writer added cannot miss
-        it, which is the whole argument for a chokepoint.
+        never inspected -- `capture`, `confirm`, `invalidate`, `flag-suspect`,
+        and (unnamed in the issue) `bootstrap` and `propose`. Calling it per
+        write rather than per caller means the next writer added cannot miss it.
 
-        COST: `assert_not_clobbering_real_index` returns before any filesystem or
-        database access when the incoming model is a known real one, so an
-        ordinary write pays one string comparison. Only a test embedder, or a
-        writer with no model at all, reaches the stat and the identity read.
+        TWO REFUSALS, because this PR made the second one necessary:
 
-        THE MEMO is keyed on the DB file's ``(st_dev, st_ino, st_size,
-        st_mtime_ns)``. Path alone is not enough: `rebuild` swaps a new file into
-        place with `os.replace`, so a long-lived store could otherwise keep
-        passing on a cached answer about a file that has been replaced
-        underneath it (QA's T12). Inode alone is not enough either, because an
-        in-place overwrite keeps it.
+        1. test-built (or unnamed) data over a real index -- the clobber guard;
+        2. a write whose model DISAGREES with the stamp. Every writer now
+           declares its model, and `replace_file_and_chunks` keeps the stamp
+           current, so without this a user who switches `embedding_model` and
+           runs `capture` would have the old identity quietly overwritten and
+           their mixed-model index would then pass every later check. Before
+           this PR those writers stamped nothing, so the evidence survived and
+           the next `search` failed loudly. Re-stamping instead of refusing
+           would have been a regression introduced by the fix.
 
-        ACCEPTED LIMIT, stated rather than hidden: an in-place overwrite that
-        leaves size AND mtime_ns both unchanged is invisible to this key, and the
-        cached answer stands. That is the same class of limit as the archive
-        digest's in #234 -- it needs a write that preserves every attribute the
-        check reads, within one process's lifetime, which no ordinary path does.
+        NO MEMO. An earlier version cached the verdict per store, keyed on the
+        DB file's `(st_dev, st_ino, st_size, st_mtime_ns)`. Review measured that
+        this is unsound here: the connection runs in WAL mode, so a committed
+        write lives in `-wal` and leaves the main file's size and mtime
+        unchanged -- including another connection stamping a real identity,
+        after which the cached "allowed" answer let a test embedder write into a
+        now-real index. Keying on the `-wal` file as well would patch that one
+        path; dropping the cache removes the entire class. The cost was measured
+        rather than assumed: the guard returns before any I/O for a known real
+        model, so only a test or unnamed writer reads the DB at all, and the
+        suite's runtime was unchanged within noise.
         """
-        if self._created_fresh:
-            return
-        try:
-            info = self.db_path.stat()
-        except OSError:
-            key: tuple[int, int, int, int] | None = None
-        else:
-            key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-        if key is not None and key == self._write_guard_key:
-            return
         assert_not_clobbering_real_index(self.db_path, self.embedding_model)
-        self._write_guard_key = key
+        if self.embedding_model is not None:
+            # Raises IndexModelMismatchError when the stamp names a different
+            # model; silent when nothing is stamped, which is what lets a real
+            # model adopt a legacy index.
+            self.check_model_identity(self.embedding_model, self.dim)
 
     def _holds_content_without_identity(self) -> bool:
         """True when this DB already holds chunks but records no embedding model.

@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The panel found three more defects in the guard work, two of them regressions the fix itself
+  would have introduced (#266, review).**
+  **The cached verdict was unsound under WAL.** Per-write guarding was memoised on the index file's
+  `(st_dev, st_ino, st_size, st_mtime_ns)`, and the connection runs in `journal_mode=WAL` — so a
+  committed write lives in `-wal` and leaves the main file's size and mtime untouched. A reviewer
+  reproduced the consequence: one connection stamps a real identity, the main-file key does not
+  change, and the cached "allowed" answer then lets a test embedder write into a now-real index.
+  Keying on `-wal` as well would have patched that one path; the cache is **gone** instead, which
+  removes the class. Measured rather than assumed: the guard returns before any I/O for a known
+  real model, so only a test or unnamed writer touches the database, and the suite's runtime is
+  unchanged within noise.
+  **A write under a switched model re-stamped instead of refusing.** Making every writer declare
+  its model means the stamp is kept current on every write, so a user who changed
+  `embedding_model` and ran `capture` would have had the old identity quietly overwritten — and
+  their mixed-model index would then pass every later check. Before this release those writers
+  stamped nothing, so the evidence survived and the next `search` failed loudly. The write now
+  refuses when the model disagrees with the stamp, which is where the four commands that do not
+  call the identity check themselves can be stopped.
+  **The flag that meant "this store built this index" let writes through.** It was set even when
+  the content check had just said the index was populated, so on a pre-`files` schema the stamp was
+  correctly withheld and the write was then allowed anyway — the takeover arriving one line later.
+  Once the cache went, nothing read the flag at all, so it is deleted rather than corrected.
+  Also from the panel: the enumeration test accepted `embedding_model=None`, accepted the word in a
+  comment, missed an aliased import, and had a floor loose enough for four constructions to vanish.
+  It now requires a non-`None` value, strips comments, follows aliases, and pins the exact count.
 - **The refusal named the wrong culprit when the writer had no model (#266, review).** Refusing a
   model-less writer is new, and the error still formatted its subject as `str(incoming_model)` — so
   it read `would rebuild with: 'None' (a TEST embedder)`, two false statements in one line, the
