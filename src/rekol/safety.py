@@ -68,15 +68,31 @@ def override_is_set() -> bool:
 class RealIndexClobberError(RuntimeError):
     """Raised when test-built data would replace an index a real model produced."""
 
-    def __init__(self, db_path: Path, stored_model: str, incoming_model: str) -> None:
+    def __init__(self, db_path: Path, stored_model: str, incoming_model: str | None) -> None:
         self.db_path = db_path
         self.stored_model = stored_model
         self.incoming_model = incoming_model
+        # THE WRITER IS NOT ALWAYS A TEST EMBEDDER any more, so the message must
+        # not say it is. Since a model-less writer is now refused too (#216),
+        # `str(None)` rendered as `would rebuild with: 'None' (a TEST embedder)`
+        # -- two false statements in one line, the first of which sends the
+        # reader hunting for a model named "None". Review caught it, measured.
+        unknown_writer = incoming_model is None
+        headline = (
+            "refusing to write data of unknown provenance into a real index."
+            if unknown_writer
+            else "refusing to overwrite a real index with test-built data."
+        )
+        writer = (
+            "a writer that did not name its embedding model"
+            if unknown_writer
+            else f"{incoming_model!r} (a TEST embedder)"
+        )
         super().__init__(
-            f"refusing to overwrite a real index with test-built data.\n"
+            f"{headline}\n"
             f"  index:          {db_path}\n"
             f"  built by:       {stored_model!r}\n"
-            f"  would rebuild with: {incoming_model!r} (a TEST embedder)\n"
+            f"  would write with:   {writer}\n"
             f"\n"
             f"This almost always means a test or throwaway script escaped its sandbox and\n"
             f"resolved to your real index. Check REKOL_INDEX_DIR — it is the HIGHEST\n"
@@ -251,7 +267,7 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
         # Explicitly recorded a REAL model. That is a positive statement of
         # provenance and is refused regardless of how much data it currently
         # holds — an empty real index is still not ours to replace with test data.
-        raise RealIndexClobberError(db_path, stored_model, str(incoming_model))
+        raise RealIndexClobberError(db_path, stored_model, incoming_model)
 
     # From here the identity is UNKNOWN, and the two states that look identical
     # are distinguished only by content.
@@ -274,5 +290,5 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
     # open left the original destructive scenario wide open for exactly the
     # indexes most likely to be old and precious.
     raise RealIndexClobberError(
-        db_path, stored_model or "unknown (no recorded identity)", str(incoming_model)
+        db_path, stored_model or "unknown (no recorded identity)", incoming_model
     )

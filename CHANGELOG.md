@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The refusal named the wrong culprit when the writer had no model (#266, review).** Refusing a
+  model-less writer is new, and the error still formatted its subject as `str(incoming_model)` — so
+  it read `would rebuild with: 'None' (a TEST embedder)`, two false statements in one line, the
+  first of which sends the reader hunting for a model named "None". It now says the index would be
+  written by "a writer that did not name its embedding model", under a headline about unknown
+  provenance rather than test-built data. Worth recording that correcting the message alone changed
+  nothing: the caller passed `str(incoming_model)`, so the exception never saw `None`, and only
+  running it showed that.
 - **Four commands could overwrite a real index with test-built data, because the guard was asked
   in only one place (#216).** `capture`, `confirm`, `invalidate` and `flag-suspect` — and, found by
   enumerating rather than trusting the issue, `bootstrap` and `propose` — construct the store with

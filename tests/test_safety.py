@@ -627,3 +627,33 @@ def test_every_IndexStore_construction_passes_its_embedding_model() -> None:
         "these IndexStore constructions do not declare their embedding model, so they can "
         "write an index with no recorded provenance:\n  " + "\n  ".join(anonymous)
     )
+
+
+def test_the_refusal_message_does_not_call_an_unknown_writer_a_test_embedder(
+    tmp_path: Path,
+) -> None:
+    """The message has to describe the writer it actually refused (review, #266).
+
+    Refusing a model-less writer is new (#216), and the error still formatted
+    its subject as `str(incoming_model)` — so it read
+    `would rebuild with: 'None' (a TEST embedder)`: two false statements in one
+    line, the first of which sends the reader looking for a model named "None".
+
+    Fixing the message alone did nothing, which is worth remembering: the caller
+    passed `str(incoming_model)`, so the exception never saw `None` at all. Only
+    running it showed that.
+    """
+    db_path = _make_index(tmp_path / "index.db", REAL_MODEL)
+
+    with pytest.raises(RealIndexClobberError) as unknown:
+        assert_not_clobbering_real_index(db_path, None)
+    message = str(unknown.value)
+    assert "'None'" not in message, message
+    assert "TEST embedder" not in message, message
+    assert "did not name its embedding model" in message, message
+    assert "unknown provenance" in message, message
+
+    with pytest.raises(RealIndexClobberError) as test_writer:
+        assert_not_clobbering_real_index(db_path, TEST_MODEL)
+    assert "(a TEST embedder)" in str(test_writer.value)
+    assert repr(TEST_MODEL) in str(test_writer.value)
