@@ -743,3 +743,71 @@ def test_a_populated_pre_files_index_is_not_treated_as_this_stores_own(
         store.replace_file_and_chunks(path="/sandbox/n.md", mtime=1, content_hash="cafe", chunks=[])
     assert store.get_metadata("embedding_model") is None, "the index was branded after all"
     store.close()
+
+
+def test_a_model_switch_refusal_names_both_ways_out(tmp_path: Path) -> None:
+    """This refusal is reachable by a SUPPORTED action, so the text matters.
+
+    Editing `embedding_model` is something users do. Before this release the
+    writers stamped nothing, so a switch surfaced at the next `search`; now it
+    surfaces at the next write, which means ordinary people will read this
+    message (product, 2026-11-11). It has to name both models and both remedies
+    without the reader scrolling back up the paragraph.
+    """
+    from rekol.store import IndexModelMismatchError
+
+    db_path = _store_schema_index(tmp_path / "index.db", REAL_MODEL)
+    other_real = "sentence-transformers/all-MiniLM-L6-v2"
+    store = _reopen(db_path, other_real)
+    with pytest.raises(IndexModelMismatchError) as caught:
+        store.upsert_file("/real/n.md", 1, "cafe")
+    store.close()
+
+    message = str(caught.value)
+    assert REAL_MODEL in message, message  # what built it
+    assert other_real in message, message  # what the config now says
+    assert "rekol index rebuild" in message, message  # re-embed
+    assert f"set embedding_model back to {REAL_MODEL!r}" in message, message  # or revert
+    assert "rekol.config.yaml" in message, message  # and where
+
+
+def test_a_rebuild_still_succeeds_when_one_real_model_replaces_another(
+    tmp_path: Path,
+) -> None:
+    """The way OUT of a model switch must not be blocked by the new refusal.
+
+    Product's condition: a real model replacing a different real model has to
+    keep working, or the remedy the message prints is a dead end. This goes
+    through the real `Indexer.rebuild()`, including the swap guard, rather than
+    asserting about the store alone.
+    """
+    import numpy as np  # noqa: F401  (imported for parity with the indexer's deps)
+
+    from rekol.embeddings import HashingEmbedder
+    from rekol.indexer import Indexer
+    from rekol.store import IndexStore
+
+    memory_root = tmp_path / "mem"
+    (memory_root / "topics").mkdir(parents=True)
+    (memory_root / "topics" / "t.md").write_text(
+        "---\nname: t\ndescription: d\ntype: topic\n"
+        "created: 2026-01-01\nupdated: 2026-02-01\n---\nbody\n"
+    )
+    db_path = tmp_path / "index" / "index.db"
+
+    built_by = IndexStore(db_path=db_path, dim=384, embedding_model="model-A", use_sqlite_vec=False)
+    built_by.init_schema()
+    Indexer(memory_root=memory_root, store=built_by, embedder=HashingEmbedder(dim=384)).update()
+    assert built_by.get_metadata("embedding_model") == "model-A"
+    built_by.close()
+
+    switched = IndexStore(db_path=db_path, dim=384, embedding_model="model-B", use_sqlite_vec=False)
+    stats = Indexer(
+        memory_root=memory_root, store=switched, embedder=HashingEmbedder(dim=384)
+    ).rebuild()
+    switched.close()
+    assert stats.files_indexed == 1, stats
+
+    after = IndexStore(db_path=db_path, dim=384, embedding_model="model-B", use_sqlite_vec=False)
+    assert after.get_metadata("embedding_model") == "model-B", "the rebuild did not re-stamp"
+    after.close()

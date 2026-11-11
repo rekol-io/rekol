@@ -65,12 +65,26 @@ class IndexModelMismatchError(RuntimeError):
             if stored_model is not None
             else "an unknown embedding model"
         )
+        # THE REMEDY NAMES THE VALUES, because this is now reachable by an
+        # ordinary supported action -- editing `embedding_model` and then
+        # running any command that writes (product, 2026-11-11). The previous
+        # wording said "restore the previous embedding_model" without saying
+        # what it was, so a reader who scanned to the remedy had to go back up
+        # the paragraph to find it. Both ways out are spelled, in the order a
+        # user most likely wants them.
+        restore = (
+            f"set embedding_model back to {stored_model!r} in rekol.config.yaml"
+            if stored_model is not None
+            else "set embedding_model back to whatever built this index"
+        )
         super().__init__(
             f"curated index at {db_path} was built with {stored_desc}, but the "
             f"configured model is {wanted_model!r} ({wanted_dim}-dim). Searching a "
-            f"mixed-model index returns confidently-wrong results. Restore the "
-            f"previous embedding_model, or rebuild the curated index:\n"
-            f"  rekol index rebuild"
+            f"mixed-model index returns confidently-wrong results.\n"
+            f"Two ways out:\n"
+            f"  * re-embed everything with the model you configured:\n"
+            f"      rekol index rebuild\n"
+            f"  * or keep the index you have: {restore}"
         )
 
 

@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **The model-switch refusal spells both ways out (product, 2026-11-11).** Refusing a write whose
+  model disagrees with the index's stamp is reachable by a **supported** action — editing
+  `embedding_model` — so ordinary users will read this message. It named the stored and configured
+  models but said only "restore the previous embedding_model", leaving the reader to scroll back up
+  the paragraph for the value. It now prints the two remedies explicitly: `rekol index rebuild` to
+  re-embed with the configured model, or the exact `set embedding_model back to '<model>' in
+  rekol.config.yaml` to keep the index. Measured end to end that the first remedy is not a dead
+  end: a rebuild with one real model over an index stamped with a different real model succeeds and
+  re-stamps, through the real `Indexer.rebuild()` and its swap guard.
 - **The panel found three more defects in the guard work, two of them regressions the fix itself
   would have introduced (#266, review).**
   **The cached verdict was unsound under WAL.** Per-write guarding was memoised on the index file's
