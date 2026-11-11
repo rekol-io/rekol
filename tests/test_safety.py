@@ -290,12 +290,19 @@ def test_search_schema_selfheal_cannot_clobber_a_legacy_real_index(
 # because "the invariant is asserted where the destruction happens" is the claim.
 
 
-def _legacy_populated_index(db_path: Path) -> Path:
+def _legacy_populated_index(db_path: Path, *, keep_metadata_table: bool = True) -> Path:
     """A real index from before identity stamping: content, no identity row.
 
     The precious shape. Written with the store's own schema so the tables match
     what production reads, then stripped of its identity so it looks like an
     index built before stamping existed.
+
+    `keep_metadata_table=False` is the shape QA measured and the one a GENUINE
+    pre-stamping index has: no `metadata` table at all. My first version of this
+    fixture only ever deleted the ROWS, which is why a "byte-identical" claim I
+    made about the read path was true of the fixture and false of a real legacy
+    index — the read then created the empty table. A fixture that makes the test
+    convenient can hide the path production takes.
     """
     from rekol.store import IndexStore
 
@@ -317,6 +324,12 @@ def _legacy_populated_index(db_path: Path) -> Path:
     store.conn.execute("DELETE FROM metadata WHERE key IN ('embedding_model','embedding_dim')")
     store.conn.commit()
     store.close()
+    if not keep_metadata_table:
+        connection = sqlite3.connect(db_path)
+        connection.execute("DROP TABLE metadata")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.close()
     return db_path
 
 
@@ -811,3 +824,67 @@ def test_a_rebuild_still_succeeds_when_one_real_model_replaces_another(
     after = IndexStore(db_path=db_path, dim=384, embedding_model="model-B", use_sqlite_vec=False)
     assert after.get_metadata("embedding_model") == "model-B", "the rebuild did not re-stamp"
     after.close()
+
+
+def test_a_read_does_not_create_the_metadata_table_on_a_genuine_legacy_index(
+    tmp_path: Path,
+) -> None:
+    """QA's row, and the reason it is not cosmetic (2026-11-11).
+
+    A genuine pre-stamping index has NO `metadata` table, and its absence is the
+    LAST backstop in `needs_schema_migration`: an index with `user_version == 0`
+    and the timestamp columns is identified as unknown-provenance by exactly
+    that fact. `init_schema` used to create the table, and every read path calls
+    `init_schema` on open — so one `rekol search` was enough to make a legacy
+    index look migrated and be "blindly trusted", which is the outcome that
+    function's own comment says it exists to prevent.
+
+    I had claimed this path was byte-identical. It was, for a fixture that kept
+    the table. Against the real shape it was not.
+    """
+    db_path = _legacy_populated_index(tmp_path / "index.db", keep_metadata_table=False)
+    before = db_path.read_bytes()
+    from rekol.store import IndexStore
+
+    store = IndexStore(db_path=db_path, dim=4, embedding_model=REAL_MODEL, use_sqlite_vec=False)
+    store.init_schema()  # what review, search and doctor's probe all do on open
+    assert "metadata" not in store.list_tables(), "the read path created the table"
+    assert store.needs_schema_migration(), "the migration backstop was erased by a read"
+    assert store.get_file("/real/precious.md") is not None, "the user's rows were touched"
+    store.close()
+    connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection.close()
+    assert db_path.read_bytes() == before, "a read modified the index file"
+
+
+def test_an_adopting_write_creates_the_metadata_table_it_needs(tmp_path: Path) -> None:
+    """The other side: not creating it on a read must not break adoption.
+
+    `stamp_identity_no_commit` creates the table defensively now, the way
+    `SessionStore._stamp_embedding_model` already did — the first writer to
+    claim provenance is the one that needs it to exist, and stamping must not be
+    the thing that crashes.
+    """
+    import numpy as np
+
+    db_path = _legacy_populated_index(tmp_path / "index.db", keep_metadata_table=False)
+    store = _reopen(db_path, REAL_MODEL)
+    store.init_schema()
+    store.replace_file_and_chunks(
+        path="/real/new.md",
+        mtime=2,
+        content_hash="f00d",
+        chunks=[
+            {
+                "text": "new",
+                "line_start": 1,
+                "line_end": 1,
+                "embedding": np.zeros(4, dtype=np.float32),
+            }
+        ],
+    )
+    assert "metadata" in store.list_tables()
+    assert store.get_metadata("embedding_model") == REAL_MODEL
+    assert store.get_file("/real/precious.md") is not None
+    store.close()

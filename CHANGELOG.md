@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A read erased the evidence that a legacy index needs rebuilding (QA, 2026-11-11).** Every read
+  path calls `init_schema()` on open so a missing database does not crash the CLI, and
+  `init_schema` created the `metadata` table unconditionally. The **absence** of that table is the
+  last backstop in `needs_schema_migration`: an index carrying `user_version == 0` and the
+  timestamp columns is identified as unknown-provenance by exactly that fact. So a single
+  `rekol search` was enough to make a pre-stamping index look migrated and be "blindly trusted" —
+  the outcome that function's own comment says it exists to prevent. The table is no longer created
+  on an existing index that lacks it; reads do not need it (`get_metadata` returns None by design
+  when it is absent), and a writer that claims provenance creates it itself, as the sessions store
+  already did. Measured: a real-model read now adds no table, leaves the file byte-identical and
+  keeps `needs_schema_migration()` true, while an adopting write still creates the table, stamps,
+  and preserves the user's rows.
+  **My own claim about this was wrong, and the fixture is why.** I reported the read path as
+  byte-identical; it was, for a fixture that deleted the identity ROWS but kept the table. A genuine
+  legacy index has no `metadata` table at all, which is the shape QA measured. The fixture now
+  produces both shapes and the test pins the real one.
 - **The model-switch refusal spells both ways out (product, 2026-11-11).** Refusing a write whose
   model disagrees with the index's stamp is reachable by a **supported** action — editing
   `embedding_model` — so ordinary users will read this message. It named the stored and configured

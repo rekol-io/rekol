@@ -216,8 +216,27 @@ class IndexStore:
         (:meth:`replace_file_and_chunks`) keeps the identity *current* once a
         (re)build actually produces new vectors.
         """
-        is_fresh = "files" not in self.list_tables()
-        self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS + SCHEMA_METADATA)
+        tables = self.list_tables()
+        is_fresh = "files" not in tables
+        # THE `metadata` TABLE IS NOT CREATED ON AN EXISTING INDEX THAT LACKS IT
+        # (QA, 2026-11-11). Its absence is the LAST BACKSTOP in
+        # `needs_schema_migration`: a pre-versioning index carrying
+        # `user_version == 0` and the timestamp columns is identified as
+        # unknown-provenance by exactly one fact, `"metadata" not in
+        # list_tables()`. Creating the table here erased that fact before the
+        # caller asked -- and every read path calls this method on open, so a
+        # single `rekol search` was enough to make a legacy index look migrated
+        # and be "blindly trusted", which is the outcome that function's own
+        # comment says it exists to prevent.
+        #
+        # Reads do not need the table: `get_metadata` already returns None when
+        # it is absent, by design, "so callers can treat a pre-C4 index as no
+        # recorded identity". Writers that stamp create it themselves, the way
+        # the sessions store does.
+        schema = SCHEMA_FILES + SCHEMA_CHUNKS
+        if is_fresh or "metadata" in tables:
+            schema += SCHEMA_METADATA
+        self.conn.executescript(schema)
         if is_fresh:
             self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
             self._set_metadata_no_commit("schema_version", str(CURATED_SCHEMA_VERSION))
@@ -375,6 +394,12 @@ class IndexStore:
         always reflects the model actually used. Bundled into the caller's
         transaction; the caller commits.
         """
+        # CREATE DEFENSIVELY, mirroring `SessionStore._stamp_embedding_model`:
+        # `init_schema` no longer creates this table on a legacy index that
+        # lacks it (it is the migration backstop), so the first writer to claim
+        # provenance is the one that needs it to exist. Stamping must not be the
+        # thing that crashes.
+        self.conn.executescript(SCHEMA_METADATA)
         self._set_metadata_no_commit("embedding_model", embedding_model)
         self._set_metadata_no_commit("embedding_dim", str(dim))
 
