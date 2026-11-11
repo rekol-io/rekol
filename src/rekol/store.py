@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from rekol.safety import assert_not_clobbering_real_index
+
 # 1 = original schema
 # 2 = with curated timestamp columns (created/updated/valid_from/invalidated_at)
 # 3 = with the `metadata` identity table (embedding_model/embedding_dim/schema_version).
@@ -63,12 +65,26 @@ class IndexModelMismatchError(RuntimeError):
             if stored_model is not None
             else "an unknown embedding model"
         )
+        # THE REMEDY NAMES THE VALUES, because this is now reachable by an
+        # ordinary supported action -- editing `embedding_model` and then
+        # running any command that writes (product, 2026-11-11). The previous
+        # wording said "restore the previous embedding_model" without saying
+        # what it was, so a reader who scanned to the remedy had to go back up
+        # the paragraph to find it. Both ways out are spelled, in the order a
+        # user most likely wants them.
+        restore = (
+            f"set embedding_model back to {stored_model!r} in rekol.config.yaml"
+            if stored_model is not None
+            else "set embedding_model back to whatever built this index"
+        )
         super().__init__(
             f"curated index at {db_path} was built with {stored_desc}, but the "
             f"configured model is {wanted_model!r} ({wanted_dim}-dim). Searching a "
-            f"mixed-model index returns confidently-wrong results. Restore the "
-            f"previous embedding_model, or rebuild the curated index:\n"
-            f"  rekol index rebuild"
+            f"mixed-model index returns confidently-wrong results.\n"
+            f"Two ways out:\n"
+            f"  * re-embed everything with the model you configured:\n"
+            f"      rekol index rebuild\n"
+            f"  * or keep the index you have: {restore}"
         )
 
 
@@ -200,14 +216,104 @@ class IndexStore:
         (:meth:`replace_file_and_chunks`) keeps the identity *current* once a
         (re)build actually produces new vectors.
         """
-        is_fresh = "files" not in self.list_tables()
-        self.conn.executescript(SCHEMA_FILES + SCHEMA_CHUNKS + SCHEMA_METADATA)
+        tables = self.list_tables()
+        is_fresh = "files" not in tables
+        # THE `metadata` TABLE IS NOT CREATED ON AN EXISTING INDEX THAT LACKS IT
+        # (QA, 2026-11-11). Its absence is the LAST BACKSTOP in
+        # `needs_schema_migration`: a pre-versioning index carrying
+        # `user_version == 0` and the timestamp columns is identified as
+        # unknown-provenance by exactly one fact, `"metadata" not in
+        # list_tables()`. Creating the table here erased that fact before the
+        # caller asked -- and every read path calls this method on open, so a
+        # single `rekol search` was enough to make a legacy index look migrated
+        # and be "blindly trusted", which is the outcome that function's own
+        # comment says it exists to prevent.
+        #
+        # Reads do not need the table: `get_metadata` already returns None when
+        # it is absent, by design, "so callers can treat a pre-C4 index as no
+        # recorded identity". Writers that stamp create it themselves, the way
+        # the sessions store does.
+        schema = SCHEMA_FILES + SCHEMA_CHUNKS
+        if is_fresh or "metadata" in tables:
+            schema += SCHEMA_METADATA
+        self.conn.executescript(schema)
         if is_fresh:
             self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
             self._set_metadata_no_commit("schema_version", str(CURATED_SCHEMA_VERSION))
             if self.embedding_model is not None and self.get_metadata("embedding_model") is None:
-                self.stamp_identity_no_commit(self.embedding_model, self.dim)
+                # A STAMP IS A CLAIM OF PROVENANCE, so it goes through the same
+                # refusal as a write (product, 2026-11-08). Now that every
+                # caller passes its model -- including the read paths, which
+                # create and initialise the DB on first run -- a leaked
+                # test-embedder `search` over a POPULATED, UNSTAMPED legacy index
+                # could stamp it "test-built", after which the guard reads that
+                # stamp as "already a sandbox index" and waves every later test
+                # write through. That is #217's takeover arriving through a read.
+                #
+                # `is_fresh` already prevents it for the ordinary legacy shape,
+                # because an index with a `files` table is not fresh. It does NOT
+                # prevent the pre-`files` schema generation, where a populated
+                # index looks fresh to the line above -- which is the case this
+                # check exists for.
+                if not self._holds_content_without_identity():
+                    self.stamp_identity_no_commit(self.embedding_model, self.dim)
         self.conn.commit()
+
+    def _assert_write_allowed(self) -> None:
+        """Refuse a write that would put foreign data into someone's real index.
+
+        THE INVARIANT LIVES WHERE THE DESTRUCTION HAPPENS (#216). The same check
+        was already called before the rebuild-and-swap, and only there, so six
+        commands reached a destructive write through a different door and were
+        never inspected -- `capture`, `confirm`, `invalidate`, `flag-suspect`,
+        and (unnamed in the issue) `bootstrap` and `propose`. Calling it per
+        write rather than per caller means the next writer added cannot miss it.
+
+        TWO REFUSALS, because this PR made the second one necessary:
+
+        1. test-built (or unnamed) data over a real index -- the clobber guard;
+        2. a write whose model DISAGREES with the stamp. Every writer now
+           declares its model, and `replace_file_and_chunks` keeps the stamp
+           current, so without this a user who switches `embedding_model` and
+           runs `capture` would have the old identity quietly overwritten and
+           their mixed-model index would then pass every later check. Before
+           this PR those writers stamped nothing, so the evidence survived and
+           the next `search` failed loudly. Re-stamping instead of refusing
+           would have been a regression introduced by the fix.
+
+        NO MEMO. An earlier version cached the verdict per store, keyed on the
+        DB file's `(st_dev, st_ino, st_size, st_mtime_ns)`. Review measured that
+        this is unsound here: the connection runs in WAL mode, so a committed
+        write lives in `-wal` and leaves the main file's size and mtime
+        unchanged -- including another connection stamping a real identity,
+        after which the cached "allowed" answer let a test embedder write into a
+        now-real index. Keying on the `-wal` file as well would patch that one
+        path; dropping the cache removes the entire class. The cost was measured
+        rather than assumed: the guard returns before any I/O for a known real
+        model, so only a test or unnamed writer reads the DB at all, and the
+        suite's runtime was unchanged within noise.
+        """
+        assert_not_clobbering_real_index(self.db_path, self.embedding_model)
+        if self.embedding_model is not None:
+            # Raises IndexModelMismatchError when the stamp names a different
+            # model; silent when nothing is stamped, which is what lets a real
+            # model adopt a legacy index.
+            self.check_model_identity(self.embedding_model, self.dim)
+
+    def _holds_content_without_identity(self) -> bool:
+        """True when this DB already holds chunks but records no embedding model.
+
+        The precious state: an index written before identity stamping existed.
+        Read through this connection (the schema has just been created, so the
+        tables are guaranteed to exist) rather than by reopening the file.
+        """
+        if self.get_metadata("embedding_model") is not None:
+            return False
+        try:
+            row = self.conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return True  # cannot tell: treat as precious rather than as empty
+        return row is not None
 
     def list_tables(self) -> list[str]:
         """Return the names of all tables in the database."""
@@ -247,6 +353,7 @@ class IndexStore:
 
     def reset_schema(self) -> None:
         """Drop and recreate the curated tables so a rebuild picks up schema changes."""
+        self._assert_write_allowed()
         self.conn.executescript(
             "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files; "
             "DROP TABLE IF EXISTS metadata;"
@@ -258,6 +365,14 @@ class IndexStore:
 
     def _set_metadata_no_commit(self, key: str, value: str) -> None:
         """Upsert a single ``metadata`` row WITHOUT committing.
+
+        CALLERS MUST ENSURE THE TABLE EXISTS. This issues a bare ``INSERT INTO
+        metadata`` with no guard of its own, and since `init_schema` stopped
+        creating that table on an existing index that lacks it (its absence is
+        the migration backstop), "the table is there" is no longer something a
+        caller can assume. The two callers both satisfy it: `init_schema`'s
+        `schema_version` write runs only in the branch that just created the
+        schema, and `stamp_identity_no_commit` creates the table first.
 
         Deferred commit so identity stamping can ride along with the surrounding
         write transaction (e.g. ``replace_file_and_chunks``) instead of forcing an
@@ -287,6 +402,12 @@ class IndexStore:
         always reflects the model actually used. Bundled into the caller's
         transaction; the caller commits.
         """
+        # CREATE DEFENSIVELY, mirroring `SessionStore._stamp_embedding_model`:
+        # `init_schema` no longer creates this table on a legacy index that
+        # lacks it (it is the migration backstop), so the first writer to claim
+        # provenance is the one that needs it to exist. Stamping must not be the
+        # thing that crashes.
+        self.conn.executescript(SCHEMA_METADATA)
         self._set_metadata_no_commit("embedding_model", embedding_model)
         self._set_metadata_no_commit("embedding_dim", str(dim))
 
@@ -360,6 +481,7 @@ class IndexStore:
         goes through ``replace_file_and_chunks`` so the hash and chunks commit
         together. Kept for callers (and tests) that write a files row directly.
         """
+        self._assert_write_allowed()
         self._upsert_file_no_commit(path, mtime, content_hash, name=name)
         self.conn.commit()
 
@@ -413,6 +535,10 @@ class IndexStore:
 
     def delete_file(self, path: str) -> None:
         """Delete a file row; its chunks are removed via ON DELETE CASCADE."""
+        # Guarded like any other write: the 2026-08-18 shape removes a real
+        # user's files as readily as it overwrites their chunks, because an
+        # incremental run deletes every indexed path the sandbox cannot see.
+        self._assert_write_allowed()
         # ON DELETE CASCADE (enforced via PRAGMA foreign_keys=ON) removes associated chunks
         self.conn.execute("DELETE FROM files WHERE path=?", (path,))
         self.conn.commit()
@@ -487,6 +613,7 @@ class IndexStore:
         the files-row hash. Kept for callers (and tests) that already hold a
         files row and only want to (re)write its chunks.
         """
+        self._assert_write_allowed()
         self._replace_chunks_no_commit(
             file_path,
             chunks,
@@ -533,6 +660,7 @@ class IndexStore:
         Mirrors ``sessions/ingest.py::ingest_file``, which already records the
         file-seen marker only after the messages+embeddings commit.
         """
+        self._assert_write_allowed()
         with self.conn:
             self._upsert_file_no_commit(path, mtime, content_hash, name=name)
             self._replace_chunks_no_commit(

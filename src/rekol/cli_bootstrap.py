@@ -123,7 +123,9 @@ def _recall_and_dedupe(cfg: Config):
     memory_store: IndexStore | None = None
     session_store: SessionStore | None = None
     try:
-        memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+        memory_store = IndexStore(
+            db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+        )
         memory_store.init_schema()
         guard_curated_schema(memory_store)
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)

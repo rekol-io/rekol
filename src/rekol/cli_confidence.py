@@ -25,7 +25,7 @@ import click
 import frontmatter
 
 from rekol.atomic_write import AtomicWriteError, write_text_atomically
-from rekol.cli_common import guard_curated_schema, warn_skipped_files
+from rekol.cli_common import guard_curated_schema, index_refusals_reported, warn_skipped_files
 from rekol.config import Config, load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -49,7 +49,9 @@ def _resolve_under_memory_home(cfg: Config, target: Path) -> Path:
 def _reindex_curated(cfg: Config) -> None:
     """Reindex curated memory so the new frontmatter is picked up by search/doctor."""
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     guard_curated_schema(store)
     idx = Indexer(
@@ -59,7 +61,10 @@ def _reindex_curated(cfg: Config) -> None:
         chunk_max_bytes=cfg.chunk_max_bytes,
         index_dir=cfg.index_dir,
     )
-    warn_skipped_files(idx.update())
+    # A refusal here is deliberate (a model switch, or a leaked test embedder)
+    # and its message names the remedy — but it must not arrive as a traceback.
+    with index_refusals_reported():
+        warn_skipped_files(idx.update())
 
 
 def _write_or_explain(path: Path, text: str) -> None:

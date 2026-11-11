@@ -48,19 +48,51 @@ TEST_EMBEDDER_NAMES = frozenset({"test-hashing"})
 # shell history.
 OVERRIDE_ENV_VAR = "REKOL_ALLOW_TEST_EMBEDDER_TO_OVERWRITE_REAL_INDEX"
 
+# THE ONLY SPELLINGS THAT MEAN CONSENT (#219). This used to be a deny-list --
+# anything not in `("", "0", "false", "no")` was read as "yes" -- so `False`,
+# `FALSE`, `off`, `Off`, `No` and `disabled` all SWITCHED THE GUARD OFF. A user
+# writing `off` got the opposite of what they asked for, which is the worst
+# possible direction for a safety override to be wrong in.
+#
+# An allowlist cannot fail that way: an unrecognised value leaves the guard ON.
+# Compared case-folded and stripped, so `TRUE` and ` 1 ` work, and anything else
+# -- including a typo -- is refused rather than guessed at.
+OVERRIDE_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def override_is_set() -> bool:
+    """True only when the override env var holds one of the consent spellings."""
+    return os.environ.get(OVERRIDE_ENV_VAR, "").strip().lower() in OVERRIDE_TRUE_VALUES
+
 
 class RealIndexClobberError(RuntimeError):
     """Raised when test-built data would replace an index a real model produced."""
 
-    def __init__(self, db_path: Path, stored_model: str, incoming_model: str) -> None:
+    def __init__(self, db_path: Path, stored_model: str, incoming_model: str | None) -> None:
         self.db_path = db_path
         self.stored_model = stored_model
         self.incoming_model = incoming_model
+        # THE WRITER IS NOT ALWAYS A TEST EMBEDDER any more, so the message must
+        # not say it is. Since a model-less writer is now refused too (#216),
+        # `str(None)` rendered as `would rebuild with: 'None' (a TEST embedder)`
+        # -- two false statements in one line, the first of which sends the
+        # reader hunting for a model named "None". Review caught it, measured.
+        unknown_writer = incoming_model is None
+        headline = (
+            "refusing to write data of unknown provenance into a real index."
+            if unknown_writer
+            else "refusing to overwrite a real index with test-built data."
+        )
+        writer = (
+            "a writer that did not name its embedding model"
+            if unknown_writer
+            else f"{incoming_model!r} (a TEST embedder)"
+        )
         super().__init__(
-            f"refusing to overwrite a real index with test-built data.\n"
+            f"{headline}\n"
             f"  index:          {db_path}\n"
             f"  built by:       {stored_model!r}\n"
-            f"  would rebuild with: {incoming_model!r} (a TEST embedder)\n"
+            f"  would write with:   {writer}\n"
             f"\n"
             f"This almost always means a test or throwaway script escaped its sandbox and\n"
             f"resolved to your real index. Check REKOL_INDEX_DIR — it is the HIGHEST\n"
@@ -104,14 +136,55 @@ def _index_holds_data(db_path: Path) -> bool | None:
         except sqlite3.Error:
             return None  # unreadable/corrupt — provenance and content both unknown
 
+        # TRI-STATE, and the reason it has to be (#218). This loop used to
+        # `continue` on any error as "table genuinely absent in this schema
+        # generation" and then fall through to `return False` -- so a DB that
+        # opens, answers `sqlite_master`, and then fails on BOTH content tables
+        # (partial corruption: the page holding `files`/`chunks` is damaged while
+        # the header and schema are intact) reported "empty", i.e. nothing to
+        # destroy. That is the same can't-tell-read-as-nothing-to-lose mistake
+        # the readability probe above was added to fix, one layer further in.
+        #
+        # An absent table and an unreadable table are indistinguishable from the
+        # error alone, so they are distinguished by OUTCOME: if nothing was found
+        # and at least one read failed, the answer is "cannot tell" (None), and
+        # the caller refuses. If nothing was found and every read succeeded, the
+        # index is genuinely empty.
+        # WHICH TABLES EXIST is asked of `sqlite_master` rather than inferred
+        # from the error, because "no such table" and "this page is corrupt"
+        # both arrive as `sqlite3.Error` and the first is ordinary. Keying the
+        # tri-state on the exception type instead made the guard refuse an
+        # EMPTY unstamped index whose schema generation simply has no `chunks`
+        # table — a healthy first build, and the exact cry-wolf failure the
+        # readability probe's comment warns about.
+        # `type IN ('table','view')`, not `='table'`: the question is whether an
+        # object of that NAME is present, because a name that is listed and
+        # cannot be read is the "cannot tell" case, while a name that is not
+        # there at all is an ordinary older schema.
+        try:
+            present = {
+                str(r[0])
+                for r in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+                ).fetchall()
+            }
+        except sqlite3.Error:
+            return None
+
+        a_read_failed = False
         for table in ("chunks", "files"):
+            if table not in present:
+                continue  # genuinely absent in this schema generation
             try:
                 row = connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
             except sqlite3.Error:
-                continue  # table genuinely absent in this schema generation
+                # The table EXISTS and could not be read: partial corruption.
+                # "Cannot tell" is not "empty" (#218).
+                a_read_failed = True
+                continue
             if row is not None:
                 return True
-        return False
+        return None if a_read_failed else False
     finally:
         connection.close()
 
@@ -155,17 +228,32 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
     (a rebuild-and-swap), where the existing index's recorded identity would
     otherwise never be consulted.
 
+    Also called before an INCREMENTAL write (#216), which is why the cheap
+    discriminator below comes first: a write by a known real model returns with
+    no filesystem or database access at all, so guarding every write costs
+    nothing on the ordinary path.
+
     Args:
-        db_path: The index that is about to be replaced.
-        incoming_model: The embedding model the new index will be built with.
+        db_path: The index that is about to be replaced or written.
+        incoming_model: The embedding model the new data will be built with.
+            ``None`` means the writer does not know what it is, which is NOT
+            treated as safe -- see below.
 
     Raises:
         RealIndexClobberError: When ``incoming_model`` is a test embedder and the
             existing index records a real one, unless the override env var is set.
+            Also when ``incoming_model`` is ``None`` and the index records a real
+            model, because a writer that cannot name its own embedder has no
+            business writing into an index whose provenance is stated.
     """
-    if not is_test_embedder(incoming_model):
+    # A KNOWN REAL MODEL IS THE ONLY NO-OP. `None` must not take this exit
+    # (product, 2026-11-08): `is_test_embedder(None)` is False, so the original
+    # `if not is_test_embedder(...)` let every model-less writer straight past
+    # the guard -- which is #216 itself, structurally. The three commands that
+    # bypassed the guard did so by passing no model at all.
+    if incoming_model is not None and not is_test_embedder(incoming_model):
         return
-    if os.environ.get(OVERRIDE_ENV_VAR, "").strip() not in ("", "0", "false", "no"):
+    if override_is_set():
         return
 
     db_path = Path(db_path)
@@ -179,7 +267,23 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
         # Explicitly recorded a REAL model. That is a positive statement of
         # provenance and is refused regardless of how much data it currently
         # holds — an empty real index is still not ours to replace with test data.
-        raise RealIndexClobberError(db_path, stored_model, str(incoming_model))
+        raise RealIndexClobberError(db_path, stored_model, incoming_model)
+
+    # From here the identity is UNKNOWN on BOTH sides, and that is the one
+    # combination this guard does not decide (product's ruling, 2026-11-08: "for
+    # `None` the refusal fires when the stored identity is a real model, and the
+    # enumeration removes unknown-over-unknown"). An anonymous writer over an
+    # index of unproven provenance is the shape that `IndexStore`'s own
+    # enumeration test eliminates at source -- every production construction
+    # names its model -- so refusing here would only break the remaining
+    # legitimate anonymous writer: a test or script writing into the index it
+    # built itself a moment ago, which is most of this repo's own suite.
+    #
+    # A TEST embedder still has to get past the content check below, because
+    # there the stakes are a user's legacy index and the writer is known to be
+    # producing meaningless vectors.
+    if incoming_model is None:
+        return
 
     # From here the identity is UNKNOWN, and the two states that look identical
     # are distinguished only by content.
@@ -202,5 +306,5 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
     # open left the original destructive scenario wide open for exactly the
     # indexes most likely to be old and precious.
     raise RealIndexClobberError(
-        db_path, stored_model or "unknown (no recorded identity)", str(incoming_model)
+        db_path, stored_model or "unknown (no recorded identity)", incoming_model
     )

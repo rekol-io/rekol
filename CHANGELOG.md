@@ -5,6 +5,125 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **A refused write arrived as a Python traceback (QA, 2026-11-11).** `rekol capture` refused
+  correctly on a model switch and then died with about twenty lines of stack, pushing the two
+  remedies below it. The refusal is new — before #216 these commands could not refuse at all — so
+  no command had a handler for it, and the release notes advertise the behaviour, which makes the
+  message part of the feature. Every writer that reaches a guarded write now reports it as
+  `error: …` and exits 1 with no traceback, through **one** shared reporter rather than seven
+  `try`/`except` blocks, so the next writer added cannot forget it. A test asserts each of them
+  uses it, and that the write happens inside it.
+  **`capture` also says what survived.** It writes the memory file before indexing, so a refusal
+  there means "not indexed", not "not saved" — and without saying so, a user reads a refusal and
+  assumes their note is gone. The message now names the path it was written to and that it becomes
+  searchable after either remedy.
+  Measured rather than assumed about the other two: `bootstrap` and `propose` construct a store and
+  read through it (recall, dedupe) without reaching a guarded write, so a handler there would
+  describe a path that does not exist; `index update` keeps its own pre-flight identity check,
+  which predates this.
+- **A read erased the evidence that a legacy index needs rebuilding (QA, 2026-11-11).** Every read
+  path calls `init_schema()` on open so a missing database does not crash the CLI, and
+  `init_schema` created the `metadata` table unconditionally. The **absence** of that table is the
+  last backstop in `needs_schema_migration`: an index carrying `user_version == 0` and the
+  timestamp columns is identified as unknown-provenance by exactly that fact. So a single
+  `rekol search` was enough to make a pre-stamping index look migrated and be "blindly trusted" —
+  the outcome that function's own comment says it exists to prevent. The table is no longer created
+  on an existing index that lacks it; reads do not need it (`get_metadata` returns None by design
+  when it is absent), and a writer that claims provenance creates it itself, as the sessions store
+  already did. Measured: a real-model read now adds no table, leaves the file byte-identical and
+  keeps `needs_schema_migration()` true, while an adopting write still creates the table, stamps,
+  and preserves the user's rows.
+  **My own claim about this was wrong, and the fixture is why.** I reported the read path as
+  byte-identical; it was, for a fixture that deleted the identity ROWS but kept the table. A genuine
+  legacy index has no `metadata` table at all, which is the shape QA measured. The fixture now
+  produces both shapes and the test pins the real one.
+- **The model-switch refusal spells both ways out (product, 2026-11-11).** Refusing a write whose
+  model disagrees with the index's stamp is reachable by a **supported** action — editing
+  `embedding_model` — so ordinary users will read this message. It named the stored and configured
+  models but said only "restore the previous embedding_model", leaving the reader to scroll back up
+  the paragraph for the value. It now prints the two remedies explicitly: `rekol index rebuild` to
+  re-embed with the configured model, or the exact `set embedding_model back to '<model>' in
+  rekol.config.yaml` to keep the index. Measured end to end that the first remedy is not a dead
+  end: a rebuild with one real model over an index stamped with a different real model succeeds and
+  re-stamps, through the real `Indexer.rebuild()` and its swap guard.
+- **The panel found three more defects in the guard work, two of them regressions the fix itself
+  would have introduced (#266, review).**
+  **The cached verdict was unsound under WAL.** Per-write guarding was memoised on the index file's
+  `(st_dev, st_ino, st_size, st_mtime_ns)`, and the connection runs in `journal_mode=WAL` — so a
+  committed write lives in `-wal` and leaves the main file's size and mtime untouched. A reviewer
+  reproduced the consequence: one connection stamps a real identity, the main-file key does not
+  change, and the cached "allowed" answer then lets a test embedder write into a now-real index.
+  Keying on `-wal` as well would have patched that one path; the cache is **gone** instead, which
+  removes the class. Measured rather than assumed: the guard returns before any I/O for a known
+  real model, so only a test or unnamed writer touches the database, and the suite's runtime is
+  unchanged within noise.
+  **A write under a switched model re-stamped instead of refusing.** Making every writer declare
+  its model means the stamp is kept current on every write, so a user who changed
+  `embedding_model` and ran `capture` would have had the old identity quietly overwritten — and
+  their mixed-model index would then pass every later check. Before this release those writers
+  stamped nothing, so the evidence survived and the next `search` failed loudly. The write now
+  refuses when the model disagrees with the stamp, which is where the four commands that do not
+  call the identity check themselves can be stopped.
+  **The flag that meant "this store built this index" let writes through.** It was set even when
+  the content check had just said the index was populated, so on a pre-`files` schema the stamp was
+  correctly withheld and the write was then allowed anyway — the takeover arriving one line later.
+  Once the cache went, nothing read the flag at all, so it is deleted rather than corrected.
+  Also from the panel: the enumeration test accepted `embedding_model=None`, accepted the word in a
+  comment, missed an aliased import, and had a floor loose enough for four constructions to vanish.
+  It now requires a non-`None` value, strips comments, follows aliases, and pins the exact count.
+- **The refusal named the wrong culprit when the writer had no model (#266, review).** Refusing a
+  model-less writer is new, and the error still formatted its subject as `str(incoming_model)` — so
+  it read `would rebuild with: 'None' (a TEST embedder)`, two false statements in one line, the
+  first of which sends the reader hunting for a model named "None". It now says the index would be
+  written by "a writer that did not name its embedding model", under a headline about unknown
+  provenance rather than test-built data. Worth recording that correcting the message alone changed
+  nothing: the caller passed `str(incoming_model)`, so the exception never saw `None`, and only
+  running it showed that.
+- **Four commands could overwrite a real index with test-built data, because the guard was asked
+  in only one place (#216).** `capture`, `confirm`, `invalidate` and `flag-suspect` — and, found by
+  enumerating rather than trusting the issue, `bootstrap` and `propose` — construct the store with
+  **no embedding model** and write through the incremental path, which never consulted the refusal
+  that `index rebuild` has had since #185. With a `test-hashing` home and an inherited
+  `REKOL_INDEX_DIR`, any of them replaced a stamped real index's chunks and exited 0, leaving the
+  real model still named in `metadata`, so the user's own `search` then returned nothing with no
+  error. The existing guard is now asked at **every** write — the files row, the chunks, the
+  combined write, the delete, and the schema reset — each proven to refuse on its own, because
+  covering four of five would leave the same bug behind one door. A write by a known real model
+  returns before any filesystem or database access, so the ordinary path pays one string
+  comparison; and `None` no longer slips through, since a writer that cannot name its own embedder
+  is treated as unknown rather than safe (that was the bypass itself: the four commands bypassed
+  the guard precisely by passing no model).
+- **An unstamped index was reachable through ordinary use, and a leaked run then took ownership of
+  it (#217).** The model-less constructions above produced populated indexes carrying no identity
+  row; on those, the identity check has nothing to disagree with, so a leaked `index update`
+  stamped them `test-hashing` and a later `rebuild` was waved through as "already test-built".
+  **All fourteen** `IndexStore(...)` constructions now declare their model, with a test that
+  enumerates them and **no allowlist** — the three that look like readers (`review`, `search`,
+  doctor's recall probe) all call `init_schema()` so a missing DB does not crash the CLI, which
+  means they create and initialise the file, so "it cannot write" would have been a false reason.
+  Stamping goes through the same judgement as a write: `init_schema` refuses to brand an index that
+  holds chunks but records no identity, so a leaked test-embedder read cannot claim a legacy index.
+  Adoption belongs to a real-model **write**, which a read cannot impersonate.
+- **"Cannot tell" was read as "nothing to lose" one layer further in (#218).** The content probe
+  `continue`d on any error as "this schema generation has no such table" and then returned
+  `False` — so a database that opens, lists its schema, and fails on both content tables
+  (partial corruption: the header intact, the pages damaged) reported **empty**, i.e. safe to
+  replace. Absent and unreadable are now distinguished by asking `sqlite_master` which objects
+  exist, so a failed read of an object that **is** there answers "unknown" and is refused, while a
+  genuinely older schema still passes. Keying this on the exception instead — my first attempt —
+  refused healthy empty indexes and failed fourteen tests, which is the cry-wolf failure this
+  probe's own comment was written about.
+- **The clobber override accepted unlisted spellings as consent (#219).** It tested
+  `not in ("", "0", "false", "no")`, so `False`, `FALSE`, `off`, `Off`, `No` and `disabled` all
+  **switched the guard off** — a user typing `off` got the opposite of what they asked for. It is
+  an allowlist now (`1`, `true`, `yes`, `on`, case-folded and stripped); anything unrecognised
+  leaves the guard on, which is the only direction a safety override may fail in.
+  The per-store memo that keeps this affordable is keyed on the index file's
+  `(st_dev, st_ino, st_size, st_mtime_ns)`, not its path or inode: `rebuild` swaps a new file in
+  with `os.replace`, and an in-place overwrite keeps the inode, so both shapes are covered and
+  tested. Accepted limit, stated in the code: an in-place overwrite that leaves size **and**
+  mtime unchanged within one process is invisible to that key.
 
 ## [0.7.0] - 2026-11-08
 ### Added

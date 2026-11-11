@@ -1612,7 +1612,7 @@ def _check_deep(cfg: Config, embedder: BaseEmbedder) -> list[Finding]:
             )
         )
         return findings
-    store = IndexStore(db_path=db_path, dim=embedder.dim)
+    store = IndexStore(db_path=db_path, dim=embedder.dim, embedding_model=cfg.embedding_model)
     try:
         store.init_schema()
         row = store.conn.execute(
