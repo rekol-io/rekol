@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import click
 
 from rekol.config import Config
@@ -195,3 +198,36 @@ def ensure_curated_schema_current(
         raise SystemExit(1) from None
     # rebuild() reopened `store` onto the freshly-swapped-in DB; the caller can
     # continue querying it directly.
+
+
+@contextmanager
+def index_refusals_reported(also_say: str | None = None) -> Iterator[None]:
+    """Report the index guard's refusals as errors, not as tracebacks.
+
+    EVERY WRITER COMMAND WRAPS ITS WRITE IN THIS. The refusals are deliberate
+    and their messages already name the remedy, but a refusal that arrives as
+    twenty lines of Python traceback reads as a crash, and the remedy ends up
+    below the stack — which is how QA found it coming out of `rekol capture`
+    (2026-11-11). `search` and `index rebuild` had each grown their own handler;
+    the rest of the writers had none, because until #216 they could not refuse.
+
+    One helper rather than seven `try`/`except` blocks, for the same reason the
+    guard itself is at one chokepoint: the next writer added cannot forget a
+    thing it does not have to remember. `test_cli_refusals.py` asserts every
+    writer module uses it.
+
+    Args:
+        also_say: An extra line printed after the refusal — used by `capture`
+            to say that the memory file WAS written and only the indexing was
+            refused, since otherwise "refused" reads as "lost".
+
+    Raises:
+        SystemExit: Always, with code 1, when a refusal is caught.
+    """
+    try:
+        yield
+    except (IndexModelMismatchError, RealIndexClobberError) as exc:
+        click.echo(f"error: {exc}", err=True)
+        if also_say:
+            click.echo(also_say, err=True)
+        raise SystemExit(1) from exc

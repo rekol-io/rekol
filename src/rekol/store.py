@@ -366,6 +366,14 @@ class IndexStore:
     def _set_metadata_no_commit(self, key: str, value: str) -> None:
         """Upsert a single ``metadata`` row WITHOUT committing.
 
+        CALLERS MUST ENSURE THE TABLE EXISTS. This issues a bare ``INSERT INTO
+        metadata`` with no guard of its own, and since `init_schema` stopped
+        creating that table on an existing index that lacks it (its absence is
+        the migration backstop), "the table is there" is no longer something a
+        caller can assume. The two callers both satisfy it: `init_schema`'s
+        `schema_version` write runs only in the branch that just created the
+        schema, and `stamp_identity_no_commit` creates the table first.
+
         Deferred commit so identity stamping can ride along with the surrounding
         write transaction (e.g. ``replace_file_and_chunks``) instead of forcing an
         extra fsync per file.

@@ -15,7 +15,7 @@ import yaml
 
 from rekol.atomic_write import AtomicWriteError, write_text_atomically
 from rekol.chunker import chunk_body
-from rekol.cli_common import guard_curated_schema, warn_skipped_files
+from rekol.cli_common import guard_curated_schema, index_refusals_reported, warn_skipped_files
 from rekol.config import load_config
 from rekol.embeddings import get_embedder
 from rekol.indexer import Indexer
@@ -222,7 +222,14 @@ def main(
         chunk_max_bytes=cfg.chunk_max_bytes,
         index_dir=cfg.index_dir,
     )
-    stats = idx.update()
+    # THE FILE IS ALREADY ON DISK at this point (written above), so a refusal
+    # here means "not indexed", not "not saved". Saying so matters: without it
+    # the user reads a refusal and assumes their memory is gone.
+    with index_refusals_reported(
+        f"Your memory was saved to {dest} but not indexed; "
+        "it becomes searchable after either way out above."
+    ):
+        stats = idx.update()
     warn_skipped_files(stats)
     click.echo(f"indexed ({stats.files_indexed} updated)")
 

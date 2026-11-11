@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 ### Fixed
+- **A refused write arrived as a Python traceback (QA, 2026-11-11).** `rekol capture` refused
+  correctly on a model switch and then died with about twenty lines of stack, pushing the two
+  remedies below it. The refusal is new — before #216 these commands could not refuse at all — so
+  no command had a handler for it, and the release notes advertise the behaviour, which makes the
+  message part of the feature. Every writer that reaches a guarded write now reports it as
+  `error: …` and exits 1 with no traceback, through **one** shared reporter rather than seven
+  `try`/`except` blocks, so the next writer added cannot forget it. A test asserts each of them
+  uses it, and that the write happens inside it.
+  **`capture` also says what survived.** It writes the memory file before indexing, so a refusal
+  there means "not indexed", not "not saved" — and without saying so, a user reads a refusal and
+  assumes their note is gone. The message now names the path it was written to and that it becomes
+  searchable after either remedy.
+  Measured rather than assumed about the other two: `bootstrap` and `propose` construct a store and
+  read through it (recall, dedupe) without reaching a guarded write, so a handler there would
+  describe a path that does not exist; `index update` keeps its own pre-flight identity check,
+  which predates this.
 - **A read erased the evidence that a legacy index needs rebuilding (QA, 2026-11-11).** Every read
   path calls `init_schema()` on open so a missing database does not crash the CLI, and
   `init_schema` created the `metadata` table unconditionally. The **absence** of that table is the
