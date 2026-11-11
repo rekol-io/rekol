@@ -103,7 +103,9 @@ def _propose_from_notes(cfg, input_file: str | None, quiet: bool) -> None:
         return
 
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     guard_curated_schema(store)
     try:
@@ -168,7 +170,9 @@ def _propose_from_corpus(cfg, quiet: bool) -> None:
     memory_store: IndexStore | None = None
     session_store: SessionStore | None = None
     try:
-        memory_store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+        memory_store = IndexStore(
+            db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+        )
         memory_store.init_schema()
         guard_curated_schema(memory_store)
         session_store = SessionStore(db_path=cfg.sessions_db_path, dim=embedder.dim)

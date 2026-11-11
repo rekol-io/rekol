@@ -160,7 +160,9 @@ def _invalidate_memory_file(
     # Reindex so the new frontmatter is picked up. The body changed if a reason
     # was supplied, so the indexer would re-embed anyway.
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     guard_curated_schema(store)
     idx = Indexer(

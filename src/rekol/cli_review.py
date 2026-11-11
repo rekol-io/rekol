@@ -25,7 +25,9 @@ def _overdue(cfg: Config) -> list[dict]:
     Raises :class:`CuratedSchemaOutdatedError` when the index predates the
     timestamp columns — the caller decides whether to instruct or soft-fail.
     """
-    store = IndexStore(db_path=cfg.index_db_path, use_sqlite_vec=False)
+    store = IndexStore(
+        db_path=cfg.index_db_path, use_sqlite_vec=False, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     try:
         if store.needs_schema_migration():

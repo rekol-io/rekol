@@ -5,6 +5,51 @@ All notable changes to this project are documented here. Format follows
 follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- **Four commands could overwrite a real index with test-built data, because the guard was asked
+  in only one place (#216).** `capture`, `confirm`, `invalidate` and `flag-suspect` — and, found by
+  enumerating rather than trusting the issue, `bootstrap` and `propose` — construct the store with
+  **no embedding model** and write through the incremental path, which never consulted the refusal
+  that `index rebuild` has had since #185. With a `test-hashing` home and an inherited
+  `REKOL_INDEX_DIR`, any of them replaced a stamped real index's chunks and exited 0, leaving the
+  real model still named in `metadata`, so the user's own `search` then returned nothing with no
+  error. The existing guard is now asked at **every** write — the files row, the chunks, the
+  combined write, the delete, and the schema reset — each proven to refuse on its own, because
+  covering four of five would leave the same bug behind one door. A write by a known real model
+  returns before any filesystem or database access, so the ordinary path pays one string
+  comparison; and `None` no longer slips through, since a writer that cannot name its own embedder
+  is treated as unknown rather than safe (that was the bypass itself: the four commands bypassed
+  the guard precisely by passing no model).
+- **An unstamped index was reachable through ordinary use, and a leaked run then took ownership of
+  it (#217).** The model-less constructions above produced populated indexes carrying no identity
+  row; on those, the identity check has nothing to disagree with, so a leaked `index update`
+  stamped them `test-hashing` and a later `rebuild` was waved through as "already test-built".
+  **All fourteen** `IndexStore(...)` constructions now declare their model, with a test that
+  enumerates them and **no allowlist** — the three that look like readers (`review`, `search`,
+  doctor's recall probe) all call `init_schema()` so a missing DB does not crash the CLI, which
+  means they create and initialise the file, so "it cannot write" would have been a false reason.
+  Stamping goes through the same judgement as a write: `init_schema` refuses to brand an index that
+  holds chunks but records no identity, so a leaked test-embedder read cannot claim a legacy index.
+  Adoption belongs to a real-model **write**, which a read cannot impersonate.
+- **"Cannot tell" was read as "nothing to lose" one layer further in (#218).** The content probe
+  `continue`d on any error as "this schema generation has no such table" and then returned
+  `False` — so a database that opens, lists its schema, and fails on both content tables
+  (partial corruption: the header intact, the pages damaged) reported **empty**, i.e. safe to
+  replace. Absent and unreadable are now distinguished by asking `sqlite_master` which objects
+  exist, so a failed read of an object that **is** there answers "unknown" and is refused, while a
+  genuinely older schema still passes. Keying this on the exception instead — my first attempt —
+  refused healthy empty indexes and failed fourteen tests, which is the cry-wolf failure this
+  probe's own comment was written about.
+- **The clobber override accepted unlisted spellings as consent (#219).** It tested
+  `not in ("", "0", "false", "no")`, so `False`, `FALSE`, `off`, `Off`, `No` and `disabled` all
+  **switched the guard off** — a user typing `off` got the opposite of what they asked for. It is
+  an allowlist now (`1`, `true`, `yes`, `on`, case-folded and stripped); anything unrecognised
+  leaves the guard on, which is the only direction a safety override may fail in.
+  The per-store memo that keeps this affordable is keyed on the index file's
+  `(st_dev, st_ino, st_size, st_mtime_ns)`, not its path or inode: `rebuild` swaps a new file in
+  with `os.replace`, and an in-place overwrite keeps the inode, so both shapes are covered and
+  tested. Accepted limit, stated in the code: an in-place overwrite that leaves size **and**
+  mtime unchanged within one process is invisible to that key.
 
 ## [0.7.0] - 2026-11-08
 ### Added

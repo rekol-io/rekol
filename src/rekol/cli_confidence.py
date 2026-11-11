@@ -49,7 +49,9 @@ def _resolve_under_memory_home(cfg: Config, target: Path) -> Path:
 def _reindex_curated(cfg: Config) -> None:
     """Reindex curated memory so the new frontmatter is picked up by search/doctor."""
     embedder = get_embedder(cfg.embedding_model)
-    store = IndexStore(db_path=cfg.index_db_path, dim=embedder.dim)
+    store = IndexStore(
+        db_path=cfg.index_db_path, dim=embedder.dim, embedding_model=cfg.embedding_model
+    )
     store.init_schema()
     guard_curated_schema(store)
     idx = Indexer(

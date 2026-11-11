@@ -48,6 +48,22 @@ TEST_EMBEDDER_NAMES = frozenset({"test-hashing"})
 # shell history.
 OVERRIDE_ENV_VAR = "REKOL_ALLOW_TEST_EMBEDDER_TO_OVERWRITE_REAL_INDEX"
 
+# THE ONLY SPELLINGS THAT MEAN CONSENT (#219). This used to be a deny-list --
+# anything not in `("", "0", "false", "no")` was read as "yes" -- so `False`,
+# `FALSE`, `off`, `Off`, `No` and `disabled` all SWITCHED THE GUARD OFF. A user
+# writing `off` got the opposite of what they asked for, which is the worst
+# possible direction for a safety override to be wrong in.
+#
+# An allowlist cannot fail that way: an unrecognised value leaves the guard ON.
+# Compared case-folded and stripped, so `TRUE` and ` 1 ` work, and anything else
+# -- including a typo -- is refused rather than guessed at.
+OVERRIDE_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def override_is_set() -> bool:
+    """True only when the override env var holds one of the consent spellings."""
+    return os.environ.get(OVERRIDE_ENV_VAR, "").strip().lower() in OVERRIDE_TRUE_VALUES
+
 
 class RealIndexClobberError(RuntimeError):
     """Raised when test-built data would replace an index a real model produced."""
@@ -104,14 +120,55 @@ def _index_holds_data(db_path: Path) -> bool | None:
         except sqlite3.Error:
             return None  # unreadable/corrupt — provenance and content both unknown
 
+        # TRI-STATE, and the reason it has to be (#218). This loop used to
+        # `continue` on any error as "table genuinely absent in this schema
+        # generation" and then fall through to `return False` -- so a DB that
+        # opens, answers `sqlite_master`, and then fails on BOTH content tables
+        # (partial corruption: the page holding `files`/`chunks` is damaged while
+        # the header and schema are intact) reported "empty", i.e. nothing to
+        # destroy. That is the same can't-tell-read-as-nothing-to-lose mistake
+        # the readability probe above was added to fix, one layer further in.
+        #
+        # An absent table and an unreadable table are indistinguishable from the
+        # error alone, so they are distinguished by OUTCOME: if nothing was found
+        # and at least one read failed, the answer is "cannot tell" (None), and
+        # the caller refuses. If nothing was found and every read succeeded, the
+        # index is genuinely empty.
+        # WHICH TABLES EXIST is asked of `sqlite_master` rather than inferred
+        # from the error, because "no such table" and "this page is corrupt"
+        # both arrive as `sqlite3.Error` and the first is ordinary. Keying the
+        # tri-state on the exception type instead made the guard refuse an
+        # EMPTY unstamped index whose schema generation simply has no `chunks`
+        # table — a healthy first build, and the exact cry-wolf failure the
+        # readability probe's comment warns about.
+        # `type IN ('table','view')`, not `='table'`: the question is whether an
+        # object of that NAME is present, because a name that is listed and
+        # cannot be read is the "cannot tell" case, while a name that is not
+        # there at all is an ordinary older schema.
+        try:
+            present = {
+                str(r[0])
+                for r in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+                ).fetchall()
+            }
+        except sqlite3.Error:
+            return None
+
+        a_read_failed = False
         for table in ("chunks", "files"):
+            if table not in present:
+                continue  # genuinely absent in this schema generation
             try:
                 row = connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
             except sqlite3.Error:
-                continue  # table genuinely absent in this schema generation
+                # The table EXISTS and could not be read: partial corruption.
+                # "Cannot tell" is not "empty" (#218).
+                a_read_failed = True
+                continue
             if row is not None:
                 return True
-        return False
+        return None if a_read_failed else False
     finally:
         connection.close()
 
@@ -155,17 +212,32 @@ def assert_not_clobbering_real_index(db_path: Path, incoming_model: str | None) 
     (a rebuild-and-swap), where the existing index's recorded identity would
     otherwise never be consulted.
 
+    Also called before an INCREMENTAL write (#216), which is why the cheap
+    discriminator below comes first: a write by a known real model returns with
+    no filesystem or database access at all, so guarding every write costs
+    nothing on the ordinary path.
+
     Args:
-        db_path: The index that is about to be replaced.
-        incoming_model: The embedding model the new index will be built with.
+        db_path: The index that is about to be replaced or written.
+        incoming_model: The embedding model the new data will be built with.
+            ``None`` means the writer does not know what it is, which is NOT
+            treated as safe -- see below.
 
     Raises:
         RealIndexClobberError: When ``incoming_model`` is a test embedder and the
             existing index records a real one, unless the override env var is set.
+            Also when ``incoming_model`` is ``None`` and the index records a real
+            model, because a writer that cannot name its own embedder has no
+            business writing into an index whose provenance is stated.
     """
-    if not is_test_embedder(incoming_model):
+    # A KNOWN REAL MODEL IS THE ONLY NO-OP. `None` must not take this exit
+    # (product, 2026-11-08): `is_test_embedder(None)` is False, so the original
+    # `if not is_test_embedder(...)` let every model-less writer straight past
+    # the guard -- which is #216 itself, structurally. The three commands that
+    # bypassed the guard did so by passing no model at all.
+    if incoming_model is not None and not is_test_embedder(incoming_model):
         return
-    if os.environ.get(OVERRIDE_ENV_VAR, "").strip() not in ("", "0", "false", "no"):
+    if override_is_set():
         return
 
     db_path = Path(db_path)

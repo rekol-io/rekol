@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from rekol.safety import assert_not_clobbering_real_index
+
 # 1 = original schema
 # 2 = with curated timestamp columns (created/updated/valid_from/invalidated_at)
 # 3 = with the `metadata` identity table (embedding_model/embedding_dim/schema_version).
@@ -143,6 +145,16 @@ class IndexStore:
         # NOT load a vec extension today — search is a full numpy scan. Kept as an
         # attribute so indexer.rebuild can pass the same value to its temp store.
         self.use_sqlite_vec = use_sqlite_vec
+        # Set by `init_schema` when it CREATED the schema in this process: such a
+        # DB is provably this store's own, so a write into it cannot be the
+        # clobber the guard exists to refuse. Without this the guard would refuse
+        # an ordinary second write into an index the same process had just built
+        # and not yet stamped, which is most of the test suite and every first
+        # build on a machine whose config names a test embedder.
+        self._created_fresh = False
+        # Memo for the write guard, keyed on the DB file's identity -- see
+        # `_assert_write_allowed`.
+        self._write_guard_key: tuple[int, int, int, int] | None = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         try:
@@ -206,8 +218,81 @@ class IndexStore:
             self.conn.execute(f"PRAGMA user_version = {CURATED_SCHEMA_VERSION}")
             self._set_metadata_no_commit("schema_version", str(CURATED_SCHEMA_VERSION))
             if self.embedding_model is not None and self.get_metadata("embedding_model") is None:
-                self.stamp_identity_no_commit(self.embedding_model, self.dim)
+                # A STAMP IS A CLAIM OF PROVENANCE, so it goes through the same
+                # refusal as a write (product, 2026-11-08). Now that every
+                # caller passes its model -- including the read paths, which
+                # create and initialise the DB on first run -- a leaked
+                # test-embedder `search` over a POPULATED, UNSTAMPED legacy index
+                # could stamp it "test-built", after which the guard reads that
+                # stamp as "already a sandbox index" and waves every later test
+                # write through. That is #217's takeover arriving through a read.
+                #
+                # `is_fresh` already prevents it for the ordinary legacy shape,
+                # because an index with a `files` table is not fresh. It does NOT
+                # prevent the pre-`files` schema generation, where a populated
+                # index looks fresh to the line above -- which is the case this
+                # check exists for.
+                if not self._holds_content_without_identity():
+                    self.stamp_identity_no_commit(self.embedding_model, self.dim)
+            self._created_fresh = True
         self.conn.commit()
+
+    def _assert_write_allowed(self) -> None:
+        """Refuse a write that would put test-built data into someone's real index.
+
+        THE INVARIANT LIVES WHERE THE DESTRUCTION HAPPENS (#216). The same check
+        was already called before the rebuild-and-swap, and only there, so four
+        commands reached a destructive write through a different door and were
+        never inspected -- `capture`, `confirm`, `invalidate` and `flag-suspect`,
+        plus `bootstrap` and `propose`, which the issue did not name. Calling it
+        per write rather than per caller means the next writer added cannot miss
+        it, which is the whole argument for a chokepoint.
+
+        COST: `assert_not_clobbering_real_index` returns before any filesystem or
+        database access when the incoming model is a known real one, so an
+        ordinary write pays one string comparison. Only a test embedder, or a
+        writer with no model at all, reaches the stat and the identity read.
+
+        THE MEMO is keyed on the DB file's ``(st_dev, st_ino, st_size,
+        st_mtime_ns)``. Path alone is not enough: `rebuild` swaps a new file into
+        place with `os.replace`, so a long-lived store could otherwise keep
+        passing on a cached answer about a file that has been replaced
+        underneath it (QA's T12). Inode alone is not enough either, because an
+        in-place overwrite keeps it.
+
+        ACCEPTED LIMIT, stated rather than hidden: an in-place overwrite that
+        leaves size AND mtime_ns both unchanged is invisible to this key, and the
+        cached answer stands. That is the same class of limit as the archive
+        digest's in #234 -- it needs a write that preserves every attribute the
+        check reads, within one process's lifetime, which no ordinary path does.
+        """
+        if self._created_fresh:
+            return
+        try:
+            info = self.db_path.stat()
+        except OSError:
+            key: tuple[int, int, int, int] | None = None
+        else:
+            key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if key is not None and key == self._write_guard_key:
+            return
+        assert_not_clobbering_real_index(self.db_path, self.embedding_model)
+        self._write_guard_key = key
+
+    def _holds_content_without_identity(self) -> bool:
+        """True when this DB already holds chunks but records no embedding model.
+
+        The precious state: an index written before identity stamping existed.
+        Read through this connection (the schema has just been created, so the
+        tables are guaranteed to exist) rather than by reopening the file.
+        """
+        if self.get_metadata("embedding_model") is not None:
+            return False
+        try:
+            row = self.conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return True  # cannot tell: treat as precious rather than as empty
+        return row is not None
 
     def list_tables(self) -> list[str]:
         """Return the names of all tables in the database."""
@@ -247,6 +332,7 @@ class IndexStore:
 
     def reset_schema(self) -> None:
         """Drop and recreate the curated tables so a rebuild picks up schema changes."""
+        self._assert_write_allowed()
         self.conn.executescript(
             "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files; "
             "DROP TABLE IF EXISTS metadata;"
@@ -360,6 +446,7 @@ class IndexStore:
         goes through ``replace_file_and_chunks`` so the hash and chunks commit
         together. Kept for callers (and tests) that write a files row directly.
         """
+        self._assert_write_allowed()
         self._upsert_file_no_commit(path, mtime, content_hash, name=name)
         self.conn.commit()
 
@@ -413,6 +500,10 @@ class IndexStore:
 
     def delete_file(self, path: str) -> None:
         """Delete a file row; its chunks are removed via ON DELETE CASCADE."""
+        # Guarded like any other write: the 2026-08-18 shape removes a real
+        # user's files as readily as it overwrites their chunks, because an
+        # incremental run deletes every indexed path the sandbox cannot see.
+        self._assert_write_allowed()
         # ON DELETE CASCADE (enforced via PRAGMA foreign_keys=ON) removes associated chunks
         self.conn.execute("DELETE FROM files WHERE path=?", (path,))
         self.conn.commit()
@@ -487,6 +578,7 @@ class IndexStore:
         the files-row hash. Kept for callers (and tests) that already hold a
         files row and only want to (re)write its chunks.
         """
+        self._assert_write_allowed()
         self._replace_chunks_no_commit(
             file_path,
             chunks,
@@ -533,6 +625,7 @@ class IndexStore:
         Mirrors ``sessions/ingest.py::ingest_file``, which already records the
         file-seen marker only after the messages+embeddings commit.
         """
+        self._assert_write_allowed()
         with self.conn:
             self._upsert_file_no_commit(path, mtime, content_hash, name=name)
             self._replace_chunks_no_commit(
